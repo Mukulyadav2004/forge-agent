@@ -1,0 +1,111 @@
+{
+  "name": "forge-agent",
+  "displayName": "Forge Agent",
+  "description": "A development scaffold for a TrueForge-powered coding extension.",
+  "version": "0.0.1",
+  "publisher": "mukulkumar",
+  "private": true,
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@11.16.0",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "forgeAgent",
+          "title": "Forge Agent",
+          "icon": "media/forge.svg"
+        }
+      ]
+    },
+    "views": {
+      "forgeAgent": [
+        {
+          "type": "webview",
+          "id": "forgeAgent.chat",
+          "name": "Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "forgeAgent.open",
+        "title": "Open Agent",
+        "category": "Forge"
+      },
+      {
+        "command": "forgeAgent.copyMcp",
+        "title": "Copy Editor MCP Connection",
+        "category": "Forge"
+      },
+      {
+        "command": "forgeAgent.newTask",
+        "title": "New Task",
+        "category": "Forge"
+      },
+      {
+        "command": "forgeAgent.editSelection",
+        "title": "Edit Selection",
+        "category": "Forge"
+      }
+    ],
+    "configuration": {
+      "title": "Forge Agent",
+      "properties": {
+        "forgeAgent.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8790",
+          "description": "Local TrueForge server URL."
+        },
+        "forgeAgent.model": {
+          "type": "string",
+          "default": "",
+          "description": "Exact model name configured in TrueForge."
+        },
+        "forgeAgent.connector": {
+          "type": "string",
+          "default": "forge-editor",
+          "description": "Configured TrueForge MCP connector name."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "forgeAgent.editSelection",
+        "key": "ctrl+alt+f",
+        "mac": "cmd+alt+f",
+        "when": "editorHasSelection"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "pnpm run check && node scripts/build.mjs && tsc --project tsconfig.webview.json",
+    "watch": "pnpm run compile && node scripts/watch.mjs",
+    "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.webview.json --noEmit",
+    "dev": "pnpm run compile && node scripts/dev.mjs",
+    "test:smoke": "pnpm run compile && tsc --project tsconfig.test.json && node scripts/smoke.mjs",
+    "test:integration": "pnpm run compile && node --test test/integration.mjs",
+    "test": "pnpm run check && pnpm run test:integration && pnpm run test:smoke"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/vscode": "1.100.0",
+    "esbuild": "0.28.2",
+    "playwright-core": "1.64.1",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@truefoundry/trueforge-sdk": "0.183.0",
+    "zod": "4.6.7"
+  }
+}

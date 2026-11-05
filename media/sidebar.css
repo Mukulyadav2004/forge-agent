@@ -1,0 +1,128 @@
+html {
+  height: 100%;
+}
+
+body {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  height: 100%;
+  margin: 0;
+  padding: 1rem;
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background);
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 0.8125rem);
+  line-height: 1.5;
+}
+
+h1, h2, p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.description, .hint, .empty-state {
+  color: var(--vscode-descriptionForeground);
+}
+
+.description {
+  margin-top: 0.25rem;
+}
+
+.badge {
+  display: inline-block;
+  margin-top: 0.75rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  color: var(--vscode-badge-foreground);
+  background: var(--vscode-badge-background);
+  font-size: 0.75rem;
+}
+
+#messages {
+  flex: 1;
+  min-height: 6rem;
+  overflow-y: auto;
+}
+
+.message {
+  padding: 0.75rem 0;
+  border-bottom: 0.0625rem solid var(--vscode-panel-border);
+}
+
+.message h2 {
+  margin-bottom: 0.375rem;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.message p {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 5rem;
+  max-height: 12rem;
+  padding: 0.625rem;
+  resize: vertical;
+  border: 0.0625rem solid var(--vscode-input-border, transparent);
+  border-radius: 0.25rem;
+  color: var(--vscode-input-foreground);
+  background: var(--vscode-input-background);
+  font: inherit;
+}
+
+textarea::placeholder {
+  color: var(--vscode-input-placeholderForeground);
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.hint {
+  font-size: 0.75rem;
+}
+
+button {
+  padding: 0.5rem 0.875rem;
+  border: 0.0625rem solid transparent;
+  border-radius: 0.25rem;
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover:enabled {
+  background: var(--vscode-button-hoverBackground);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button:focus-visible, textarea:focus-visible {
+  outline: 0.125rem solid var(--vscode-focusBorder);
+  outline-offset: 0.125rem;
+}

@@ -1,0 +1,10 @@
+node_modules/
+out/
+out-test/
+out-webview/
+*.tsbuildinfo
+*.vsix
+.DS_Store
+.env
+.env.*
+!.env.example
