@@ -14,6 +14,10 @@ const profilePath = mkdtempSync(join(tmpdir(), "forge-agent-smoke-"));
 const workspacePath = join(profilePath, "workspace");
 mkdirSync(workspacePath);
 writeFileSync(join(workspacePath, "example.txt"), "original text\n");
+mkdirSync(join(workspacePath, 'src'));
+writeFileSync(join(workspacePath, 'main.py'), 'from src.service import Service\n\nservice = Service()\n');
+writeFileSync(join(workspacePath, 'src', 'service.py'), 'from .store import Store\n\nclass Service:\n    def run(self):\n        return Store().read()\n');
+writeFileSync(join(workspacePath, 'src', 'store.py'), 'class Store:\n    def read(self):\n        return []\n');
 let passed = false;
 const portServer = createServer();
 portServer.listen({ host: "127.0.0.1", port: 0 });
@@ -29,6 +33,8 @@ await new Promise((resolve, reject) => {
 
 try {
   const mcpResultPath = join(extensionPath, "out-test", "mcp-result.json");
+  const liveResultPath = join(extensionPath, "out-test", "live-editor-result.json");
+  rmSync(liveResultPath, { force: true });
   rmSync(mcpResultPath, { force: true });
   rmSync(resultPath, { force: true });
   rmSync(errorPath, { force: true });
@@ -50,7 +56,7 @@ try {
     {
       stdio: "inherit",
       timeout: 60_000,
-      env: { ...process.env, FORGE_SMOKE_CDP_PORT: String(debugPort) },
+      env: { ...process.env, FORGE_SMOKE_CDP_PORT: String(debugPort), FORGE_SMOKE_LIVE_REGISTRY: process.argv.includes("--live-server") ? "true" : "false" },
     }
   );
 
@@ -81,6 +87,7 @@ try {
   }
 
   if (!existsSync(mcpResultPath)) throw new Error("MCP smoke checks did not complete.");
+  if (process.argv.includes("--live-server") && !existsSync(liveResultPath)) throw new Error("Live TrueForge editor discovery did not complete.");
   console.log(`Smoke check passed: ${report.extension_id} opens the sidebar, exchanges messages, and restores drafts.`);
   passed = true;
 } finally {

@@ -1,9 +1,10 @@
-import { ForgeSession } from "../agent/ForgeSession";
+import { ForgeSession, listModelNames } from "../agent/ForgeSession";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { isWebviewMessage } from "../shared/messages";
-import type { ChatMessage, HostMessage } from "../shared/messages";
+import type { ChatMessage, FileEvidence, HostMessage } from "../shared/messages";
+import { isArchitectureRequest } from '../context/projectContext';
 
 export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = "forgeAgent.chat";
@@ -12,12 +13,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private busy = false;
   private status = "Set forgeAgent.model in Settings to connect to local TrueForge.";
   private approvals: TrueForgeApi.UserToolApprovalInputEvent[] = [];
-  private assistant: ChatMessage | undefined;
   private readonly messages: ChatMessage[] = [];
+  private readonly inspectedFiles: FileEvidence[] = [];
   private view: vscode.WebviewView | undefined;
   private viewDisposables: vscode.Disposable[] = [];
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly actions: {
+      getEditorManifest: (namePrefix: string) => Promise<TrueForgeApi.RemoteMcpServerManifest>;
+      openFile: (options: { path: string; line: number }) => Promise<void>;
+      architectureContext: () => Promise<string>;
+    },
+  ) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.disposeView();
@@ -37,7 +45,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
           return;
         }
 
-        if (value.type === "send_message" && !this.busy && !this.approvals.length) {
+        if (value.type === "copy_mcp_connection") {
+          void vscode.commands.executeCommand("forgeAgent.copyMcp");
+        } else if (value.type === "select_model") {
+          void this.selectModel();
+        } else if (value.type === "open_file") {
+          void this.actions.openFile(value).catch((error: unknown) => vscode.window.showErrorMessage(error instanceof Error ? error.message : "Could not open source file."));
+        } else if (value.type === "send_message" && !this.busy && !this.approvals.length) {
           const text = value.text.trim();
           if (text) { this.messages.push({ id: randomUUID(), role: "user", text }); void this.run([{ type: "user.message", content: text }]); }
         } else if (value.type === "cancel") {
@@ -80,10 +94,38 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
   }
   newTask(): void {
     if (this.busy) { void vscode.window.showInformationMessage("Cancel the running turn before starting a new task."); return; }
-    this.session = undefined; this.approvals = []; this.messages.length = 0; this.status = "New task ready"; this.publish();
+    this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.status = "New task ready"; this.publish();
+  }
+  recordInspection(file: FileEvidence): void {
+    if (!this.inspectedFiles.some(existing => existing.path === file.path && existing.startLine === file.startLine && existing.endLine === file.endLine && existing.origin === file.origin)) this.inspectedFiles.push(file);
+    this.publish();
+  }
+  async selectModel(): Promise<void> {
+    if (this.busy || this.approvals.length) {
+      void vscode.window.showInformationMessage("Finish or cancel the current task before selecting a model.");
+      return;
+    }
+    try {
+      const config = vscode.workspace.getConfiguration("forgeAgent");
+      const names = await listModelNames({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790") });
+      if (!names.length) throw new Error("Add a model in local TrueForge first, then select it here.");
+      const name = await vscode.window.showQuickPick(names, { title: "Select a TrueForge model", placeHolder: "Models configured in your local TrueForge server" });
+      if (!name) return;
+      const setting = config.inspect<string>("model");
+      const target = setting?.workspaceFolderValue !== undefined ? vscode.ConfigurationTarget.WorkspaceFolder
+        : setting?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
+      await config.update("model", name, target);
+      this.newTask();
+      this.status = `Model: ${name}`;
+      this.publish();
+    } catch (error: unknown) {
+      this.status = error instanceof Error ? error.message : "Could not load TrueForge models.";
+      this.publish();
+      void vscode.window.showErrorMessage(this.status);
+    }
   }
   private publish(): void {
-    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0 };
+    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles };
     void this.view?.webview.postMessage(response);
   }
   private async cancel(): Promise<void> {
@@ -93,28 +135,42 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
     this.publish();
   }
   private async run(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input']): Promise<void> {
-    this.busy = true; this.assistant = undefined; this.status = "Connecting to TrueForge…"; this.publish();
+    this.busy = true; this.status = "Connecting to TrueForge…"; this.publish();
     try {
+      const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
+      for (const event of input ?? []) {
+        if (event.type === 'user.message' && typeof event.content === 'string' && isArchitectureRequest(event.content)) {
+          const context = await this.actions.architectureContext();
+          preparedInput.push({ ...event, content: context ? `${event.content}\n\n${context}` : event.content });
+        } else preparedInput.push(event);
+      }
       if (!this.session) {
         const config = vscode.workspace.getConfiguration("forgeAgent");
         const model = config.get<string>("model", "").trim();
         if (!model) throw new Error("Model not configured. Set forgeAgent.model after adding a model in local TrueForge.");
-        this.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector: config.get<string>("connector", "forge-editor"), onEvent: event => this.event(event) });
+        const connector = config.get<string>("connector", "forge-editor");
+        const editorManifest = connector ? await this.actions.getEditorManifest(connector) : undefined;
+        this.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, onEvent: event => this.event(event) });
       }
-      await this.session.send(input);
+      await this.session.send(preparedInput);
     } catch (error: unknown) {
+      // A failed create must not retain settings that the user has corrected.
+      if (!this.session?.id) this.session = undefined;
       this.status = error instanceof Error ? error.message : "TrueForge request failed.";
       this.messages.push({ id: randomUUID(), role: "assistant", text: this.status });
     } finally { this.busy = false; this.publish(); }
   }
   private event(event: TrueForgeApi.TurnStreamingEvent): void {
     this.status = `Session ${this.session?.id ?? "starting"} · ${event.type}`;
-    if (event.type === "model.message" && event.threadId === "main" && typeof event.content === "string" && !this.assistant) {
-      this.assistant = { id: randomUUID(), role: "assistant", text: event.content }; this.messages.push(this.assistant);
+    if (event.type === "model.message" && event.threadId === "main" && typeof event.content === "string" && event.content) {
+      const existing = this.messages.find(message => message.id === event.id && message.role === "assistant");
+      if (existing) existing.text = event.content;
+      else this.messages.push({ id: event.id, role: "assistant", text: event.content });
     }
     if (event.type === "model.message.delta" && event.threadId === "main" && event.content) {
-      if (!this.assistant) { this.assistant = { id: randomUUID(), role: "assistant", text: "" }; this.messages.push(this.assistant); }
-      this.assistant.text += event.content;
+      const existing = this.messages.find(message => message.id === event.id && message.role === "assistant");
+      if (existing) existing.text += event.content;
+      else this.messages.push({ id: event.id, role: "assistant", text: event.content });
     }
     if (event.type === "tool.approval_required") {
       this.approvals = event.toolCalls.map(tool => ({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } }));
@@ -144,7 +200,7 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src ${webview.cspSource} 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'nonce-${nonce}';">
   <link rel="stylesheet" href="${styleUri}">
   <title>Forge Agent</title>
 </head>
@@ -152,9 +208,12 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
   <header>
     <h1>Forge Agent</h1>
     <p class="description">Your editor, connected to local TrueForge.</p>
+    <button id="copy-mcp-button" type="button">Copy MCP connection</button>
+    <button id="select-model-button" type="button">Select model</button>
     <span class="badge" id="status" role="status">Ready</span>
     <div><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve preview</button> <button id="deny-button" type="button" hidden>Deny</button></div>
   </header>
+  <details id="file-evidence" hidden><summary>Files inspected</summary><ul id="file-evidence-list"></ul></details>
   <div id="messages" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
     <p class="empty-state">Your messages will appear here.</p>
   </div>

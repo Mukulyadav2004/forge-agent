@@ -55,17 +55,36 @@ h1 {
   border-bottom: 0.0625rem solid var(--vscode-panel-border);
 }
 
-.message h2 {
+.message > .message-author {
   margin-bottom: 0.375rem;
   color: var(--vscode-descriptionForeground);
   font-size: 0.75rem;
   font-weight: 600;
 }
 
-.message p {
+.user-text {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+
+.markdown-body { overflow-wrap: anywhere; }
+.markdown-body > * + * { margin-top: 0.75rem; }
+.markdown-body h1, .markdown-body h2, .markdown-body h3 { color: var(--vscode-foreground); font-size: 1rem; margin: 0.75rem 0 0.375rem; }
+.markdown-body p { white-space: normal; }
+.markdown-body ul, .markdown-body ol { padding-left: 1.25rem; }
+.markdown-body pre { overflow: auto; padding: 0.75rem; background: var(--vscode-textCodeBlock-background); border-radius: 0.375rem; }
+.markdown-body code { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.8rem; }
+.markdown-body :not(pre) > code { padding: 0.0625rem 0.25rem; background: var(--vscode-textCodeBlock-background); }
+.markdown-body a { color: var(--vscode-textLink-foreground); }
+.markdown-body table { display: block; width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.8rem; }
+.markdown-body th, .markdown-body td { padding: 0.5rem; border: 0.0625rem solid var(--vscode-panel-border); text-align: left; vertical-align: top; }
+.architecture-diagram { margin: 0.75rem 0; overflow: auto; }
+.architecture-diagram svg { display: block; width: 100%; min-width: 18rem; height: auto; }
+.architecture-diagram details { margin-top: 0.5rem; }
+summary { cursor: pointer; color: var(--vscode-descriptionForeground); }
+#file-evidence { max-height: 10rem; overflow: auto; }
+#file-evidence-list { margin: 0.375rem 0; padding-left: 1rem; }
+.source-reference { background: transparent; color: var(--vscode-textLink-foreground); padding: 0.125rem; text-align: left; overflow-wrap: anywhere; font-size: 0.75rem; }
 
 form {
   display: flex;

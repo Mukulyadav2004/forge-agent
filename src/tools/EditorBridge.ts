@@ -5,11 +5,17 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
+import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
+import type { FileEvidence } from '../shared/messages';
+import { buildProjectContext } from '../context/projectContext';
 
 export class EditorBridge implements vscode.Disposable {
   private readonly token = randomBytes(32).toString('hex');
+  private readonly instanceId = randomBytes(6).toString('hex');
   private readonly previews = new Map<string, string>();
+  private readonly readEvents = new vscode.EventEmitter<FileEvidence>();
+  readonly onDidReadFile = this.readEvents.event;
   private readonly contentRegistration: vscode.Disposable;
   private readonly server = createServer((request, response) => {
     if (request.url !== '/mcp' || request.method !== 'POST') { response.writeHead(404).end(); return; }
@@ -32,14 +38,37 @@ export class EditorBridge implements vscode.Disposable {
       this.server.listen(0, '127.0.0.1', () => { this.server.removeListener('error', reject); resolvePromise(); });
     });
   }
-  async copyConnection(): Promise<void> {
+  getManifest(options: { namePrefix: string }): TrueForgeApi.RemoteMcpServerManifest {
     const address = this.server.address();
     if (!address || typeof address === 'string') throw new Error('The editor bridge has not started.');
-    await vscode.env.clipboard.writeText(JSON.stringify({ url: `http://127.0.0.1:${address.port}/mcp`, headers: { Authorization: `Bearer ${this.token}` } }, null, 2));
-    void vscode.window.showInformationMessage('Editor MCP connection copied. Add it as a Streamable HTTP connector in local TrueForge. Refresh after restarting the extension.');
+    return {
+      type: 'remote',
+      name: `${options.namePrefix}-${this.instanceId}`,
+      description: `VS Code editor tools for ${vscode.workspace.name ?? 'this window'}`,
+      url: `http://127.0.0.1:${address.port}/mcp`,
+      auth: { type: 'header', headers: { Authorization: `Bearer ${this.token}` } },
+    };
+  }
+  async copyConnection(): Promise<void> {
+    const prefix = vscode.workspace.getConfiguration('forgeAgent').get<string>('connector', 'forge-editor');
+    const manifest = this.getManifest({ namePrefix: prefix || 'forge-editor' });
+    if (manifest.auth?.type !== 'header') throw new Error('Editor header authentication is unavailable.');
+    await vscode.env.clipboard.writeText(JSON.stringify({ name: manifest.name, url: manifest.url, headers: manifest.auth.headers }, null, 2));
+    void vscode.window.showInformationMessage('Editor MCP details copied. Forge connects automatically when a new task starts; use these details only for manual setup or diagnostics.');
   }
   clear(): void { this.previews.clear(); }
-  dispose(): void { this.server.close(); this.contentRegistration.dispose(); this.clear(); }
+  dispose(): void { this.server.close(); this.contentRegistration.dispose(); this.readEvents.dispose(); this.clear(); }
+  async openFile(options: { path: string; line: number }): Promise<void> {
+    const document = await this.file(options.path);
+    const position = new vscode.Position(Math.max(0, Math.min(options.line - 1, document.lineCount - 1)), 0);
+    await vscode.window.showTextDocument(document, { selection: new vscode.Range(position, position), preview: true });
+  }
+  async architectureContext(): Promise<string> {
+    const paths = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,.venv,venv,__pycache__}/**', 500);
+    const context = await buildProjectContext({ paths: paths.map(uri => vscode.workspace.asRelativePath(uri)), readFile: async path => (await this.file(path)).getText() });
+    for (const file of context.files) this.readEvents.fire(file);
+    return context.text;
+  }
   private async file(path: string): Promise<vscode.TextDocument> {
     const root = vscode.workspace.workspaceFolders?.[0];
     if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');
@@ -57,8 +86,20 @@ export class EditorBridge implements vscode.Disposable {
     server.registerTool('read_file', { description: 'Read a bounded line range from a workspace file.', inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional() }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line }) => {
       const document = await this.file(path);
       const lines = document.getText().split('\n');
+      if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
       const end = Math.min(end_line ?? start_line + 199, start_line + 499, lines.length);
-      return { content: [{ type: 'text', text: lines.slice(start_line - 1, end).map((line, index) => `${start_line + index}: ${line}`).join('\n').slice(0, 30000) }] };
+      const output: string[] = [];
+      let length = 0;
+      for (let index = start_line - 1; index < end; index++) {
+        const numbered = `${index + 1}: ${lines[index]}`;
+        if (length + numbered.length + 1 > 30000) break;
+        output.push(numbered);
+        length += numbered.length + 1;
+      }
+      if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
+      const actualEnd = start_line + output.length - 1;
+      this.readEvents.fire({ path, startLine: start_line, endLine: actualEnd, origin: 'tool' });
+      return { content: [{ type: 'text', text: `${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${output.join('\n')}` }] };
     });
     server.registerTool('list_files', { description: 'Discover up to 100 workspace file paths by glob.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');

@@ -18,12 +18,19 @@ TrueForge → configured MCP connector → extension's loopback HTTP server
 
 A task uses one session until New Task. Conversations and proposals are in memory and disappear on extension restart. The tool server permits only local requests carrying the generated bearer token and rejects browser Origin headers. Model tools have no file-write or shell-execution capability in this milestone.
 
-## Checks that still need your configuration
+The extension now registers the active port and authentication header automatically before session creation. Each extension host has a separate connector name (`forge-editor-<window-id>`). Reopening a folder therefore creates a current editor connection on the next task instead of reusing an obsolete port from manual setup. Existing development windows need one reload to pick up this fix.
 
-No real model or running TrueForge server was configured during this sprint. The following are **not verified**, even if local automated tests pass:
+## November 6 verification update
 
-- Local TrueForge reaches the extension's MCP connector.
-- Your chosen model produces streaming output and valid tool calls.
+The running local server now exposes `google-gemini/gemini-3-1-flash-lite`. A real greeting through the extension's SDK client and TrueForge completed successfully. TrueForge also discovered all three editor tools using header authentication. `pnpm run test` passed, including regression coverage for retrying corrected model settings after a rejected session creation and selecting a model from the server's list.
+
+The extension now includes **Select model** / **Forge: Select Model**. Fully qualified names must match the configured provider, and failed session creation no longer retains stale settings. Existing tasks still require **Forge: New Task** after manually changing the model.
+
+## Remaining live checks
+
+The following are still **not verified** with the real model:
+
+- The model chooses and executes the appropriate editor tools for a coding task.
 - Real approval event → decision → new-turn continuation.
 - Cancel during a real model request or MCP call.
 - A bad model key gives a useful error with your provider.
@@ -35,11 +42,11 @@ Start with: “List the files in this workspace, read example.txt, then propose 
 
 1. Preserve proposals as structured records with base content/version and clear IDs. Add review controls with conflict detection before any write.
 2. Add per-hunk accept/reject and transaction snapshots for multi-file undo. Test dirty editors and edits made while a proposal is pending.
-3. Add search and symbol discovery with explicit result limits, then the context ledger.
+3. Add search and symbol discovery with explicit result limits. The current evidence list and bounded architecture context still need context-selection reasons and token accounting.
 4. Add command approval and cancellation semantics separately; a shell command can write files even when editor tools do not.
 5. Run the actual Flask tasks repeatedly using the configured model before investing in UI polish.
 
-Current approval UI is intentionally minimal and does not render tool arguments. Before adding any tool that writes or executes commands, display its exact arguments and consequences for review. Current model text displays as plain text, not rich Markdown.
+Current approval UI is intentionally minimal and does not render tool arguments. Before adding any tool that writes or executes commands, display its exact arguments and consequences for review. Model text now renders as sanitized Markdown with Mermaid and local source links. Unsupported OpenUI and other unimplemented harness interactions are disabled in the agent definition. See `QUALITY-NOV6.md` for the current analysis-quality limits.
 
 ## Your two-person division
 

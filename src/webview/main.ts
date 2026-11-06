@@ -1,5 +1,6 @@
 import { isHostMessage } from "../shared/messages.js";
 import type { ChatMessage, WebviewMessage } from "../shared/messages.js";
+import { renderDiagrams, renderMarkdown } from './markdown.js';
 
 interface WebviewApi {
   postMessage(message: WebviewMessage): void;
@@ -25,6 +26,12 @@ if (
 }
 
 let pending = false;
+document.getElementById("copy-mcp-button")?.addEventListener("click", () => {
+  vscode.postMessage({ type: "copy_mcp_connection" });
+});
+document.getElementById("select-model-button")?.addEventListener("click", () => {
+  vscode.postMessage({ type: "select_model" });
+});
 let awaitingAck = false;
 const status = document.getElementById("status");
 const cancel = document.getElementById("cancel-button");
@@ -50,28 +57,44 @@ function updateComposer(): void {
   }
 }
 
-function renderMessages(messages: ChatMessage[]): void {
+const renderedMessages = new Map<string, { text: string; article: HTMLElement; body: HTMLElement }>();
+
+function renderMessages(options: { messages: ChatMessage[]; complete: boolean }): void {
   if (!(conversation instanceof HTMLDivElement)) {
     return;
   }
 
   const fragment = document.createDocumentFragment();
-  if (messages.length === 0) {
+  if (options.messages.length === 0) {
     const emptyState = document.createElement("p");
     emptyState.className = "empty-state";
     emptyState.textContent = "Your messages will appear here.";
     fragment.append(emptyState);
   }
 
-  for (const message of messages) {
-    const article = document.createElement("article");
-    article.className = `message message-${message.role}`;
-    const author = document.createElement("h2");
-    author.textContent = message.role === "user" ? "You" : "Forge";
-    const text = document.createElement("p");
-    text.textContent = message.text;
-    article.append(author, text);
-    fragment.append(article);
+  const liveIds = new Set(options.messages.map(message => message.id));
+  for (const id of renderedMessages.keys()) if (!liveIds.has(id)) renderedMessages.delete(id);
+  for (const message of options.messages) {
+    let cached = renderedMessages.get(message.id);
+    if (!cached) {
+      const article = document.createElement("article");
+      article.className = `message message-${message.role}`;
+      const author = document.createElement("h2");
+      author.className = 'message-author';
+      author.textContent = message.role === "user" ? "You" : "Forge";
+      const body = document.createElement("div");
+      body.className = message.role === 'assistant' ? 'markdown-body' : 'user-text';
+      article.append(author, body);
+      cached = { text: '', article, body };
+      renderedMessages.set(message.id, cached);
+    }
+    if (cached.text !== message.text) {
+      if (message.role === 'assistant') renderMarkdown({ container: cached.body, text: message.text });
+      else cached.body.textContent = message.text;
+      cached.text = message.text;
+    }
+    if (options.complete && message.role === 'assistant') void renderDiagrams(cached.body);
+    fragment.append(cached.article);
   }
 
   conversation.replaceChildren(fragment);
@@ -95,6 +118,19 @@ form.addEventListener("submit", (event) => {
   vscode.postMessage({ type: "send_message", text });
 });
 
+conversation.addEventListener('click', event => {
+  if (!(event.target instanceof Element)) return;
+  const link = event.target.closest('a');
+  if (!link) return;
+  event.preventDefault();
+  const href = link.getAttribute('href') ?? '';
+  if (!href || href.startsWith('#') || /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/iu.test(href)) return;
+  const match = /^(.*?)(?:#L(\d+))?$/u.exec(href);
+  if (!match?.[1]) return;
+  try { vscode.postMessage({ type: 'open_file', path: decodeURIComponent(match[1]), line: Number(match[2] ?? 1) }); }
+  catch { return; }
+});
+
 input.addEventListener("input", () => {
   if (input instanceof HTMLTextAreaElement) {
     vscode.setState({ draft: input.value });
@@ -114,7 +150,22 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
 
-  renderMessages(event.data.messages);
+  renderMessages({ messages: event.data.messages, complete: !event.data.busy });
+  const evidence = document.getElementById('file-evidence');
+  const evidenceList = document.getElementById('file-evidence-list');
+  if (evidence && evidenceList) {
+    evidence.hidden = event.data.inspectedFiles.length === 0;
+    const items = event.data.inspectedFiles.map(file => {
+      const item = document.createElement('li');
+      const button = document.createElement('button');
+      button.className = 'source-reference';
+      button.textContent = `${file.path}:${file.startLine}-${file.endLine}${file.origin === 'context' ? ' · supplied context' : ''}`;
+      button.addEventListener('click', () => vscode.postMessage({ type: 'open_file', path: file.path, line: file.startLine }));
+      item.append(button);
+      return item;
+    });
+    evidenceList.replaceChildren(...items);
+  }
   if (awaitingAck && input instanceof HTMLTextAreaElement) {
     input.value = "";
     vscode.setState({ draft: "" });

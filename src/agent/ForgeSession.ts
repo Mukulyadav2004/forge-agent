@@ -1,23 +1,43 @@
 import { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
+import { agentInstructions } from './instructions';
+
+function createClient(baseUrl: string): TrueForge {
+  const url = new URL(baseUrl);
+  if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use the local TrueForge HTTP URL.');
+  return new TrueForge({ baseUrl, maxRetries: 0, timeoutInSeconds: 600 });
+}
+
+export async function listModelNames(options: { baseUrl: string }): Promise<string[]> {
+  const response = await createClient(options.baseUrl).models.list({ timeoutInSeconds: 15 });
+  return response.data.map(model => model.name);
+}
 
 export class ForgeSession {
   private readonly client: TrueForge;
   private sessionId: string | undefined;
   private cancelled = false;
-  constructor(private readonly options: { baseUrl: string; model: string; connector: string; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
-    const url = new URL(options.baseUrl);
-    if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use the local TrueForge HTTP URL.');
-    this.client = new TrueForge({ baseUrl: options.baseUrl, maxRetries: 0, timeoutInSeconds: 600 });
+  constructor(private readonly options: { baseUrl: string; model: string; connector: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
+    this.client = createClient(options.baseUrl);
+    if (!/^[^/\s]+\/\S+$/u.test(options.model)) {
+      throw new Error('Use the full provider/model name. Click Select model or run Forge: Select Model to choose a configured model.');
+    }
   }
   get id(): string | undefined { return this.sessionId; }
   async send(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input']): Promise<void> {
     this.cancelled = false;
     if (!this.sessionId) {
+      if (this.options.editorManifest) {
+        await this.client.settings.mcpServers.createOrUpdate({ manifest: this.options.editorManifest }, { timeoutInSeconds: 15 });
+      }
+      if (this.cancelled) return;
+      const connector = this.options.editorManifest?.name ?? this.options.connector;
       const response = await this.client.sessions.create({ agent: { spec: {
         model: { name: this.options.model },
-        instructions: 'You are Forge Agent in VS Code. Inspect workspace files using editor tools. Propose changes with propose_edit. Never claim a proposal was applied. All proposed changes remain in memory. Ask for missing context. Do not read secrets.',
-        mcpServers: this.options.connector ? [{ name: this.options.connector, preload: true, enableTools: ['read_file', 'list_files', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
+        instructions: agentInstructions,
+        // Enable harness capabilities as the editor gains support for their interactions.
+        config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 32 },
+        mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
       } } });
       this.sessionId = response.data.id;
     }
