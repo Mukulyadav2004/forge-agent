@@ -1,9 +1,16 @@
 import * as vscode from "vscode";
 import { EditorBridge } from "./tools/EditorBridge";
 import { AgentViewProvider } from "./sidebar/AgentViewProvider";
+import { WorkspaceFiles } from './workspace/WorkspaceFiles';
+import { VscodeEditBackend } from './edits/VscodeEditBackend';
+import { EditService } from './edits/EditService';
 
 export function activate(context: vscode.ExtensionContext): void {
-  const bridge = new EditorBridge();
+  const files = new WorkspaceFiles();
+  const backend = new VscodeEditBackend({ files, storageUri: context.globalStorageUri });
+  const editChanges = new vscode.EventEmitter<void>();
+  const edits = new EditService({ backend, onChange: () => editChanges.fire() });
+  const bridge = new EditorBridge({ files, edits });
   const bridgeReady = bridge.start();
   void bridgeReady.catch((error: unknown) => vscode.window.showErrorMessage(`Forge MCP: ${error instanceof Error ? error.message : "Start failed"}`));
   const provider = new AgentViewProvider(context.extensionUri, {
@@ -13,8 +20,15 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     openFile: options => bridge.openFile(options),
     architectureContext: () => bridge.architectureContext(),
+    edits,
   });
   context.subscriptions.push(bridge.onDidReadFile(file => provider.recordInspection(file)));
+  context.subscriptions.push(backend, editChanges, editChanges.event(() => provider.refreshReview()));
+  context.subscriptions.push(
+    vscode.commands.registerCommand('forgeAgent.applyAll', () => provider.review({ action: 'apply_all' })),
+    vscode.commands.registerCommand('forgeAgent.rejectAll', () => provider.review({ action: 'reject_all' })),
+    vscode.commands.registerCommand('forgeAgent.undo', () => provider.review({ action: 'undo' })),
+  );
   const viewRegistration = vscode.window.registerWebviewViewProvider(AgentViewProvider.viewType, provider);
   const openAgent = vscode.commands.registerCommand("forgeAgent.open", async () => {
     await vscode.commands.executeCommand(`${AgentViewProvider.viewType}.focus`);

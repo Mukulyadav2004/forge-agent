@@ -1,6 +1,7 @@
 import { isHostMessage } from "../shared/messages.js";
 import type { ChatMessage, WebviewMessage } from "../shared/messages.js";
 import { renderDiagrams, renderMarkdown } from './markdown.js';
+import { renderReviewPanel } from './reviewPanel.js';
 
 interface WebviewApi {
   postMessage(message: WebviewMessage): void;
@@ -151,6 +152,8 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
 
   renderMessages({ messages: event.data.messages, complete: !event.data.busy });
+  const reviewPanel = document.getElementById('review-panel');
+  if (reviewPanel instanceof HTMLElement) renderReviewPanel({ container: reviewPanel, state: event.data.review, disabled: event.data.busy || event.data.approval, onCommand: command => vscode.postMessage({ type: 'review', command }) });
   const evidence = document.getElementById('file-evidence');
   const evidenceList = document.getElementById('file-evidence-list');
   if (evidence && evidenceList) {
@@ -171,7 +174,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     vscode.setState({ draft: "" });
   }
   awaitingAck = false;
-  pending = event.data.busy || event.data.approval;
+  pending = event.data.busy || event.data.approval || event.data.review.busy;
   if (status) status.textContent = event.data.status;
   if (cancel instanceof HTMLButtonElement) cancel.disabled = !event.data.busy && !event.data.approval;
   if (approve instanceof HTMLButtonElement) { approve.hidden = !event.data.approval; approve.disabled = event.data.busy; }

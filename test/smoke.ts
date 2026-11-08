@@ -1,3 +1,4 @@
+import { checkEditorTransactions } from './edits/realEditor';
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createServer } from "node:http";
@@ -142,10 +143,15 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   await restoredFrame.getByRole('button', { name: 'example.txt:1-2', exact: true }).waitFor();
   const escape = await client.callTool({ name: "read_file", arguments: { path: "../outside.txt" } });
   assert.equal(escape.isError, true);
-  await client.callTool({ name: "propose_edit", arguments: { path: "example.txt", new_text: "proposed text", explanation: "Smoke test" } });
+  const readData: unknown = read.structuredContent;
+  if (typeof readData !== 'object' || readData === null || !('base_revision' in readData) || typeof readData.base_revision !== 'string') throw new Error('read_file must return a base revision.');
+  const baseRevision = readData.base_revision;
+  const proposal = await client.callTool({ name: "propose_edit", arguments: { path: "example.txt", base_revision: baseRevision, new_text: "proposed text", explanation: "Smoke test" } });
+  assert.equal(proposal.isError, undefined);
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder);
   assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder.uri, "example.txt"))), "original text\n");
+  await checkEditorTransactions({ client, frame: restoredFrame, extensionUri: extension.extensionUri });
   await client.close();
   const denied = await fetch(connection.url, { method: "POST" });
   assert.equal(denied.status, 403);

@@ -5,6 +5,8 @@ import * as vscode from "vscode";
 import { isWebviewMessage } from "../shared/messages";
 import type { ChatMessage, FileEvidence, HostMessage } from "../shared/messages";
 import { isArchitectureRequest } from '../context/projectContext';
+import type { EditService } from '../edits/EditService';
+import type { ReviewCommand } from '../edits/review';
 
 export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = "forgeAgent.chat";
@@ -24,6 +26,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       getEditorManifest: (namePrefix: string) => Promise<TrueForgeApi.RemoteMcpServerManifest>;
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
+      edits: EditService;
     },
   ) {}
 
@@ -49,6 +52,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
           void vscode.commands.executeCommand("forgeAgent.copyMcp");
         } else if (value.type === "select_model") {
           void this.selectModel();
+        } else if (value.type === 'review') {
+          void this.review(value.command);
         } else if (value.type === "open_file") {
           void this.actions.openFile(value).catch((error: unknown) => vscode.window.showErrorMessage(error instanceof Error ? error.message : "Could not open source file."));
         } else if (value.type === "send_message" && !this.busy && !this.approvals.length) {
@@ -79,7 +84,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   }
 
   async editSelection(): Promise<void> {
-    if (this.busy || this.approvals.length) return;
+    if (this.busy || this.approvals.length || this.actions.edits.state.busy) return;
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.selection.isEmpty) { await vscode.window.showInformationMessage("Select some code first."); return; }
     const instruction = await vscode.window.showInputBox({ prompt: "What should Forge change in this selection?" });
@@ -92,16 +97,37 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
     await vscode.commands.executeCommand("forgeAgent.open");
     await this.run([{ type: "user.message", content: text }]);
   }
-  newTask(): void {
-    if (this.busy) { void vscode.window.showInformationMessage("Cancel the running turn before starting a new task."); return; }
-    this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.status = "New task ready"; this.publish();
+  async newTask(): Promise<void> {
+    if (this.busy || this.actions.edits.state.busy) { void vscode.window.showInformationMessage("Finish or cancel the current operation before starting a new task."); return; }
+    this.busy = true; this.publish();
+    try {
+      await this.actions.edits.newTask();
+      this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.status = "New task ready";
+    } catch (error) { this.status = error instanceof Error ? error.message : 'Could not start a new task.'; }
+    this.busy = false; this.publish();
+  }
+  refreshReview(): void { this.publish(); }
+  async review(command: ReviewCommand): Promise<void> {
+    if (this.busy || this.approvals.length) { this.status = 'Finish or cancel the agent turn before reviewing changes.'; this.publish(); return; }
+    try {
+      switch (command.action) {
+        case 'preview': await this.actions.edits.preview(command.id); break;
+        case 'apply': await this.actions.edits.apply(command.id); break;
+        case 'reject': await this.actions.edits.reject(command.id); break;
+        case 'apply_all': await this.actions.edits.apply(); break;
+        case 'reject_all': await this.actions.edits.reject(); break;
+        case 'undo': await this.actions.edits.undo(); break;
+      }
+      this.status = this.actions.edits.state.message;
+    } catch (error) { this.status = error instanceof Error ? error.message : 'Review operation failed.'; }
+    this.publish();
   }
   recordInspection(file: FileEvidence): void {
     if (!this.inspectedFiles.some(existing => existing.path === file.path && existing.startLine === file.startLine && existing.endLine === file.endLine && existing.origin === file.origin)) this.inspectedFiles.push(file);
     this.publish();
   }
   async selectModel(): Promise<void> {
-    if (this.busy || this.approvals.length) {
+    if (this.busy || this.approvals.length || this.actions.edits.state.busy) {
       void vscode.window.showInformationMessage("Finish or cancel the current task before selecting a model.");
       return;
     }
@@ -115,7 +141,7 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
       const target = setting?.workspaceFolderValue !== undefined ? vscode.ConfigurationTarget.WorkspaceFolder
         : setting?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
       await config.update("model", name, target);
-      this.newTask();
+      await this.newTask();
       this.status = `Model: ${name}`;
       this.publish();
     } catch (error: unknown) {
@@ -125,18 +151,24 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
     }
   }
   private publish(): void {
-    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles };
+    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, review: this.actions.edits.state };
     void this.view?.webview.postMessage(response);
   }
   private async cancel(): Promise<void> {
     this.approvals = [];
-    try { await this.session?.cancel(); this.status = "Cancellation requested. No editor files were changed."; }
+    try {
+      const discarded = this.actions.edits.cancel();
+      const cancelled = this.session?.cancel();
+      await discarded; await cancelled;
+      this.status = "Cancellation requested. Pending proposals were discarded; applied batches remain available in Undo.";
+    }
     catch { this.status = "Could not confirm cancellation. Check the local TrueForge server."; }
     this.publish();
   }
   private async run(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input']): Promise<void> {
     this.busy = true; this.status = "Connecting to TrueForge…"; this.publish();
     try {
+      this.actions.edits.beginTurn();
       const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
       for (const event of input ?? []) {
         if (event.type === 'user.message' && typeof event.content === 'string' && isArchitectureRequest(event.content)) {
@@ -174,7 +206,7 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
     }
     if (event.type === "tool.approval_required") {
       this.approvals = event.toolCalls.map(tool => ({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } }));
-      this.messages.push({ id: randomUUID(), role: "assistant", text: "TrueForge requests permission to open a proposed diff. No file will be written. Approve or deny below." });
+      this.messages.push({ id: randomUUID(), role: "assistant", text: "Allow TrueForge to stage a proposed diff? This does not write files. You can apply or reject the proposal after reviewing it." });
     }
     if (event.type === "turn.done" && event.state.status === "error") this.status = event.state.message;
     this.publish();
@@ -214,6 +246,7 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
     <div><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve preview</button> <button id="deny-button" type="button" hidden>Deny</button></div>
   </header>
   <details id="file-evidence" hidden><summary>Files inspected</summary><ul id="file-evidence-list"></ul></details>
+  <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>
   <div id="messages" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
     <p class="empty-state">Your messages will appear here.</p>
   </div>

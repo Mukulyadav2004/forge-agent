@@ -31,4 +31,4 @@ The configured Pro model could not be evaluated: Google returned a 429 with a ze
 
 ## Next acceptance target
 
-Complete a real coding task with relevant source inspection, an approved proposed change, executable tests, and undo. Evaluate reasoning on known repository facts and tasks, rather than treating a polished diagram or a minimum file count as proof of correctness. Applying changes and executing commands remain unfinished.
+Complete a real coding task with relevant source inspection, an approved proposed change, executable tests, and undo. Evaluate reasoning on known repository facts and tasks, rather than treating a polished diagram or a minimum file count as proof of correctness. Applying and undoing reviewed existing-file edits were implemented on November 8; command execution and per-hunk review remain unfinished.

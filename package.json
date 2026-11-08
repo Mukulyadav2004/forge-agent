@@ -61,6 +61,21 @@
         "command": "forgeAgent.selectModel",
         "title": "Select Model",
         "category": "Forge"
+      },
+      {
+        "command": "forgeAgent.applyAll",
+        "title": "Apply All Proposed Changes",
+        "category": "Forge"
+      },
+      {
+        "command": "forgeAgent.rejectAll",
+        "title": "Reject All Proposed Changes",
+        "category": "Forge"
+      },
+      {
+        "command": "forgeAgent.undo",
+        "title": "Undo Last Apply",
+        "category": "Forge"
       }
     ],
     "configuration": {
@@ -99,9 +114,10 @@
     "dev": "pnpm run compile && node scripts/dev.mjs",
     "test:smoke": "pnpm run compile && tsc --project tsconfig.test.json && node scripts/smoke.mjs",
     "test:integration": "pnpm run compile && node --test test/integration.mjs",
-    "test": "pnpm run check && pnpm run test:integration && pnpm run test:smoke",
+    "test": "pnpm run check && pnpm run test:integration && pnpm run test:edits && pnpm run test:smoke",
     "test:live": "pnpm run compile && node scripts/live-check.mjs",
-    "test:architecture": "pnpm run compile && node scripts/architecture-check.mjs"
+    "test:architecture": "pnpm run compile && node scripts/architecture-check.mjs",
+    "test:edits": "pnpm run compile && node --test test/edits/*.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

@@ -1,7 +1,5 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
-import { realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
@@ -9,14 +7,15 @@ import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
 import type { FileEvidence } from '../shared/messages';
 import { buildProjectContext } from '../context/projectContext';
+import type { EditService } from '../edits/EditService';
+import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
+import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
 
 export class EditorBridge implements vscode.Disposable {
   private readonly token = randomBytes(32).toString('hex');
   private readonly instanceId = randomBytes(6).toString('hex');
-  private readonly previews = new Map<string, string>();
   private readonly readEvents = new vscode.EventEmitter<FileEvidence>();
   readonly onDidReadFile = this.readEvents.event;
-  private readonly contentRegistration: vscode.Disposable;
   private readonly server = createServer((request, response) => {
     if (request.url !== '/mcp' || request.method !== 'POST') { response.writeHead(404).end(); return; }
     if (request.headers.origin || request.headers.authorization !== `Bearer ${this.token}`) { response.writeHead(403).end(); return; }
@@ -27,11 +26,7 @@ export class EditorBridge implements vscode.Disposable {
       if (!response.headersSent) response.writeHead(500).end('MCP request failed');
     });
   });
-  constructor() {
-    this.contentRegistration = vscode.workspace.registerTextDocumentContentProvider('forge-preview', {
-      provideTextDocumentContent: uri => this.previews.get(uri.toString()) ?? '',
-    });
-  }
+  constructor(private readonly options: { files: WorkspaceFiles; edits: EditService }) {}
   async start(): Promise<void> {
     await new Promise<void>((resolvePromise, reject) => {
       this.server.once('error', reject);
@@ -56,36 +51,23 @@ export class EditorBridge implements vscode.Disposable {
     await vscode.env.clipboard.writeText(JSON.stringify({ name: manifest.name, url: manifest.url, headers: manifest.auth.headers }, null, 2));
     void vscode.window.showInformationMessage('Editor MCP details copied. Forge connects automatically when a new task starts; use these details only for manual setup or diagnostics.');
   }
-  clear(): void { this.previews.clear(); }
-  dispose(): void { this.server.close(); this.contentRegistration.dispose(); this.readEvents.dispose(); this.clear(); }
+  dispose(): void { this.server.close(); this.readEvents.dispose(); }
   async openFile(options: { path: string; line: number }): Promise<void> {
-    const document = await this.file(options.path);
+    const document = await this.options.files.open(options.path);
     const position = new vscode.Position(Math.max(0, Math.min(options.line - 1, document.lineCount - 1)), 0);
     await vscode.window.showTextDocument(document, { selection: new vscode.Range(position, position), preview: true });
   }
   async architectureContext(): Promise<string> {
     const paths = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,.venv,venv,__pycache__}/**', 500);
-    const context = await buildProjectContext({ paths: paths.map(uri => vscode.workspace.asRelativePath(uri)), readFile: async path => (await this.file(path)).getText() });
+    const context = await buildProjectContext({ paths: paths.map(uri => vscode.workspace.asRelativePath(uri)), readFile: async path => (await this.options.files.open(path)).getText() });
     for (const file of context.files) this.readEvents.fire(file);
     return context.text;
-  }
-  private async file(path: string): Promise<vscode.TextDocument> {
-    const root = vscode.workspace.workspaceFolders?.[0];
-    if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');
-    if (isAbsolute(path) || /(^|[/\\])(\.env(?:\.[^/\\]+)?|\.git|id_rsa|id_ed25519)([/\\]|$)/i.test(path)) throw new Error('This path is not available to the agent.');
-    const rootPath = await realpath(root.uri.fsPath);
-    const filePath = await realpath(resolve(rootPath, path));
-    const rel = relative(rootPath, filePath);
-    if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('Path is outside the workspace.');
-    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
-    if (document.getText().length > 500_000) throw new Error('File is too large for this tool.');
-    return document;
   }
   private makeServer(): McpServer {
     const server = new McpServer({ name: 'forge-editor', version: '0.0.1' });
     server.registerTool('read_file', { description: 'Read a bounded line range from a workspace file.', inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional() }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line }) => {
-      const document = await this.file(path);
-      const lines = document.getText().split('\n');
+      const { revision, file } = await this.options.edits.read(path);
+      const lines = file.text.split('\n');
       if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
       const end = Math.min(end_line ?? start_line + 199, start_line + 499, lines.length);
       const output: string[] = [];
@@ -99,22 +81,16 @@ export class EditorBridge implements vscode.Disposable {
       if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
       const actualEnd = start_line + output.length - 1;
       this.readEvents.fire({ path, startLine: start_line, endLine: actualEnd, origin: 'tool' });
-      return { content: [{ type: 'text', text: `${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${output.join('\n')}` }] };
+      return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${output.join('\n')}` }], structuredContent: { base_revision: revision } };
     });
     server.registerTool('list_files', { description: 'Discover up to 100 workspace file paths by glob.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');
       const files = await vscode.workspace.findFiles(glob, '**/{node_modules,.git,.env*,out,dist}/**', 100);
       return { content: [{ type: 'text', text: files.map(uri => vscode.workspace.asRelativePath(uri)).join('\n') }] };
     });
-    server.registerTool('propose_edit', { description: 'Open a read-only proposed diff. This never applies or saves changes.', inputSchema: { path: z.string(), new_text: z.string().max(500000), explanation: z.string().max(2000) }, annotations: { readOnlyHint: true } }, async ({ path, new_text, explanation }) => {
-      const document = await this.file(path);
-      const id = randomUUID();
-      const before = vscode.Uri.parse(`forge-preview:/${id}/before`);
-      const after = vscode.Uri.parse(`forge-preview:/${id}/after`);
-      this.previews.set(before.toString(), document.getText());
-      this.previews.set(after.toString(), new_text);
-      await vscode.commands.executeCommand('vscode.diff', before, after, `Proposal: ${path}`, { preview: true });
-      return { content: [{ type: 'text', text: `Preview opened. No files changed. ${explanation}` }] };
+    server.registerTool('propose_edit', { description: 'Stage a read-only diff using the base_revision returned by read_file. The user must apply it in the editor.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000) }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation }) => {
+      const id = await this.options.edits.stage({ path, revision: base_revision, text: new_text, explanation });
+      return { content: [{ type: 'text', text: `Proposal ${id} is staged for ${path}. No files changed. To save it, the user must open Review changes in the Forge sidebar and click Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.` }], structuredContent: { proposal_id: id } };
     });
     return server;
   }

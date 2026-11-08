@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, mkdtempSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
 import { once } from "node:events";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -14,6 +14,8 @@ const profilePath = mkdtempSync(join(tmpdir(), "forge-agent-smoke-"));
 const workspacePath = join(profilePath, "workspace");
 mkdirSync(workspacePath);
 writeFileSync(join(workspacePath, "example.txt"), "original text\n");
+writeFileSync(join(workspacePath, "second.txt"), "original second\n");
+writeFileSync(join(workspacePath, "third.txt"), Buffer.from('\uFEFForiginal third λ\r\n'));
 mkdirSync(join(workspacePath, 'src'));
 writeFileSync(join(workspacePath, 'main.py'), 'from src.service import Service\n\nservice = Service()\n');
 writeFileSync(join(workspacePath, 'src', 'service.py'), 'from .store import Store\n\nclass Service:\n    def run(self):\n        return Store().read()\n');
@@ -34,6 +36,8 @@ await new Promise((resolve, reject) => {
 try {
   const mcpResultPath = join(extensionPath, "out-test", "mcp-result.json");
   const liveResultPath = join(extensionPath, "out-test", "live-editor-result.json");
+  const editResultPath = join(extensionPath, "out-test", "edit-result.json");
+  rmSync(editResultPath, { force: true });
   rmSync(liveResultPath, { force: true });
   rmSync(mcpResultPath, { force: true });
   rmSync(resultPath, { force: true });
@@ -86,6 +90,15 @@ try {
     throw new Error("The VS Code smoke check did not confirm the complete sidebar flow.");
   }
 
+  if (!existsSync(editResultPath)) throw new Error('The native edit review checks did not complete.');
+  const backupDirectory = join(profilePath, 'User', 'globalStorage', 'mukulkumar.forge-agent', 'edit-snapshots');
+  const backups = readdirSync(backupDirectory);
+  if (!backups.length) throw new Error('No durable recovery snapshots were created.');
+  for (const file of backups) {
+    if ((statSync(join(backupDirectory, file)).mode & 0o777) !== 0o600) throw new Error('A snapshot has unexpected permissions.');
+    const backup = JSON.parse(readFileSync(join(backupDirectory, file), 'utf8'));
+    if (!backup.files.every(file => typeof file.content_base64 === 'string' && typeof file.sha256 === 'string')) throw new Error('Invalid recovery snapshot.');
+  }
   if (!existsSync(mcpResultPath)) throw new Error("MCP smoke checks did not complete.");
   if (process.argv.includes("--live-server") && !existsSync(liveResultPath)) throw new Error("Live TrueForge editor discovery did not complete.");
   console.log(`Smoke check passed: ${report.extension_id} opens the sidebar, exchanges messages, and restores drafts.`);

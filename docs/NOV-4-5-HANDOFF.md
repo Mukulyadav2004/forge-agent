@@ -16,7 +16,7 @@ TrueForge → configured MCP connector → extension's loopback HTTP server
   → in-memory proposed diff in VS Code
 ```
 
-A task uses one session until New Task. Conversations and proposals are in memory and disappear on extension restart. The tool server permits only local requests carrying the generated bearer token and rejects browser Origin headers. Model tools have no file-write or shell-execution capability in this milestone.
+A task uses one session until New Task. Conversations and proposals are in memory and disappear on extension restart. The tool server permits only local requests carrying the generated bearer token and rejects browser Origin headers. Model tools have no file-write or shell-execution capability; users can now apply reviewed changes through the editor's transaction service.
 
 The extension now registers the active port and authentication header automatically before session creation. Each extension host has a separate connector name (`forge-editor-<window-id>`). Reopening a folder therefore creates a current editor connection on the next task instead of reusing an obsolete port from manual setup. Existing development windows need one reload to pick up this fix.
 
@@ -40,8 +40,8 @@ Start with: “List the files in this workspace, read example.txt, then propose 
 
 ## Next implementation milestone
 
-1. Preserve proposals as structured records with base content/version and clear IDs. Add review controls with conflict detection before any write.
-2. Add per-hunk accept/reject and transaction snapshots for multi-file undo. Test dirty editors and edits made while a proposal is pending.
+1. The November 7–8 implementation adds structured proposals, read revisions, whole-file/batch review, conflict checks, protected recovery snapshots, and undo. The Cline-derived virtual preview adapter owns preview tabs and their cleanup.
+2. Add per-hunk accept/reject on top of the transaction service. Whole-file/batch apply and undo now have deterministic and native VS Code coverage, including dirty editor aliases.
 3. Add search and symbol discovery with explicit result limits. The current evidence list and bounded architecture context still need context-selection reasons and token accounting.
 4. Add command approval and cancellation semantics separately; a shell command can write files even when editor tools do not.
 5. Run the actual Flask tasks repeatedly using the configured model before investing in UI polish.
