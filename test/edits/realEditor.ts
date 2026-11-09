@@ -5,6 +5,7 @@ import { realpath } from 'node:fs/promises';
 import * as vscode from 'vscode';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { Frame } from 'playwright-core';
+import { checkSidebarLayout } from '../sidebar/layout';
 
 export async function checkEditorTransactions(options: { client: Client; frame: Frame; extensionUri: vscode.Uri }): Promise<void> {
   const { client, frame } = options;
@@ -57,6 +58,7 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   await hunkRows.nth(0).getByRole('button', { name: 'Accept hunk', exact: true }).click();
   await message.filter({ hasText: 'Accepted and saved this hunk' }).waitFor();
   assert.equal(await disk('example.txt'), 'header\n    ONE\n\tinserted <img src=x>\nseparator\ntwo\nfooter\n');
+  await checkSidebarLayout({ frame, extensionUri: options.extensionUri });
   await panel.screenshot({ path: vscode.Uri.joinPath(options.extensionUri, 'out-test', 'edit-hunks.png').fsPath });
   await panel.getByRole('button', { name: 'Undo last apply', exact: true }).click();
   await message.filter({ hasText: 'Undid the last applied batch' }).waitFor();

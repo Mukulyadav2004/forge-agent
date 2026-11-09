@@ -24,6 +24,13 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - Changes and reasons: ported React/Tailwind rendering to safe DOM nodes and VS Code theme variables; accepts the host's computed hunks instead of parsing model patch strings; preserves all code indentation after the single diff marker; handles CRLF and terminal-newline display explicitly. Like the upstream component's unknown-position behavior, line numbers are hidden after rejection/undo can invalidate proposed offsets. Cline gRPC services, file-opening dependencies and unused patch parsers are omitted.
 - Full native previews still use the Cline-derived virtual-document adapter. Hunk decisions and guarded apply/undo remain Forge Agent implementations.
 
+## Cline chat layout
+
+- Upstream, exact commit, copyright and Apache-2.0 licence: the same Cline source point recorded above.
+- Sources: `apps/vscode/webview-ui/src/components/chat/chat-view/components/layout/ChatLayout.tsx` and the content/footer structure in `apps/vscode/webview-ui/src/components/chat/ChatView.tsx`.
+- Adaptation: `media/sidebar.css` and the task-content wrapper in `src/sidebar/AgentViewProvider.ts`. Retains full-height grid, constrained scrolling content and a separate composer; ports styled-components/React markup to our existing CSS/DOM webview.
+- Forge-specific changes: compact setup/status controls, independently scrolling proposals with review actions outside that scroll area, space shared with conversation, and outer task scrolling when the panel is too short. Cline's React state, virtualized message list, SDK and provider runtime are not included.
+
 ## jsdiff dependency
 
 - Package: `diff@8.0.2`, https://github.com/kpdecker/jsdiff.

@@ -254,11 +254,13 @@ ${selectedText}`;
     <span class="badge" id="status" role="status">Ready</span>
     <div><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve preview</button> <button id="deny-button" type="button" hidden>Deny</button></div>
   </header>
-  <details id="file-evidence" hidden><summary>Files inspected</summary><ul id="file-evidence-list"></ul></details>
+  <main id="task-content" aria-label="Task workspace">
   <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>
+  <details id="file-evidence" hidden><summary>Files inspected</summary><ul id="file-evidence-list"></ul></details>
   <div id="messages" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
     <p class="empty-state">Your messages will appear here.</p>
   </div>
+  </main>
   <form id="message-form">
     <label for="message-input">Message</label>
     <textarea id="message-input" rows="4" placeholder="Try: Hello Forge!" spellcheck="false"></textarea>

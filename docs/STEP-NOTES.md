@@ -1,2 +1,4 @@
 2026-11-09 - Changed: installed verified AGENTS.md and docs/BRIEF.md, corrected stale status/reuse rules, and separated official requirements from implementation facts and unresolved video-cut wording.
 2026-11-09 - Why: preserve the user's small-step, user-owned-commit workflow while aligning future work with the PDF and recorded evidence; no application code changed.
+2026-11-09 - Changed: adapted Cline's ChatLayout/ChatView grid, scrolling content and separate composer; compacted setup controls and kept review actions above scrolling hunks, with attribution and passing native editor/layout checks recorded in docs/CLINE-REUSE.md.
+2026-11-09 - Why: prevent the header and composer from squeezing review controls out of reach; retain usable conversation/review space and a short-panel scrolling fallback without importing Cline's agent runtime.
