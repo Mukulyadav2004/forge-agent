@@ -1,4 +1,5 @@
 import { checkEditorTransactions } from './edits/realEditor';
+import { checkReviewFeedback } from './sidebar/reviewFeedback';
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createServer } from "node:http";
@@ -154,6 +155,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   assert.ok(folder);
   assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder.uri, "example.txt"))), "original text\n");
   await checkEditorTransactions({ client, frame: restoredFrame, extensionUri: extension.extensionUri });
+  await checkReviewFeedback({ client, frame: restoredFrame, extensionUri: extension.extensionUri });
   await client.close();
   const denied = await fetch(connection.url, { method: "POST" });
   assert.equal(denied.status, 403);

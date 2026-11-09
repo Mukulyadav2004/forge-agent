@@ -7,16 +7,19 @@ import type { ChatMessage, FileEvidence, HostMessage } from "../shared/messages"
 import { isArchitectureRequest } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import type { ReviewCommand } from '../edits/review';
+import { ReviewFeedback } from './ReviewFeedback';
 
 export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = "forgeAgent.chat";
 
   private session: ForgeSession | undefined;
   private busy = false;
+  private cancellationRequested = false;
   private status = "Set forgeAgent.model in Settings to connect to local TrueForge.";
   private approvals: TrueForgeApi.UserToolApprovalInputEvent[] = [];
   private readonly messages: ChatMessage[] = [];
   private readonly inspectedFiles: FileEvidence[] = [];
+  private readonly reviewFeedback = new ReviewFeedback();
   private view: vscode.WebviewView | undefined;
   private viewDisposables: vscode.Disposable[] = [];
 
@@ -109,6 +112,7 @@ ${selectedText}`;
     this.busy = true; this.publish();
     try {
       await this.actions.edits.newTask();
+      this.reviewFeedback.clear();
       this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.status = "New task ready";
     } catch (error) { this.status = error instanceof Error ? error.message : 'Could not start a new task.'; }
     this.busy = false; this.publish();
@@ -116,6 +120,8 @@ ${selectedText}`;
   refreshReview(): void { this.publish(); }
   async review(command: ReviewCommand): Promise<void> {
     if (this.busy || this.approvals.length) { this.status = 'Finish or cancel the agent turn before reviewing changes.'; this.publish(); return; }
+    const before = this.actions.edits.state;
+    let succeeded = false;
     try {
       switch (command.action) {
         case 'preview': await this.actions.edits.preview(command.id); break;
@@ -128,7 +134,10 @@ ${selectedText}`;
         case 'undo': await this.actions.edits.undo(); break;
       }
       this.status = this.actions.edits.state.message;
+      succeeded = true;
     } catch (error) { this.status = error instanceof Error ? error.message : 'Review operation failed.'; }
+    this.reviewFeedback.record({ command, before, after: this.actions.edits.state, succeeded, message: this.status });
+    if (command.action !== 'preview') this.status += ' Editor state will be sent with your next message.';
     this.publish();
   }
   recordInspection(file: FileEvidence): void {
@@ -164,6 +173,7 @@ ${selectedText}`;
     void this.view?.webview.postMessage(response);
   }
   private async cancel(): Promise<void> {
+    this.cancellationRequested = true;
     this.approvals = [];
     try {
       const discarded = this.actions.edits.cancel();
@@ -175,10 +185,13 @@ ${selectedText}`;
     this.publish();
   }
   private async run(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input']): Promise<void> {
+    this.cancellationRequested = false;
     this.busy = true; this.status = "Connecting to TrueForge…"; this.publish();
     try {
       this.actions.edits.beginTurn();
       const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
+      const feedback = input?.length && input.every(event => event.type === 'user.message') ? this.reviewFeedback.message() : undefined;
+      if (feedback) preparedInput.push({ type: 'user.message', content: feedback });
       for (const event of input ?? []) {
         if (event.type === 'user.message' && typeof event.content === 'string' && isArchitectureRequest(event.content)) {
           const context = await this.actions.architectureContext();
@@ -194,6 +207,7 @@ ${selectedText}`;
         this.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), onEvent: event => this.event(event) });
       }
       await this.session.send(preparedInput);
+      if (feedback && !this.cancellationRequested) this.reviewFeedback.clear();
     } catch (error: unknown) {
       // A failed create must not retain settings that the user has corrected.
       if (!this.session?.id) this.session = undefined;
