@@ -2,6 +2,20 @@
 
 A VS Code extension that sends tasks to **local TrueForge**. TrueForge owns the model calls and agent loop. The extension supplies the sidebar and editor tools through MCP.
 
+## Starting point, upstream source and licence
+
+**Repository starting point: from scratch.** This repository is not a Git-history fork of Cline. Its initial commit is `05ffce16d5d405027ca1662dd104c5ecfdf27a16` in [Mukulyadav2004/forge-agent](https://github.com/Mukulyadav2004/forge-agent). Selected Cline editor code was adapted later; the Cline source commit below is a reuse reference, not an ancestor of this repository.
+
+- **Upstream repository:** [cline/cline](https://github.com/cline/cline).
+- **Source checkout:** [Mukulyadav2004/myAiCodingAssistant](https://github.com/Mukulyadav2004/myAiCodingAssistant).
+- **Exact source commit:** `7a7878cb52fc33967d8b464b3e3d899beac42d4d`.
+- **Borrowed implementation:** `apps/vscode/src/hosts/vscode/VscodeEditPreview.ts`, adapted as [src/editor/ClineEditPreview.ts](src/editor/ClineEditPreview.ts). It supplies virtual documents, the native VS Code diff preview, focus preservation and precise preview-tab cleanup. The focus-preservation scenario from `apps/vscode/src/hosts/vscode/VscodeEditPreview.test.ts` was also adapted in [test/edits/realEditor.ts](test/edits/realEditor.ts).
+- **Changes and reasons:** the Forge URI scheme and UUIDs separate previews from Cline and from one another; an instance-owned content store and explicit disposal give our transaction service control over their lifetime; options objects clarify the adapted API. Immediate final rendering replaces Cline's simulated streaming animation so the preview shows the actual completed proposal. Cline animation, decorations, logging and SDK executor dependencies were omitted to keep the adapter independent of Cline's runtime.
+- **Original import in this repository:** `4e1a109b966c47f7dcf2e7527d4251283937e613` (`buid apply and undo`). That existing commit contains both the adaptation and our apply/undo implementation; it was not a standalone upstream import. The history is retained as it occurred.
+- **Licence and attribution:** Forge Agent is licensed under [Apache-2.0](LICENSE). Cline's original Apache-2.0 licence and copyright notice are preserved unchanged in [licenses/Cline-Apache-2.0.txt](licenses/Cline-Apache-2.0.txt), with source attribution in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Dependencies retain their respective licences.
+
+Our apply/undo transaction service and workspace guards were implemented for Forge Agent. The extension does not include Cline's agent loop, provider client or disk-writing SDK executor; model calls and tool iteration run in TrueForge. Future source adaptations should be introduced in dedicated commits naming their upstream paths and exact source commits.
+
 ## Run
 
 ```sh
@@ -103,5 +117,3 @@ The build bundles TrueForge's ESM exports into the extension's CommonJS entry be
 6. `docs/NOV-4-5-HANDOFF.md`: remaining real-world checks.
 7. `src/context/projectContext.ts`, `src/agent/instructions.ts`, and `src/webview/markdown.ts`: bounded context, evidence requirements, and safe presentation.
 8. `src/edits/EditService.ts` and `docs/APPLY-UNDO.md`: proposal revisions, guarded transactions, snapshots, and undo.
-
-The editor preview implementation is adapted from Cline. See `THIRD_PARTY_NOTICES.md` and `licenses/Cline-Apache-2.0.txt` for the exact source commit, original license, and modifications. The agent loop and model calls run in TrueForge.
