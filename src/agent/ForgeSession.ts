@@ -17,7 +17,7 @@ export class ForgeSession {
   private readonly client: TrueForge;
   private sessionId: string | undefined;
   private cancelled = false;
-  constructor(private readonly options: { baseUrl: string; model: string; connector: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
+  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
     this.client = createClient(options.baseUrl);
     if (!/^[^/\s]+\/\S+$/u.test(options.model)) {
       throw new Error('Use the full provider/model name. Click Select model or run Forge: Select Model to choose a configured model.');
@@ -33,7 +33,7 @@ export class ForgeSession {
       if (this.cancelled) return;
       const connector = this.options.editorManifest?.name ?? this.options.connector;
       const response = await this.client.sessions.create({ agent: { spec: {
-        model: { name: this.options.model },
+        model: { name: this.options.model, ...(this.options.reasoningEffort ? { params: { reasoningEffort: this.options.reasoningEffort } } : {}) },
         instructions: agentInstructions,
         // Enable harness capabilities as the editor gains support for their interactions.
         config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 32 },

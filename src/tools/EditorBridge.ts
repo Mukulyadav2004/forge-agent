@@ -81,16 +81,21 @@ export class EditorBridge implements vscode.Disposable {
       if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
       const actualEnd = start_line + output.length - 1;
       this.readEvents.fire({ path, startLine: start_line, endLine: actualEnd, origin: 'tool' });
-      return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${output.join('\n')}` }], structuredContent: { base_revision: revision } };
+      const text = output.join('\n');
+      // TrueForge prefers structured MCP results, so the source must be present there too.
+      return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length } };
     });
     server.registerTool('list_files', { description: 'Discover up to 100 workspace file paths by glob.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');
       const files = await vscode.workspace.findFiles(glob, '**/{node_modules,.git,.env*,out,dist}/**', 100);
       return { content: [{ type: 'text', text: files.map(uri => vscode.workspace.asRelativePath(uri)).join('\n') }] };
     });
-    server.registerTool('propose_edit', { description: 'Stage a read-only diff using the base_revision returned by read_file. The user must apply it in the editor.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000) }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation }) => {
-      const id = await this.options.edits.stage({ path, revision: base_revision, text: new_text, explanation });
-      return { content: [{ type: 'text', text: `Proposal ${id} is staged for ${path}. No files changed. To save it, the user must open Review changes in the Forge sidebar and click Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.` }], structuredContent: { proposal_id: id } };
+    server.registerTool('propose_edit', { description: 'Stage a read-only diff using read_file base_revision. Optional start_line and end_line replace only those inclusive complete lines; otherwise new_text replaces the file. The user applies hunks in the editor.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), start_line: z.number().int().min(1).optional(), end_line: z.number().int().min(1).optional() }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation, start_line, end_line }) => {
+      if ((start_line === undefined) !== (end_line === undefined)) throw new Error('Provide both start_line and end_line for a ranged proposal.');
+      const range = start_line !== undefined && end_line !== undefined ? { startLine: start_line, endLine: end_line } : undefined;
+      const id = await this.options.edits.stage({ path, revision: base_revision, text: new_text, explanation, range });
+      const message = `Proposal ${id} is staged for ${path}. No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.`;
+      return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path, message } };
     });
     return server;
   }

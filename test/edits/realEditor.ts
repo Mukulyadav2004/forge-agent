@@ -41,6 +41,27 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   const originalBytes = new Map<string, Uint8Array>();
   for (const path of Object.keys(original)) originalBytes.set(path, await vscode.workspace.fs.readFile(vscode.Uri.joinPath(rootUri, path)));
   await vscode.commands.executeCommand('forgeAgent.rejectAll');
+  const hunkOriginal = 'header\n    one\nseparator\ntwo\nfooter\n';
+  await edit({ path: 'example.txt', text: hunkOriginal, save: true });
+  const hunkProposal = await stage({ path: 'example.txt', text: 'header\n    ONE\n\tinserted <img src=x>\nseparator\nTWO\nfooter\n' });
+  const hunkRows = row(hunkProposal).locator('.hunk-row');
+  assert.equal(await hunkRows.count(), 2);
+  assert.deepEqual(await hunkRows.nth(0).locator('.cline-diff-code').allTextContents(), ['    one', '    ONE', '\tinserted <img src=x>']);
+  assert.deepEqual(await hunkRows.nth(0).locator('.cline-diff-number').allTextContents(), ['2', '2', '3']);
+  assert.deepEqual(await hunkRows.nth(0).locator('.cline-diff-prefix').allTextContents(), ['-', '+', '+']);
+  assert.equal(await hunkRows.locator('img').count(), 0);
+  await hunkRows.nth(1).getByRole('button', { name: 'Reject hunk', exact: true }).click();
+  await message.filter({ hasText: 'Rejected this hunk' }).waitFor();
+  assert.equal(await disk('example.txt'), hunkOriginal);
+  assert.deepEqual(await hunkRows.nth(0).locator('.cline-diff-number').allTextContents(), ['', '', '']);
+  await hunkRows.nth(0).getByRole('button', { name: 'Accept hunk', exact: true }).click();
+  await message.filter({ hasText: 'Accepted and saved this hunk' }).waitFor();
+  assert.equal(await disk('example.txt'), 'header\n    ONE\n\tinserted <img src=x>\nseparator\ntwo\nfooter\n');
+  await panel.screenshot({ path: vscode.Uri.joinPath(options.extensionUri, 'out-test', 'edit-hunks.png').fsPath });
+  await panel.getByRole('button', { name: 'Undo last apply', exact: true }).click();
+  await message.filter({ hasText: 'Undid the last applied batch' }).waitFor();
+  assert.equal(await disk('example.txt'), hunkOriginal);
+  await edit({ path: 'example.txt', text: original['example.txt'], save: true });
   await frame.getByRole('textbox', { name: 'Message', exact: true }).focus();
   for (const [path, text] of Object.entries(original)) await stage({ path, text: `changed ${text}` });
   assert.equal(await frame.getByRole('textbox', { name: 'Message', exact: true }).evaluate(element => element === document.activeElement), true);
@@ -100,5 +121,5 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   await frame.locator('#status').filter({ hasText: 'preserve your edits' }).waitFor();
   assert.equal(await disk('example.txt'), 'later manual work\n');
   await panel.screenshot({ path: vscode.Uri.joinPath(options.extensionUri, 'out-test', 'edit-review.png').fsPath });
-  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(options.extensionUri, 'out-test', 'edit-result.json'), new TextEncoder().encode(JSON.stringify({ native_batch_apply: true, exact_batch_undo: true, conflict_blocks_batch: true, dirty_buffer_preserved: true, later_edits_preserved: true, cline_preview_focus: true, independent_preview_cleanup: true })));
+  await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(options.extensionUri, 'out-test', 'edit-result.json'), new TextEncoder().encode(JSON.stringify({ native_batch_apply: true, exact_batch_undo: true, conflict_blocks_batch: true, dirty_buffer_preserved: true, later_edits_preserved: true, cline_preview_focus: true, independent_preview_cleanup: true, per_hunk_accept_reject_undo: true })));
 }

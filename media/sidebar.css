@@ -155,3 +155,13 @@ button:focus-visible, textarea:focus-visible {
 .proposal-row { border-top: 0.0625rem solid var(--vscode-panel-border); padding: 0.5rem 0; }
 .proposal-status { color: var(--vscode-descriptionForeground); font-size: 0.6875rem; }
 .review-error { color: var(--vscode-errorForeground); }
+.hunk-row { border-top: 0.0625rem solid var(--vscode-panel-border); padding-top: 0.5rem; margin-top: 0.5rem; }
+.hunk-row h4 { font-size: 0.75rem; margin: 0 0 0.25rem; }
+.cline-diff-lines { max-height: 12rem; overflow: auto; margin: 0.375rem 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.75rem; }
+.cline-diff-line { display: flex; min-width: max-content; border-left: 0.1875rem solid transparent; }
+.cline-diff-added { background: var(--vscode-diffEditor-insertedTextBackground); border-left-color: var(--vscode-gitDecoration-addedResourceForeground, currentColor); }
+.cline-diff-removed { background: var(--vscode-diffEditor-removedTextBackground); border-left-color: var(--vscode-gitDecoration-deletedResourceForeground, currentColor); }
+.cline-diff-number { width: 2.5rem; flex-shrink: 0; text-align: right; padding: 0.125rem 0.5rem 0.125rem 0; color: var(--vscode-editorLineNumber-foreground); border-right: 0.0625rem solid var(--vscode-panel-border); user-select: none; }
+.cline-diff-prefix { width: 1.25rem; flex-shrink: 0; text-align: center; padding: 0.125rem 0; user-select: none; }
+.cline-diff-code { white-space: pre; padding: 0.125rem 0.5rem 0.125rem 0; }
+.cline-diff-eof { color: var(--vscode-descriptionForeground); font-size: 0.6875rem; padding: 0.25rem; }

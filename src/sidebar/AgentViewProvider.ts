@@ -87,12 +87,19 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     if (this.busy || this.approvals.length || this.actions.edits.state.busy) return;
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.selection.isEmpty) { await vscode.window.showInformationMessage("Select some code first."); return; }
+    const selection = editor.selection;
+    const document = editor.document;
+    const version = document.version;
+    const selectedText = document.getText(selection);
+    if (selectedText.length > 20000) { await vscode.window.showInformationMessage('Select a smaller section (at most 20,000 characters).'); return; }
     const instruction = await vscode.window.showInputBox({ prompt: "What should Forge change in this selection?" });
     if (!instruction?.trim()) return;
+    if (this.busy || this.approvals.length || this.actions.edits.state.busy) return;
+    if (document.version !== version) { await vscode.window.showInformationMessage('This file changed while entering your instruction. Select it again.'); return; }
     const text = `${instruction}
-File: ${vscode.workspace.asRelativePath(editor.document.uri)}
-Selected lines ${editor.selection.start.line + 1}-${editor.selection.end.line + 1}:
-${editor.document.getText(editor.selection).slice(0, 20000)}`;
+File: ${vscode.workspace.asRelativePath(document.uri)}
+Selected lines ${selection.start.line + 1}-${selection.end.line + (selection.end.character === 0 ? 0 : 1)}:
+${selectedText}`;
     this.messages.push({ id: randomUUID(), role: "user", text });
     await vscode.commands.executeCommand("forgeAgent.open");
     await this.run([{ type: "user.message", content: text }]);
@@ -114,6 +121,8 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
         case 'preview': await this.actions.edits.preview(command.id); break;
         case 'apply': await this.actions.edits.apply(command.id); break;
         case 'reject': await this.actions.edits.reject(command.id); break;
+        case 'apply_hunk': await this.actions.edits.applyHunk(command); break;
+        case 'reject_hunk': await this.actions.edits.rejectHunk(command); break;
         case 'apply_all': await this.actions.edits.apply(); break;
         case 'reject_all': await this.actions.edits.reject(); break;
         case 'undo': await this.actions.edits.undo(); break;
@@ -182,7 +191,7 @@ ${editor.document.getText(editor.selection).slice(0, 20000)}`;
         if (!model) throw new Error("Model not configured. Set forgeAgent.model after adding a model in local TrueForge.");
         const connector = config.get<string>("connector", "forge-editor");
         const editorManifest = connector ? await this.actions.getEditorManifest(connector) : undefined;
-        this.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, onEvent: event => this.event(event) });
+        this.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), onEvent: event => this.event(event) });
       }
       await this.session.send(preparedInput);
     } catch (error: unknown) {

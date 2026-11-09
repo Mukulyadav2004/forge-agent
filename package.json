@@ -91,6 +91,12 @@
           "default": "",
           "description": "Fully qualified provider/model name. Use Forge: Select Model to choose from your local TrueForge server."
         },
+        "forgeAgent.reasoningEffort": {
+          "type": "string",
+          "enum": ["", "minimal", "low", "medium", "high"],
+          "default": "",
+          "description": "Optional reasoning effort passed through TrueForge. Leave empty for the provider default; choose a level supported by the selected model, then start a new task."
+        },
         "forgeAgent.connector": {
           "type": "string",
           "default": "forge-editor",
@@ -110,14 +116,20 @@
   "scripts": {
     "compile": "pnpm run check && node scripts/build.mjs",
     "watch": "pnpm run compile && node scripts/watch.mjs",
-    "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.webview.json --noEmit",
+    "check": "tsc --project tsconfig.json --noEmit && tsc --project tsconfig.webview.json --noEmit && pnpm run check:scripts",
+    "check:scripts": "node --check scripts/task-a.mjs && node --check scripts/trueforge-local.mjs",
     "dev": "pnpm run compile && node scripts/dev.mjs",
+    "trueforge:local": "node scripts/trueforge-local.mjs",
     "test:smoke": "pnpm run compile && tsc --project tsconfig.test.json && node scripts/smoke.mjs",
     "test:integration": "pnpm run compile && node --test test/integration.mjs",
     "test": "pnpm run check && pnpm run test:integration && pnpm run test:edits && pnpm run test:smoke",
     "test:live": "pnpm run compile && node scripts/live-check.mjs",
     "test:architecture": "pnpm run compile && node scripts/architecture-check.mjs",
-    "test:edits": "pnpm run compile && node --test test/edits/*.mjs"
+    "test:edits": "pnpm run compile && node --test test/edits/*.mjs",
+    "task:a:prepare": "node scripts/task-a.mjs prepare",
+    "task:a:verify": "node scripts/task-a.mjs verify",
+    "task:a:open": "pnpm run compile && node scripts/task-a.mjs open",
+    "test:task-a": "pnpm run compile && tsc --project tsconfig.test.json && node scripts/task-a.mjs test"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
@@ -129,6 +141,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
     "@truefoundry/trueforge-sdk": "0.183.0",
+    "diff": "8.0.2",
     "dompurify": "3.4.17",
     "marked": "18.1.3",
     "mermaid": "12.3.0",

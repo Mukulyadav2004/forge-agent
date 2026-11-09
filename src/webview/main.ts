@@ -34,6 +34,7 @@ document.getElementById("select-model-button")?.addEventListener("click", () => 
   vscode.postMessage({ type: "select_model" });
 });
 let awaitingAck = false;
+let renderedReview = '';
 const status = document.getElementById("status");
 const cancel = document.getElementById("cancel-button");
 const approve = document.getElementById("approve-button");
@@ -153,7 +154,12 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
 
   renderMessages({ messages: event.data.messages, complete: !event.data.busy });
   const reviewPanel = document.getElementById('review-panel');
-  if (reviewPanel instanceof HTMLElement) renderReviewPanel({ container: reviewPanel, state: event.data.review, disabled: event.data.busy || event.data.approval, onCommand: command => vscode.postMessage({ type: 'review', command }) });
+  const reviewDisabled = event.data.busy || event.data.approval;
+  const reviewKey = JSON.stringify({ state: event.data.review, disabled: reviewDisabled });
+  if (reviewPanel instanceof HTMLElement && reviewKey !== renderedReview) {
+    renderReviewPanel({ container: reviewPanel, state: event.data.review, disabled: reviewDisabled, onCommand: command => vscode.postMessage({ type: 'review', command }) });
+    renderedReview = reviewKey;
+  }
   const evidence = document.getElementById('file-evidence');
   const evidenceList = document.getElementById('file-evidence-list');
   if (evidence && evidenceList) {

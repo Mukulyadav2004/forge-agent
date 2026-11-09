@@ -14,3 +14,18 @@
 - The real VS Code tests cover focus preservation, independent previews for the same path, closing only the selected preview, and leaving the real file unchanged before acceptance. `test/edits/realEditor.ts` includes an adaptation of the focus-preservation test from `apps/vscode/src/hosts/vscode/VscodeEditPreview.test.ts` at the same source commit.
 
 The apply/undo transaction service and workspace guards are Forge Agent's implementation. No Cline agent loop, provider client, or disk-writing SDK executor is included.
+
+## Cline diff-line rendering
+
+- Upstream, source checkout, exact commit and licence: the same Cline source point recorded above.
+- Source: `apps/vscode/webview-ui/src/components/chat/DiffEditRow.tsx`, specifically `DiffLine` and the old/new line counters in `FileBlock`.
+- Adapted implementation: `src/webview/ClineDiffLines.ts`; integrated by `src/webview/reviewPanel.ts` with styles in `media/sidebar.css`.
+- Retained behavior: changed-line tints and indicator bars, line-number gutter, explicit addition/deletion prefixes, code content and separate counters for removed/added lines.
+- Changes and reasons: ported React/Tailwind rendering to safe DOM nodes and VS Code theme variables; accepts the host's computed hunks instead of parsing model patch strings; preserves all code indentation after the single diff marker; handles CRLF and terminal-newline display explicitly. Like the upstream component's unknown-position behavior, line numbers are hidden after rejection/undo can invalidate proposed offsets. Cline gRPC services, file-opening dependencies and unused patch parsers are omitted.
+- Full native previews still use the Cline-derived virtual-document adapter. Hunk decisions and guarded apply/undo remain Forge Agent implementations.
+
+## jsdiff dependency
+
+- Package: `diff@8.0.2`, https://github.com/kpdecker/jsdiff.
+- Used for bounded line-diff computation in `src/edits/lineChanges.ts`. Per-hunk decisions, transactions and review controls are Forge Agent's implementation.
+- BSD-3-Clause copyright and licence are preserved in `licenses/jsdiff-BSD-3-Clause.txt` for bundled distribution.

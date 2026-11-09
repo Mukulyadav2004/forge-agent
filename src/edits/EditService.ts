@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ProposalView, ReviewState } from './review';
+import { buildLineChanges, composeLineChanges } from './lineChanges';
+import type { ReviewPart } from './lineChanges';
 
 export const MAX_EDIT_CHARACTERS = 500_000;
 
@@ -23,8 +25,8 @@ export interface EditBackend {
   preview(options: { id: string; path: string; before: string; after: string }): Promise<void>;
   closePreview(id: string): Promise<void>;
 }
-interface Proposal { view: ProposalView; before: FileSnapshot; after: string; task: string }
-interface UndoBatch { id: string; proposalIds: string[]; before: FileSnapshot[]; after: FileSnapshot[] }
+interface Proposal { view: ProposalView; before: FileSnapshot; original: string; after: string; parts: ReviewPart[]; task: string }
+interface UndoBatch { id: string; selections: { proposalId: string; hunkIds: string[] }[]; before: FileSnapshot[]; after: FileSnapshot[] }
 interface ReadReceipt { task: string; file: FileSnapshot }
 
 export function contentHash(bytes: Uint8Array): string {
@@ -56,7 +58,7 @@ export class EditService {
 
   get state(): ReviewState {
     return {
-      proposals: [...this.proposals.values()].map(proposal => ({ ...proposal.view })),
+      proposals: [...this.proposals.values()].map(proposal => ({ ...proposal.view, hunks: proposal.view.hunks.map(hunk => ({ ...hunk })) })),
       busy: this.busy, canUndo: !this.blocked && this.history.length > 0,
       message: this.message, ...(this.recoveryPath ? { recoveryPath: this.recoveryPath } : {}),
     };
@@ -90,7 +92,8 @@ export class EditService {
     const ids: string[] = [];
     for (const proposal of this.proposals.values()) {
       if (proposal.view.status === 'pending' || proposal.view.status === 'conflict') {
-        proposal.view.status = 'rejected'; ids.push(proposal.view.id);
+        for (const hunk of proposal.view.hunks) if (hunk.status === 'pending') hunk.status = 'rejected';
+        proposal.view.status = proposal.view.hunks.some(hunk => hunk.status === 'applied') ? 'applied' : 'rejected'; ids.push(proposal.view.id);
       }
     }
     this.changed('Pending proposals discarded. Applied changes can be restored with Undo.');
@@ -109,7 +112,7 @@ export class EditService {
     this.receipts.set(revision, { task, file });
     return { revision, file };
   }
-  async stage(options: { path: string; revision: string; text: string; explanation: string }): Promise<string> {
+  async stage(options: { path: string; revision: string; text: string; explanation: string; range?: { startLine: number; endLine: number } }): Promise<string> {
     this.assertAvailable();
     const receipt = this.receipts.get(options.revision);
     if (!receipt || receipt.task !== this.task || this.cancelled || receipt.file.path !== options.path) throw new Error('Read this file again and pass its current base_revision to propose_edit.');
@@ -117,13 +120,21 @@ export class EditService {
     if (receipt.task !== this.task || this.cancelled) throw new Error('The proposal belongs to a cancelled task.');
     if (actual.dirty) throw new Error(`Save your unsaved changes in ${options.path}, then read it again before proposing edits.`);
     if (!matches({ actual, expected: receipt.file })) throw new Error(`${options.path} changed after it was read. Read it again before proposing edits.`);
-    const text = options.text.replace(/\r\n|\r|\n/g, actual.eol);
-    if (text.length > MAX_EDIT_CHARACTERS || text.includes('\0') || text.startsWith('\uFEFF') || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'utf8')) !== text) {
+    let text = options.text.replace(/\r\n|\r|\n/g, actual.eol);
+    if (options.range) {
+      const { startLine, endLine } = options.range;
+      const lines = actual.text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+      if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length) throw new Error('Choose complete lines inside this file for a ranged proposal.');
+      if (endLine < lines.length && text && !text.endsWith(actual.eol)) text += actual.eol;
+      text = lines.slice(0, startLine - 1).join('') + text + lines.slice(endLine).join('');
+    }
+    if (text.length > MAX_EDIT_CHARACTERS || text.includes('\0') || options.text.startsWith('\uFEFF') || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'utf8')) !== text) {
       throw new Error('Proposals must contain valid UTF-8 text within the file limit, without NUL characters or a leading BOM. Encoding metadata is preserved automatically.');
     }
     if (text === actual.text) throw new Error('The proposed content is identical to the current file.');
+    const { parts, hunks } = buildLineChanges({ before: actual.text, after: text });
     const id = randomUUID();
-    const proposal: Proposal = { view: { id, path: options.path, explanation: options.explanation, status: 'pending' }, before: actual, after: text, task: this.task };
+    const proposal: Proposal = { view: { id, path: options.path, explanation: options.explanation, status: 'pending', hunks }, before: actual, original: actual.text, after: text, parts, task: this.task };
     this.proposals.set(id, proposal);
     try {
       await this.options.backend.preview({ id, path: options.path, before: actual.text, after: text });
@@ -150,14 +161,17 @@ export class EditService {
     if (!proposal) throw new Error('This proposal is no longer available.');
     this.busy = true; this.changed();
     try {
-      await this.options.backend.preview({ id, path: proposal.view.path, before: proposal.before.text, after: proposal.after });
+      await this.openPreview(proposal);
       this.changed(`Preview opened for ${proposal.view.path}.`);
     } finally { this.busy = false; this.changed(); }
   }
   async reject(id?: string): Promise<void> {
     this.assertAvailable();
     const selected = [...this.proposals.values()].filter(proposal => (!id || proposal.view.id === id) && (proposal.view.status === 'pending' || proposal.view.status === 'conflict'));
-    for (const proposal of selected) proposal.view.status = 'rejected';
+    for (const proposal of selected) {
+      for (const hunk of proposal.view.hunks) if (hunk.status === 'pending') hunk.status = 'rejected';
+      proposal.view.status = proposal.view.hunks.some(hunk => hunk.status === 'applied') ? 'applied' : 'rejected';
+    }
     this.changed(`Rejected ${selected.length} proposal(s). No files were changed.`);
     await this.closePreviews(selected.map(proposal => proposal.view.id));
   }
@@ -165,6 +179,53 @@ export class EditService {
     this.assertAvailable();
     const selected = [...this.proposals.values()].filter(proposal => (!id || proposal.view.id === id) && (proposal.view.status === 'pending' || proposal.view.status === 'conflict'));
     if (!selected.length) throw new Error('There are no pending proposals to apply.');
+    await this.applySelected({ selected });
+  }
+  async applyHunk(options: { id: string; hunkId: string }): Promise<void> {
+    this.assertAvailable();
+    const proposal = this.pendingHunk(options);
+    await this.applySelected({ selected: [proposal], hunkId: options.hunkId });
+  }
+  async rejectHunk(options: { id: string; hunkId: string }): Promise<void> {
+    this.assertAvailable();
+    const proposal = this.pendingHunk(options);
+    this.busy = true; this.changed();
+    try {
+      for (const hunk of proposal.view.hunks) if (hunk.id === options.hunkId) hunk.status = 'rejected';
+      this.updateStatus(proposal);
+      await this.refreshPreview(proposal);
+      this.changed('Rejected this hunk. No files were changed. Previously accepted hunks remain saved.');
+    } finally { this.busy = false; this.changed(); }
+  }
+  private pendingHunk(options: { id: string; hunkId: string }): Proposal {
+    const proposal = this.proposals.get(options.id);
+    if (!proposal || proposal.task !== this.task || !['pending', 'conflict'].includes(proposal.view.status)
+      || !proposal.view.hunks.some(hunk => hunk.id === options.hunkId && hunk.status === 'pending')) throw new Error('This hunk is no longer pending.');
+    return proposal;
+  }
+  private updateStatus(proposal: Proposal): void {
+    proposal.view.status = proposal.view.hunks.some(hunk => hunk.status === 'pending') ? proposal.view.status === 'conflict' ? 'conflict' : 'pending'
+      : proposal.view.hunks.some(hunk => hunk.status === 'applied') ? 'applied' : 'rejected';
+  }
+  private candidate(options: { proposal: Proposal; hunkId?: string }): string {
+    return composeLineChanges({ parts: options.proposal.parts, accepted: new Set(options.proposal.view.hunks.filter(hunk =>
+      hunk.status === 'applied' || (hunk.status === 'pending' && (!options.hunkId || hunk.id === options.hunkId))).map(hunk => hunk.id)) });
+  }
+  private async openPreview(proposal: Proposal): Promise<void> {
+    const pending = proposal.view.status === 'pending' || proposal.view.status === 'conflict';
+    const reviewed = proposal.view.hunks.some(hunk => hunk.status === 'applied' || hunk.status === 'undone');
+    const reviewedText = composeLineChanges({ parts: proposal.parts, accepted: new Set(proposal.view.hunks.filter(hunk => hunk.status === 'applied').map(hunk => hunk.id)) });
+    await this.options.backend.preview({ id: proposal.view.id, path: proposal.view.path,
+      before: pending ? proposal.before.text : proposal.original, after: pending ? this.candidate({ proposal }) : reviewed ? reviewedText : proposal.after });
+  }
+  private async refreshPreview(proposal: Proposal): Promise<void> {
+    try {
+      if (proposal.view.status === 'pending') await this.openPreview(proposal);
+      else await this.closePreviews([proposal.view.id]);
+    } catch { this.changed('The review state is saved, but the preview could not refresh. Use Preview to reopen it.'); }
+  }
+  private async applySelected(options: { selected: Proposal[]; hunkId?: string }): Promise<void> {
+    const { selected } = options;
     this.busy = true; this.changed();
     try {
       for (const proposal of selected) {
@@ -176,13 +237,22 @@ export class EditService {
       }
       const batchId = randomUUID();
       const before = selected.map(proposal => proposal.before);
-      const after = await this.commit({ id: batchId, before, texts: selected.map(proposal => proposal.after) });
-      this.history.push({ id: batchId, proposalIds: selected.map(proposal => proposal.view.id), before, after });
+      const selections = selected.map(proposal => ({ proposalId: proposal.view.id, hunkIds: proposal.view.hunks.filter(hunk =>
+        hunk.status === 'pending' && (!options.hunkId || hunk.id === options.hunkId)).map(hunk => hunk.id) }));
+      const after = await this.commit({ id: batchId, before, texts: selected.map(proposal => this.candidate({ proposal, hunkId: options.hunkId })) });
+      this.history.push({ id: batchId, selections, before, after });
       if (this.history.length > 10) this.history.shift();
-      for (const proposal of selected) proposal.view.status = 'applied';
+      for (const [index, proposal] of selected.entries()) {
+        const current = after[index];
+        const selection = selections[index];
+        if (!current || !selection) throw new Error('Missing committed review state.');
+        proposal.before = current;
+        for (const hunk of proposal.view.hunks) if (selection.hunkIds.includes(hunk.id)) hunk.status = 'applied';
+        this.updateStatus(proposal);
+      }
       this.receipts.clear();
-      this.changed(`Applied and saved ${selected.length} file(s). Undo is available.`);
-      await this.closePreviews(selected.map(proposal => proposal.view.id));
+      this.changed(options.hunkId ? `Accepted and saved this hunk. Undo is available. ${selected.some(proposal => proposal.view.status === 'pending') ? 'Other hunks stay pending.' : 'No pending hunks remain.'}` : `Applied and saved ${selected.length} file(s). Undo is available.`);
+      for (const proposal of selected) await this.refreshPreview(proposal);
     } catch (error) {
       this.changed(error instanceof Error ? error.message : 'Apply failed.');
       throw error;
@@ -200,16 +270,22 @@ export class EditService {
       }
       const restored = await this.commit({ id: `undo-${batch.id}`, before: batch.after, texts: batch.before.map(file => file.text), expectedBytes: batch.before.map(file => file.bytes) });
       this.history.pop();
-      const previous = this.history.at(-1);
-      if (previous) {
+      for (const previous of this.history) {
         for (const [index, expected] of previous.after.entries()) {
           const current = restored.find(file => file.path === expected.path);
           if (current && current.text === expected.text && contentHash(current.bytes) === contentHash(expected.bytes)) previous.after[index] = current;
         }
       }
-      for (const id of batch.proposalIds) {
-        const proposal = this.proposals.get(id);
-        if (proposal) proposal.view.status = 'undone';
+      for (const selection of batch.selections) {
+        const proposal = this.proposals.get(selection.proposalId);
+        if (proposal) {
+          proposal.view.status = 'undone';
+          for (const hunk of proposal.view.hunks) {
+            if (selection.hunkIds.includes(hunk.id)) hunk.status = 'undone';
+            else if (hunk.status === 'pending') hunk.status = 'rejected';
+          }
+          await this.closePreviews([proposal.view.id]);
+        }
       }
       this.receipts.clear();
       this.changed(`Undid the last applied batch (${batch.before.length} file(s)).`);

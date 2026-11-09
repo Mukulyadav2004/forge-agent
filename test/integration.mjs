@@ -47,7 +47,7 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
   const events = [];
-  const options = { baseUrl: `http://127.0.0.1:${address.port}`, model: 'test/model', connector: 'forge-editor', onEvent: event => events.push(event) };
+  const options = { baseUrl: `http://127.0.0.1:${address.port}`, model: 'test/model', connector: 'forge-editor', reasoningEffort: 'medium', onEvent: event => events.push(event) };
   try {
     assert.deepEqual(await listModelNames({ baseUrl: options.baseUrl }), ['test/model']);
     assert.throws(() => new ForgeSession({ ...options, model: 'unqualified-model' }), /provider\/model/);
@@ -58,6 +58,7 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
     const createdSpec = requests.find(request => request.url === '/api/v1/sessions').body.agent.spec;
     assert.equal(createdSpec.config.generative_ui.enabled, false);
     assert.equal(createdSpec.config.ask_user_questions.enabled, false);
+    assert.equal(createdSpec.model.params.reasoning_effort, 'medium');
     assert.equal(events.filter(event => event.type === 'model.message.delta').map(event => event.content).join(''), 'Hello Forge');
     await session.send([{ type: 'user.tool_approval', threadId: 'main', toolCallId: 'tool-1', approval: { status: 'deny', reason: 'Test' } }]);
     assert.equal(requests.filter(request => request.url === '/api/v1/sessions').length, 1);

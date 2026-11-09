@@ -198,3 +198,91 @@ test('invalid text and CRLF expansion are rejected before a preview or write', a
   }
   assert.equal(backend.previews.size, 0); assert.equal(backend.replaceCalls, 0);
 });
+
+test('hunks accept independently, preserve rejected lines, and undo exact partial changes', async () => {
+  const original = 'header\nold a\nseparator\nold b\nfooter\n';
+  const { backend, service } = setup({ 'a.txt': original });
+  const id = await stage({ service, path: 'a.txt', text: 'header\nnew a\nextra line\nseparator\nnew b\nfooter\n' });
+  const [first, second] = service.state.proposals[0].hunks;
+  assert.equal(service.state.proposals[0].hunks.length, 2);
+  await service.rejectHunk({ id, hunkId: second.id });
+  assert.equal(backend.replaceCalls, 0);
+  await service.applyHunk({ id, hunkId: first.id });
+  assert.equal(backend.get('a.txt').text, 'header\nnew a\nextra line\nseparator\nold b\nfooter\n');
+  assert.equal(backend.get('a.txt').dirty, false);
+  await service.preview(id);
+  assert.equal(backend.previews.get(id).after, backend.get('a.txt').text);
+  await service.undo();
+  assert.equal(backend.get('a.txt').text, original);
+  assert.equal(service.state.proposals[0].status, 'undone');
+});
+
+test('accepting an insertion rebases remaining hunks; apply-all never resurrects a rejection', async () => {
+  const { backend, service } = setup({ 'a.txt': 'a\nkeep\nb\nkeep\nc\n' });
+  const id = await stage({ service, path: 'a.txt', text: 'a\ninserted\nkeep\nB\nkeep\nC\n' });
+  const [first, second, third] = service.state.proposals[0].hunks;
+  await service.applyHunk({ id, hunkId: first.id });
+  assert.equal(service.state.proposals[0].status, 'pending');
+  await service.rejectHunk({ id, hunkId: second.id });
+  await service.apply();
+  assert.equal(backend.get('a.txt').text, 'a\ninserted\nkeep\nb\nkeep\nC\n');
+  assert.equal(service.state.proposals[0].hunks.find(hunk => hunk.id === third.id).status, 'applied');
+  await service.undo();
+  assert.equal(backend.get('a.txt').text, 'a\ninserted\nkeep\nb\nkeep\nc\n');
+  await service.undo();
+  assert.equal(backend.get('a.txt').text, 'a\nkeep\nb\nkeep\nc\n');
+});
+
+test('a manual change after one accepted hunk blocks subsequent acceptance', async () => {
+  const { backend, service } = setup({ 'a.txt': 'a\nkeep\nb\n' });
+  const id = await stage({ service, path: 'a.txt', text: 'A\nkeep\nB\n' });
+  const [first, second] = service.state.proposals[0].hunks;
+  await service.applyHunk({ id, hunkId: first.id });
+  backend.change({ path: 'a.txt', text: 'user edited this\n' });
+  await assert.rejects(service.applyHunk({ id, hunkId: second.id }), /changed since the proposal/);
+  assert.equal(backend.get('a.txt').text, 'user edited this\n');
+  await assert.rejects(service.undo(), /preserve your edits/);
+});
+
+test('ranged proposals preserve surrounding code and the original CRLF/BOM bytes', async () => {
+  const { backend, service } = setup({ 'a.txt': 'before\r\nold\r\nafter\r\n' });
+  backend.get('a.txt').bytes = Buffer.from('\uFEFFbefore\r\nold\r\nafter\r\n');
+  const original = Buffer.from(backend.get('a.txt').bytes);
+  const read = await service.read('a.txt');
+  await service.stage({ path: 'a.txt', revision: read.revision, text: 'new\nextra', range: { startLine: 2, endLine: 2 }, explanation: '' });
+  await service.apply();
+  assert.equal(backend.get('a.txt').text, 'before\r\nnew\r\nextra\r\nafter\r\n');
+  await service.undo(); assert.deepEqual(Buffer.from(backend.get('a.txt').bytes), original);
+});
+
+test('ranged deletion, EOF newline changes and invalid ranges are handled without offset guessing', async () => {
+  const { backend, service } = setup({ 'a.txt': 'before\ndelete\nafter' });
+  const read = await service.read('a.txt');
+  await assert.rejects(service.stage({ path: 'a.txt', revision: read.revision, text: '', range: { startLine: 2, endLine: 9 }, explanation: '' }), /complete lines/);
+  const id = await service.stage({ path: 'a.txt', revision: read.revision, text: '', range: { startLine: 2, endLine: 2 }, explanation: '' });
+  await service.applyHunk({ id, hunkId: service.state.proposals[0].hunks[0].id });
+  assert.equal(backend.get('a.txt').text, 'before\nafter');
+  await service.undo(); assert.equal(backend.get('a.txt').text, 'before\ndelete\nafter');
+});
+
+test('undo of a hunk discards remaining pending hunks instead of applying a stale proposal', async () => {
+  const { backend, service } = setup({ 'a.txt': 'a\nkeep\nb\n' });
+  const id = await stage({ service, path: 'a.txt', text: 'A\nkeep\nB\n' });
+  const [first, second] = service.state.proposals[0].hunks;
+  await service.applyHunk({ id, hunkId: first.id }); await service.undo();
+  await assert.rejects(service.applyHunk({ id, hunkId: second.id }), /no longer pending/);
+  assert.equal(backend.get('a.txt').text, 'a\nkeep\nb\n');
+  assert.equal(backend.previews.size, 0);
+});
+
+test('hunk undo stays valid across an interleaved apply to another file', async () => {
+  const { backend, service } = setup({ 'a.txt': 'a\nkeep\nb\n', 'b.txt': 'old\n' });
+  const id = await stage({ service, path: 'a.txt', text: 'A\nkeep\nB\n' });
+  const [first, second] = service.state.proposals[0].hunks;
+  await service.applyHunk({ id, hunkId: first.id });
+  const other = await stage({ service, path: 'b.txt', text: 'new\n' }); await service.apply(other);
+  await service.applyHunk({ id, hunkId: second.id });
+  await service.undo(); await service.undo(); await service.undo();
+  assert.equal(backend.get('a.txt').text, 'a\nkeep\nb\n');
+  assert.equal(backend.get('b.txt').text, 'old\n');
+});

@@ -41,7 +41,7 @@ Start with: “List the files in this workspace, read example.txt, then propose 
 ## Next implementation milestone
 
 1. The November 7–8 implementation adds structured proposals, read revisions, whole-file/batch review, conflict checks, protected recovery snapshots, and undo. The Cline-derived virtual preview adapter owns preview tabs and their cleanup.
-2. Add per-hunk accept/reject on top of the transaction service. Whole-file/batch apply and undo now have deterministic and native VS Code coverage, including dirty editor aliases.
+2. November 9 adds per-hunk accept/reject, ranged proposals and a pinned Task A rehearsal. Native editor checks cover partial acceptance/rejection and undo. One live Task A run passed with `google-gemini/gemini-3-5-flash`, complete docstring coverage, 35 Flask helper tests and a clean tree after undo. See `TASK-A.md` for the exact commands and model limitations.
 3. Add search and symbol discovery with explicit result limits. The current evidence list and bounded architecture context still need context-selection reasons and token accounting.
 4. Add command approval and cancellation semantics separately; a shell command can write files even when editor tools do not.
 5. Run the actual Flask tasks repeatedly using the configured model before investing in UI polish.

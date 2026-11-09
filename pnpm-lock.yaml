@@ -14,6 +14,9 @@ importers:
       '@truefoundry/trueforge-sdk':
         specifier: 0.183.0
         version: 0.183.0
+      diff:
+        specifier: 8.0.2
+        version: 8.0.2
       dompurify:
         specifier: 3.4.17
         version: 3.4.17
@@ -611,6 +614,10 @@ packages:
   depd@2.0.0:
     resolution: {integrity: sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==}
     engines: {node: '>= 0.8'}
+
+  diff@8.0.2:
+    resolution: {integrity: sha512-sSuxWU5j5SR9QQji/o2qMvqRNYRDOcBTgsJ/DeCf4iSN4gW+gNMXM7wFIP+fdXZxoNiAnHUTGjCr+TSWXdRDKg==}
+    engines: {node: '>=0.3.1'}
 
   dompurify@3.4.17:
     resolution: {integrity: sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==}
@@ -1554,6 +1561,8 @@ snapshots:
       robust-predicates: 3.0.3
 
   depd@2.0.0: {}
+
+  diff@8.0.2: {}
 
   dompurify@3.4.17:
     optionalDependencies:

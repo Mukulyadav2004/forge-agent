@@ -4,4 +4,6 @@ The canonical executable inline agent specification is in `src/agent/ForgeSessio
 
 Sessions currently use the inline definition in `ForgeSession.ts`; there is no separate deployment manifest to synchronize.
 
+For focused edits, `propose_edit` accepts optional inclusive `start_line` / `end_line` and replaces only those complete lines. The agent instructions prefer this over regenerating an entire file. The editor computes hunks locally; Accept hunk saves through the guarded transaction service, while Reject hunk leaves those lines unchanged. Neither action introduces another agent loop or model-facing apply tool.
+
 The instructions are owned by `src/agent/instructions.ts`. The runtime disables OpenUI, interactive question tools, dynamic subagents, the sandbox, and web search until the extension supports their interactions. Architecture requests include bounded source context from `src/context/projectContext.ts`; all model/tool iteration still runs in TrueForge.

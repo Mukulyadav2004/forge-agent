@@ -1,4 +1,5 @@
 import type { ReviewCommand, ReviewState } from '../edits/review.js';
+import { renderClineDiffLines } from './ClineDiffLines.js';
 
 export function renderReviewPanel(options: { container: HTMLElement; state: ReviewState; disabled: boolean; onCommand: (command: ReviewCommand) => void }): void {
   const { container, state } = options;
@@ -41,7 +42,26 @@ export function renderReviewPanel(options: { container: HTMLElement; state: Revi
         button({ text: 'Reject', command: { action: 'reject', id: proposal.id }, disabled: locked }),
       );
     }
-    row.append(name, status, explanation, actions); list.append(row);
+    const hunks = document.createElement('div'); hunks.className = 'hunk-list';
+    for (const [index, hunk] of proposal.hunks.entries()) {
+      const section = document.createElement('section'); section.className = 'hunk-row'; section.dataset.hunkId = hunk.id;
+      section.setAttribute('aria-label', `Hunk ${index + 1} in ${proposal.path}`);
+      const heading = document.createElement('h4');
+      heading.textContent = `Hunk ${index + 1} · original line ${hunk.oldStart} · −${hunk.oldLines} / +${hunk.newLines} · ${hunk.status}`;
+      section.append(heading);
+      section.append(renderClineDiffLines({ hunk, showLineNumbers: !proposal.hunks.some(item => item.status === 'rejected' || item.status === 'undone') }));
+      if (hunk.truncated) { const hint = document.createElement('p'); hint.textContent = 'Excerpt shortened. Open Preview for the full diff before accepting.'; section.append(hint); }
+      if (hunk.status === 'pending' && (proposal.status === 'pending' || proposal.status === 'conflict')) {
+        const hunkActions = document.createElement('div'); hunkActions.className = 'review-actions';
+        hunkActions.append(
+          button({ text: 'Accept hunk', command: { action: 'apply_hunk', id: proposal.id, hunkId: hunk.id }, disabled: locked || proposal.status === 'conflict' }),
+          button({ text: 'Reject hunk', command: { action: 'reject_hunk', id: proposal.id, hunkId: hunk.id }, disabled: locked }),
+        );
+        section.append(hunkActions);
+      }
+      hunks.append(section);
+    }
+    row.append(name, status, explanation, actions, hunks); list.append(row);
   }
   container.replaceChildren(title, message, toolbar, list);
 }

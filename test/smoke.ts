@@ -139,6 +139,8 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const read = await client.callTool({ name: "read_file", arguments: { path: "example.txt" } });
   assert.equal(read.isError, undefined);
   assert.ok(JSON.stringify(read).includes("original text"));
+  const structuredRead: unknown = read.structuredContent;
+  assert.ok(typeof structuredRead === 'object' && structuredRead !== null && 'text' in structuredRead && typeof structuredRead.text === 'string' && structuredRead.text.includes('original text'), 'TrueForge must receive the file text even when it selects only structuredContent.');
   await restoredFrame.locator('#file-evidence summary').click();
   await restoredFrame.getByRole('button', { name: 'example.txt:1-2', exact: true }).waitFor();
   const escape = await client.callTool({ name: "read_file", arguments: { path: "../outside.txt" } });
