@@ -31,6 +31,7 @@ export async function checkReviewFeedback(options: { client: Client; frame: Fram
     turns.push({ path: request.url ?? '', text });
     if (failNext) { failNext = false; response.writeHead(503).end(JSON.stringify({ error: { message: 'Feedback fixture temporary failure' } })); return; }
     response.setHeader('Content-Type', 'text/event-stream');
+    response.write(`data: ${JSON.stringify({ type: 'turn.created', id: `created-${turns.length}`, turn_id: `feedback-turn-${turns.length}`, previous_turn_id: null, thread_id: null, created_at: new Date().toISOString(), state: { status: 'running' } })}\n\n`);
     response.end(`data: ${JSON.stringify({ type: 'model.message.delta', id: `feedback-${turns.length}`, thread_id: 'main', content: `Review feedback response ${turns.length}` })}\n\ndata: ${JSON.stringify({ type: 'turn.done', id: `done-${turns.length}`, thread_id: null, created_at: new Date().toISOString(), state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] } })}\n\n`);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));

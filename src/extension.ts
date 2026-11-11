@@ -7,6 +7,7 @@ import { EditService } from './edits/EditService';
 import { ToolLog } from './observability/events';
 import { realpath } from 'node:fs/promises';
 import { relative, sep } from 'node:path';
+import { ForgeSession } from './agent/ForgeSession';
 
 let toolLog: ToolLog | undefined;
 
@@ -20,9 +21,10 @@ export function activate(context: vscode.ExtensionContext): void {
       if (!root) throw new Error('Workspace unavailable.');
       return relative(await realpath(root.uri.fsPath), (await files.resolve(path)).realPath).split(sep).join('/');
     },
-    onFailure: () => { void vscode.window.showWarningMessage('Forge tool logging is unavailable. Editor tools can continue; this run has incomplete measurement.'); },
+    onFailure: () => { void vscode.window.showWarningMessage('Forge event logging is unavailable. Editor tools can continue; this run has incomplete measurement.'); },
   });
   const backend = new VscodeEditBackend({ files, storageUri: context.globalStorageUri });
+  ForgeSession.observe = event => toolLog?.recordSession(event);
   const editChanges = new vscode.EventEmitter<void>();
   const edits = new EditService({ backend, onChange: () => editChanges.fire() });
   const bridge = new EditorBridge({ files, edits, log: toolLog });
@@ -67,4 +69,4 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(vscode.commands.registerCommand("forgeAgent.selectModel", () => provider.selectModel()), vscode.commands.registerCommand("forgeAgent.editSelection", () => provider.editSelection()), bridge, copyMcp, vscode.commands.registerCommand("forgeAgent.newTask", () => provider.newTask()), provider, viewRegistration, openAgent, statusButton);
 }
 
-export async function deactivate(): Promise<void> { await toolLog?.flush().catch(() => undefined); }
+export async function deactivate(): Promise<void> { ForgeSession.observe = () => undefined; await toolLog?.flush().catch(() => undefined); }

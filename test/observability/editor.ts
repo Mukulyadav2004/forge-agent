@@ -47,12 +47,22 @@ export async function checkToolLog(options: { client: Client; extensionUri: vsco
     while (Date.now() < deadline) {
       text = await readFile(logPath, 'utf8');
       if (text.endsWith('\n') && text.includes('"name":"propose_edit","outcome":"error"') && text.includes(`"path":"${probe}"`)) {
-        const last = RowSchema.parse(JSON.parse(text.trim().split('\n').at(-1) ?? '{}'));
-        if (last.name === 'propose_edit' && last.path === probe) break;
+        const last = RowSchema.safeParse(JSON.parse(text.trim().split('\n').at(-1) ?? '{}'));
+        if (last.success && last.data.name === 'propose_edit' && last.data.path === probe) break;
       }
       await setTimeout(20);
     }
-    const rows = text.trim().split('\n').map(line => RowSchema.parse(JSON.parse(line)));
+    const all = text.trim().split('\n').map(line => z.record(z.string(), z.unknown()).parse(JSON.parse(line)));
+    const rows = all.filter(row => row.event === 'tool.call').map(row => RowSchema.parse(row));
+    const starts = all.filter(row => row.event === 'session.start');
+    assert.deepEqual(starts.map(row => row.sessionId), ['feedback-session-1', 'feedback-session-2']);
+    assert.ok(starts.every(row => row.taskId === row.sessionId));
+    const completed = all.filter(row => row.event === 'turn.end' && row.outcome === 'done');
+    assert.ok(completed.length > 1);
+    assert.ok(completed.every(row => typeof row.turnId === 'string' && row.turnId.startsWith('feedback-turn-') && typeof row.firstTextMs === 'number' && typeof row.durationMs === 'number' && row.firstTextMs <= row.durationMs));
+    assert.ok(all.some(row => row.event === 'error' && row.errorType === 'RequestError' && row.taskId === 'feedback-session-1'));
+    assert.ok(all.some(row => row.event === 'model.config' && row.model === 'test/review-feedback'));
+    assert.ok(!text.includes('Review feedback response') && !text.includes('Feedback fixture temporary failure') && !text.includes('Change alpha to ALPHA.'));
     assert.deepEqual([...new Set(rows.map(row => row.name))].sort(), ['list_files', 'propose_edit', 'read_file', 'search_code']);
     const last = rows.slice(-5);
     assert.deepEqual(last.map(row => row.outcome), ['ok', 'ok', 'refused', 'refused', 'error']);
@@ -68,7 +78,7 @@ export async function checkToolLog(options: { client: Client; extensionUri: vsco
     assert.equal((await stat(dirname(logPath))).mode & 0o777, 0o700);
     assert.deepEqual((await readdir(root.uri.fsPath, { recursive: true })).sort(), before);
     assert.deepEqual(await readFile(join(root.uri.fsPath, probe)), contentsBefore);
-    await writeFile(vscode.Uri.joinPath(options.extensionUri, 'out-test', 'observability-result.json').fsPath, JSON.stringify({ passed: true, tool_events: rows.length, all_four_tools: true, redaction: true, secret_and_alias_refused: true, storage_outside_workspace: true, workspace_unchanged: true, task_join: 'not available in 3A' }, null, 2));
+    await writeFile(vscode.Uri.joinPath(options.extensionUri, 'out-test', 'observability-result.json').fsPath, JSON.stringify({ passed: true, tool_events: rows.length, all_four_tools: true, redaction: true, secret_and_alias_refused: true, storage_outside_workspace: true, workspace_unchanged: true, sdk_fixture_sessions: starts.length, sdk_fixture_completed_turns: completed.length, turn_timing: true, safe_sdk_errors: true, task_join: 'Real SDK IDs recorded; MCP rows remain unjoined.' }, null, 2));
   } finally {
     for (const path of files) await rm(path, { force: true });
   }
