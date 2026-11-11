@@ -7,9 +7,10 @@ import * as vscode from 'vscode';
 import { z } from 'zod';
 
 const ResultSchema = z.object({
-  matches: z.array(z.object({ path: z.string(), line: z.number(), text: z.string(), line_truncated: z.boolean() })),
+  files: z.array(z.object({ path: z.string(), match_count: z.number(), matches: z.array(z.object({ line: z.number(), text: z.string(), line_truncated: z.boolean() })) })),
+  folder_counts: z.record(z.string(), z.number()), omitted_folder_matches: z.number(), observed_matches: z.number(), returned_matches: z.number(), counts_complete: z.boolean(), path_filter: z.string(), next_step: z.string(),
   truncated: z.boolean(), candidate_limit_reached: z.boolean(), skipped_files: z.number(), eligible_files: z.number(), inspected_bytes: z.number(),
-  limits: z.object({ candidate_files: z.number(), file_bytes: z.number(), total_bytes: z.number(), output_characters: z.number() }),
+  limits: z.object({ candidate_files: z.number(), file_bytes: z.number(), total_bytes: z.number(), output_characters: z.number(), matches_per_file: z.number() }),
 });
 
 export async function checkSearch(options: { client: Client; extensionUri: vscode.Uri }): Promise<void> {
@@ -17,6 +18,7 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
   assert.ok(root);
   const folder = join(root.uri.fsPath, 'search-fixtures');
   const outside = await mkdtemp(join(tmpdir(), 'forge-search-outside-'));
+  const countFolders = ['search-count-a', 'search-count-b', 'search-count-c'];
   await mkdir(join(folder, 'src'), { recursive: true });
   await mkdir(join(folder, 'tests'));
   await mkdir(join(folder, 'docs'));
@@ -40,7 +42,12 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
     assert.equal(content[0]?.type, 'text');
     if (content[0]?.type === 'text') assert.deepEqual(JSON.parse(content[0].text), response.structuredContent);
     assert.ok(JSON.stringify(response.structuredContent).length <= result.limits.output_characters);
-    return result;
+    const matches = result.files.flatMap(file => file.matches.map(match => ({ ...match, path: file.path })));
+    assert.equal(result.returned_matches, matches.length);
+    assert.ok(result.files.every(file => file.matches.length <= result.limits.matches_per_file && file.match_count >= file.matches.length));
+    assert.equal(Object.values(result.folder_counts).reduce((sum, count) => sum + count, result.omitted_folder_matches), result.observed_matches);
+    if (result.truncated) assert.ok(result.next_step.includes('narrow the query or glob'));
+    return { ...result, matches };
   };
   try {
     for (const [path, text] of files) await writeFile(join(folder, path), text);
@@ -70,8 +77,33 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
     const output = await search({ query: 'output-search-needle', glob: 'search-fixtures/output.txt', max_results: 100 });
     assert.ok(output.matches.length > 0 && output.matches.length < 100);
     assert.equal(output.truncated, true);
+    assert.equal(output.files[0]?.match_count, 100);
+    assert.equal(output.matches.length, 3);
+    assert.equal(output.counts_complete, true);
+    for (const [index, name] of countFolders.entries()) {
+      await mkdir(join(root.uri.fsPath, name));
+      await writeFile(join(root.uri.fsPath, name, 'sample.txt'), 'diverse-search-needle\n'.repeat(index === 0 ? 80 : 1));
+    }
+    const diverse = await search({ query: 'diverse-search-needle', glob: '{search-count-a,search-count-b,search-count-c}/**', max_results: 3 });
+    assert.equal(diverse.files.length, 3, 'A frequent-match file must not crowd out other folders.');
+    assert.equal(diverse.observed_matches, 82);
+    assert.deepEqual(diverse.folder_counts, { 'search-count-a': 80, 'search-count-b': 1, 'search-count-c': 1 });
+    assert.equal(diverse.counts_complete, true);
+    assert.equal(diverse.truncated, true);
+    const filtered = await search({ query: 'diverse-search-needle', glob: 'search-count-b/**' });
+    assert.equal(filtered.path_filter, 'search-count-b/**');
+    assert.equal(filtered.files.length, 1);
+    assert.equal(filtered.observed_matches, 1);
+    assert.equal(filtered.truncated, false);
+    await mkdir(join(folder, 'output-groups'));
+    await Promise.all(Array.from({ length: 32 }, (_, index) => writeFile(join(folder, 'output-groups', `${index}.txt`), 'group-output-needle '.padEnd(950, 'x'))));
+    const groupedOutput = await search({ query: 'group-output-needle', glob: 'search-fixtures/output-groups/**', max_results: 100 });
+    assert.equal(groupedOutput.observed_matches, 32);
+    assert.ok(groupedOutput.returned_matches > 0 && groupedOutput.returned_matches < 32);
+    assert.equal(groupedOutput.truncated, true);
     const rawOutput = await search({ query: 'x', glob: 'search-fixtures/raw-output.txt' });
     assert.equal(rawOutput.truncated, true);
+    assert.equal(rawOutput.counts_complete, false);
     const noMatch = await search({ query: 'absent-search-needle', glob: 'search-fixtures/src/**' });
     assert.equal(noMatch.matches.length, 0);
     assert.equal(noMatch.truncated, false);
@@ -124,6 +156,7 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
     await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(options.extensionUri, 'out-test', 'search-result.json'), new TextEncoder().encode(JSON.stringify({ passed: true, native_mcp: true, discovered_source_test_docs: true, literal_regex_case_and_dash_patterns: true, bounded_results_lines_bytes_candidates: true, secrets_symlinks_binary_oversized_dirty_excluded: true, current_buffer_read_preserved: true, invalid_inputs_refused: true, cancelled_request_recovered: true, no_source_writes: true, live_model: false }, null, 2)));
     console.log('Search checks passed: native MCP discovery, bounds, exclusions, cancellation and no source writes.');
   } finally {
+    for (const name of countFolders) await rm(join(root.uri.fsPath, name), { recursive: true, force: true });
     await rm(folder, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   }

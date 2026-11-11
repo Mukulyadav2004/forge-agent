@@ -4,13 +4,28 @@ import { AgentViewProvider } from "./sidebar/AgentViewProvider";
 import { WorkspaceFiles } from './workspace/WorkspaceFiles';
 import { VscodeEditBackend } from './edits/VscodeEditBackend';
 import { EditService } from './edits/EditService';
+import { ToolLog } from './observability/events';
+import { realpath } from 'node:fs/promises';
+import { relative, sep } from 'node:path';
+
+let toolLog: ToolLog | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   const files = new WorkspaceFiles();
+  toolLog = new ToolLog({
+    directory: vscode.workspace.getWorkspaceFolder(context.globalStorageUri) ? undefined : vscode.Uri.joinPath(context.globalStorageUri, 'observability').fsPath,
+    workspaceRoots: vscode.workspace.workspaceFolders?.filter(root => root.uri.scheme === 'file').map(root => root.uri.fsPath),
+    resolvePath: async path => {
+      const root = vscode.workspace.workspaceFolders?.[0];
+      if (!root) throw new Error('Workspace unavailable.');
+      return relative(await realpath(root.uri.fsPath), (await files.resolve(path)).realPath).split(sep).join('/');
+    },
+    onFailure: () => { void vscode.window.showWarningMessage('Forge tool logging is unavailable. Editor tools can continue; this run has incomplete measurement.'); },
+  });
   const backend = new VscodeEditBackend({ files, storageUri: context.globalStorageUri });
   const editChanges = new vscode.EventEmitter<void>();
   const edits = new EditService({ backend, onChange: () => editChanges.fire() });
-  const bridge = new EditorBridge({ files, edits });
+  const bridge = new EditorBridge({ files, edits, log: toolLog });
   const bridgeReady = bridge.start();
   void bridgeReady.catch((error: unknown) => vscode.window.showErrorMessage(`Forge MCP: ${error instanceof Error ? error.message : "Start failed"}`));
   const provider = new AgentViewProvider(context.extensionUri, {
@@ -51,3 +66,5 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(vscode.commands.registerCommand("forgeAgent.selectModel", () => provider.selectModel()), vscode.commands.registerCommand("forgeAgent.editSelection", () => provider.editSelection()), bridge, copyMcp, vscode.commands.registerCommand("forgeAgent.newTask", () => provider.newTask()), provider, viewRegistration, openAgent, statusButton);
 }
+
+export async function deactivate(): Promise<void> { await toolLog?.flush().catch(() => undefined); }

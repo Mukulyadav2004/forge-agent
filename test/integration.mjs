@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
 import { buildProjectContext, isArchitectureRequest } from '../out/context/projectContext.js';
 import './sidebar/feedback.mjs';
+import './observability/events.mjs';
 
 test('architecture context is bounded and includes implementations across directories', async () => {
   assert.equal(isArchitectureRequest('now make an arctecture mao out of it'), true);
