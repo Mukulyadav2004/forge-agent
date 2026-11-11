@@ -21,11 +21,22 @@ the brief. Our implementation guards are project rules, not extra official gates
 - Never add a competing agent loop or call a model provider directly.
   Every model call goes through TrueForge. Keep provider credentials in
   TrueForge, never in the extension or repository.
-- Never import Cline's agent orchestration or provider runtime. Inspect
-  behavior and transitive runtime dependencies. SDK/controller type imports
-  alone do not prove a component is agent-loop code: editor components
-  may need their contracts adapted. Isolated search and file-operation
-  helpers may be reused behind MCP tools.
+- Never keep Cline's agent loop, provider code or SDK. No Cline package
+  in package.json. Files whose job is to run the loop, call a model or
+  orchestrate tool calls are not copied or adapted; read them for ideas
+  only.
+- A Cline editor or UI file that imports Cline types or helpers may be
+  adapted if every Cline import is replaced by our own small types or a
+  TrueForge event adapter. Before copying such a file, stop and report:
+  what it imports, what each import is used for, and how much must
+  change. Wait for my go-ahead. Do not skip it silently or copy it
+  silently. Isolated search and file-operation helpers may be reused
+  behind MCP tools subject to the same review and dependency rules.
+- If adapting means rewriting a large part of the file or pulling in
+  other Cline files, stop. Explain the trade-off (adapt, or write our
+  own, with a rough size for each) and wait for my decision.
+  After adapting, confirm: no Cline package imports remain, no model or
+  provider calls, no loop.
 - Editor capabilities are MCP tools. The agent decides what to read and
   change, not the extension.
 - No silent agent-generated edits to workspace source files. Staging and

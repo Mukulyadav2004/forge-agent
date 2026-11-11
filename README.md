@@ -2,6 +2,8 @@
 
 A VS Code extension that sends tasks to **local TrueForge**. TrueForge owns the model calls and agent loop. The extension supplies the sidebar and editor tools through MCP.
 
+See [the project history](docs/PROJECT-HISTORY.md) for planning decisions, problems and fixes, milestone evidence and remaining work through 10 November 2026.
+
 ## Starting point, upstream source and licence
 
 **Repository starting point: from scratch.** This repository is not a Git-history fork of Cline. Its initial commit is `05ffce16d5d405027ca1662dd104c5ecfdf27a16` in [Mukulyadav2004/forge-agent](https://github.com/Mukulyadav2004/forge-agent). Selected Cline editor code was adapted later; the Cline source commit below is a reuse reference, not an ancestor of this repository.
