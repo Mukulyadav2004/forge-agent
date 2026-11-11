@@ -1,5 +1,6 @@
 import { checkEditorTransactions } from './edits/realEditor';
 import { checkReviewFeedback } from './sidebar/reviewFeedback';
+import { checkSearch } from './tools/search';
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createServer } from "node:http";
@@ -136,7 +137,8 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const client = new Client({ name: "forge-smoke", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(connection.url), { requestInit: { headers: { Authorization: connection.headers.Authorization } } }));
   const listed = await client.listTools();
-  assert.equal(listed.tools.length, 3);
+  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'search_code']);
+  await checkSearch({ client, extensionUri: extension.extensionUri });
   const read = await client.callTool({ name: "read_file", arguments: { path: "example.txt" } });
   assert.equal(read.isError, undefined);
   assert.ok(JSON.stringify(read).includes("original text"));
@@ -187,7 +189,7 @@ async function checkLiveRegistry(connection: { url: string; authorization: strin
     const data = body.data;
     const tools = Array.isArray(data) ? data : typeof data === "object" && data !== null && "tools" in data && Array.isArray(data.tools) ? data.tools : [];
     const names = tools.flatMap((tool: unknown) => typeof tool === "object" && tool !== null && "name" in tool && typeof tool.name === "string" ? [tool.name] : []);
-    assert.deepEqual(names.sort(), ["list_files", "propose_edit", "read_file"]);
+    assert.deepEqual(names.sort(), ["list_files", "propose_edit", "read_file", "search_code"]);
   } finally {
     const cleanup = await fetch(`${baseUrl}/api/v1/settings/mcp-servers/${name}`, { method: "DELETE" });
     assert.equal(cleanup.ok, true, `Temporary connector cleanup failed: ${cleanup.status}`);

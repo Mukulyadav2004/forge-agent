@@ -60,6 +60,7 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
     assert.equal(createdSpec.config.generative_ui.enabled, false);
     assert.equal(createdSpec.config.ask_user_questions.enabled, false);
     assert.equal(createdSpec.model.params.reasoning_effort, 'medium');
+    assert.ok(createdSpec.mcp_servers[0].enable_tools.includes('search_code'));
     assert.equal(events.filter(event => event.type === 'model.message.delta').map(event => event.content).join(''), 'Hello Forge');
     await session.send([{ type: 'user.tool_approval', threadId: 'main', toolCallId: 'tool-1', approval: { status: 'deny', reason: 'Test' } }]);
     assert.equal(requests.filter(request => request.url === '/api/v1/sessions').length, 1);

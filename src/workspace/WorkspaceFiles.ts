@@ -5,6 +5,8 @@ import * as vscode from 'vscode';
 import type { FileSnapshot } from '../edits/EditService';
 import { contentHash, MAX_EDIT_CHARACTERS } from '../edits/EditService';
 
+const UNAVAILABLE_PATH = /(^|[/\\])(\.env(?:\.[^/\\]+)?|\.git|id_rsa|id_ed25519)([/\\]|$)/i;
+
 export class WorkspaceFiles {
   async open(path: string): Promise<vscode.TextDocument> {
     const resolved = await this.resolve(path);
@@ -21,16 +23,18 @@ export class WorkspaceFiles {
       try { return realpathSync(document.uri.fsPath) === realPath; } catch { return false; }
     });
   }
-  private async resolve(path: string): Promise<{ realPath: string; uri: vscode.Uri }> {
+  async resolve(path: string): Promise<{ realPath: string; uri: vscode.Uri; size: number; dirty: boolean }> {
     const root = vscode.workspace.workspaceFolders?.[0];
     if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');
-    if (isAbsolute(path) || /(^|[/\\])(\.env(?:\.[^/\\]+)?|\.git|id_rsa|id_ed25519)([/\\]|$)/i.test(path)) throw new Error('This path is not available to the agent.');
+    if (isAbsolute(path) || UNAVAILABLE_PATH.test(path)) throw new Error('This path is not available to the agent.');
     const rootPath = await realpath(root.uri.fsPath);
     const filePath = await realpath(resolve(rootPath, path));
     const rel = relative(rootPath, filePath);
     if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error('Path is outside the workspace.');
-    if (!(await stat(filePath)).isFile()) throw new Error('Only existing regular text files are supported.');
-    return { realPath: filePath, uri: vscode.Uri.file(resolve(root.uri.fsPath, path)) };
+    if (UNAVAILABLE_PATH.test(rel)) throw new Error('This path is not available to the agent.');
+    const metadata = await stat(filePath);
+    if (!metadata.isFile()) throw new Error('Only existing regular text files are supported.');
+    return { realPath: filePath, uri: vscode.Uri.file(resolve(root.uri.fsPath, path)), size: metadata.size, dirty: this.documentsFor(filePath).some(document => document.isDirty) };
   }
   async capture(path: string): Promise<FileSnapshot> {
     const document = await this.open(path);

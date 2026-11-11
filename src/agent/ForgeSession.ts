@@ -37,7 +37,7 @@ export class ForgeSession {
         instructions: agentInstructions,
         // Enable harness capabilities as the editor gains support for their interactions.
         config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 32 },
-        mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
+        mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'search_code', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
       } } });
       this.sessionId = response.data.id;
     }

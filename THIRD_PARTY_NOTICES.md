@@ -31,6 +31,13 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - Adaptation: `media/sidebar.css` and the task-content wrapper in `src/sidebar/AgentViewProvider.ts`. Retains full-height grid, constrained scrolling content and a separate composer; ports styled-components/React markup to our existing CSS/DOM webview.
 - Forge-specific changes: compact setup/status controls, independently scrolling proposals with review actions outside that scroll area, space shared with conversation, and outer task scrolling when the panel is too short. Cline's React state, virtualized message list, SDK and provider runtime are not included.
 
+## Cline content-search helper
+
+- Upstream: https://github.com/cline/cline; exact source commit `7a7878cb52fc33967d8b464b3e3d899beac42d4d`; copyright 2026 Cline Bot Inc.; Apache-2.0 licence preserved in `licenses/Cline-Apache-2.0.txt`.
+- Source: `sdk/packages/core/src/extensions/tools/executors/search.ts`; process/output collection, cancellation/finalization and ripgrep JSON match handling adapted in `src/tools/EditorBridge.ts`.
+- Changes: VS Code's bundled executable, guarded explicit candidate paths, aggregate/file/output/time limits, literal default with optional regex, bounded stderr and typed JSON validation, centered source excerpts, explicit errors and MCP structured results. Secret-target aliases and dirty buffers are excluded through Forge's canonical WorkspaceFiles owner.
+- Omitted: Cline AgentToolContext/SearchExecutor imports, workspace index, manual fallback scanner and agent/provider/SDK integration. TrueForge selects and orchestrates the MCP tool; the helper only executes a bounded local search.
+
 ## jsdiff dependency
 
 - Package: `diff@8.0.2`, https://github.com/kpdecker/jsdiff.
