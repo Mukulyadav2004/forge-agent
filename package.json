@@ -125,6 +125,7 @@
     "test": "pnpm run check && pnpm run test:integration && pnpm run test:edits && pnpm run test:smoke",
     "test:live": "pnpm run compile && node scripts/live-check.mjs",
     "test:cancel": "pnpm run compile && tsc --project tsconfig.test.json && node scripts/cancel-check.mjs",
+    "test:retrieval": "pnpm run compile && tsc --project tsconfig.test.json && node --test out-test/retrieval/metrics.test.js && node scripts/retrieval-check.mjs",
     "test:architecture": "pnpm run compile && node scripts/architecture-check.mjs",
     "test:edits": "pnpm run compile && node --test test/edits/*.mjs",
     "task:a:prepare": "node scripts/task-a.mjs prepare",
