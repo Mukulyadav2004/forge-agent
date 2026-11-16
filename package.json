@@ -93,7 +93,13 @@
         },
         "forgeAgent.reasoningEffort": {
           "type": "string",
-          "enum": ["", "minimal", "low", "medium", "high"],
+          "enum": [
+            "",
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
           "default": "",
           "description": "Optional reasoning effort passed through TrueForge. Leave empty for the provider default; choose a level supported by the selected model, then start a new task."
         },
@@ -142,7 +148,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@truefoundry/trueforge-sdk": "0.183.0",
+    "@truefoundry/trueforge-sdk": "0.185.0",
     "diff": "8.0.2",
     "dompurify": "3.4.17",
     "marked": "18.1.3",

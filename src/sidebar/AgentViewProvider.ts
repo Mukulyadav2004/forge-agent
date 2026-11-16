@@ -67,7 +67,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
         } else if (value.type === "approve" && !this.busy && this.approvals.length) {
           const input: TrueForgeApi.UserToolApprovalInputEvent[] = this.approvals.map(item => ({ ...item, approval: value.allow ? { status: "allow" } : { status: "deny", reason: "Declined in VS Code" } }));
           this.approvals = [];
-          void this.run(input);
+          void this.run([], input);
         }
         this.publish();
       }),
@@ -184,7 +184,7 @@ ${selectedText}`;
     catch { this.status = "Could not confirm cancellation. Check the local TrueForge server."; }
     this.publish();
   }
-  private async run(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input']): Promise<void> {
+  private async run(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], approvals?: TrueForgeApi.UserToolApprovalInputEvent[]): Promise<void> {
     this.cancellationRequested = false;
     this.busy = true; this.status = "Connecting to TrueForge…"; this.publish();
     try {
@@ -198,6 +198,7 @@ ${selectedText}`;
           preparedInput.push({ ...event, content: context ? `${event.content}\n\n${context}` : event.content });
         } else preparedInput.push(event);
       }
+      if (approvals && !this.session) throw new Error('The approval session is no longer available. Start a new task.');
       if (!this.session) {
         const config = vscode.workspace.getConfiguration("forgeAgent");
         const model = config.get<string>("model", "").trim();
@@ -206,9 +207,11 @@ ${selectedText}`;
         const editorManifest = connector ? await this.actions.getEditorManifest(connector) : undefined;
         this.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), onEvent: event => this.event(event) });
       }
-      await this.session.send(preparedInput);
+      if (approvals) await this.session.approve(approvals);
+      else await this.session.send(preparedInput);
       if (feedback && !this.cancellationRequested) this.reviewFeedback.clear();
     } catch (error: unknown) {
+      if (approvals && this.session?.awaitingApproval && !this.cancellationRequested) this.approvals = approvals;
       // A failed create must not retain settings that the user has corrected.
       if (!this.session?.id) this.session = undefined;
       this.status = error instanceof Error ? error.message : "TrueForge request failed.";
@@ -228,7 +231,11 @@ ${selectedText}`;
       else this.messages.push({ id: event.id, role: "assistant", text: event.content });
     }
     if (event.type === "tool.approval_required") {
-      this.approvals = event.toolCalls.map(tool => ({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } }));
+      for (const tool of event.toolCalls) {
+        if (!this.approvals.some(item => item.threadId === event.threadId && item.toolCallId === tool.id)) {
+          this.approvals.push({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } });
+        }
+      }
       this.messages.push({ id: randomUUID(), role: "assistant", text: "Allow TrueForge to stage a proposed diff? This does not write files. You can apply or reject the proposal after reviewing it." });
     }
     if (event.type === "turn.done" && event.state.status === "error") this.status = event.state.message;

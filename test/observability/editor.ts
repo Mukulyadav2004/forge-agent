@@ -55,7 +55,11 @@ export async function checkToolLog(options: { client: Client; extensionUri: vsco
     const all = text.trim().split('\n').map(line => z.record(z.string(), z.unknown()).parse(JSON.parse(line)));
     const rows = all.filter(row => row.event === 'tool.call').map(row => RowSchema.parse(row));
     const starts = all.filter(row => row.event === 'session.start');
-    assert.deepEqual(starts.map(row => row.sessionId), ['feedback-session-1', 'feedback-session-2']);
+    assert.deepEqual(starts.map(row => row.sessionId), ['feedback-session-1', 'feedback-session-2', 'feedback-session-3', 'feedback-session-4']);
+    assert.deepEqual(all.filter(row => row.event === 'approval.decision').map(row => row.outcome), ['allow', 'allow', 'deny', 'deny']);
+    for (const sessionId of ['feedback-session-3', 'feedback-session-4']) {
+      assert.equal(all.filter(row => row.sessionId === sessionId && row.event === 'turn.end').length, 1, 'An approval pause must remain part of the same turn');
+    }
     assert.ok(starts.every(row => row.taskId === row.sessionId));
     const completed = all.filter(row => row.event === 'turn.end' && row.outcome === 'done');
     assert.ok(completed.length > 1);

@@ -253,7 +253,7 @@ test('SDK boundary writes lifecycle, approval, cancellation and safe failures to
   ForgeSession.observe = event => log.recordSession(event);
   t.after(() => { ForgeSession.observe = oldObserver; });
   const secret = 'dummy-private-sdk-prompt-reply-and-key';
-  let mode = 'success', turns = 0;
+  let mode = 'success', turns = 0, approval;
   const server = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
@@ -261,13 +261,20 @@ test('SDK boundary writes lifecycle, approval, cancellation and safe failures to
     if (mode === 'reject') { res.writeHead(401, { 'Content-Type': 'application/json' }).end(JSON.stringify({ message: secret })); return; }
     if (req.url === '/api/v1/sessions') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data: { id: 'sdk-session' } })); return; }
     if (req.url.endsWith('/cancel')) { res.writeHead(200, { 'Content-Type': 'application/json' }).end('{}'); return; }
+    if (req.method === 'POST' && req.url.endsWith('/events')) {
+      approval = body.events[0];
+      res.writeHead(201, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data: [{ ...approval, id: 'approved', created_at: new Date().toISOString() }] })); return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
     const stamp = new Date().toISOString();
     const write = event => res.write(`data: ${JSON.stringify({ created_at: stamp, thread_id: null, ...event })}\n\n`);
-    write({ type: 'turn.created', id: `created-${++turns}`, turn_id: `sdk-turn-${turns}`, previous_turn_id: turns === 1 ? null : `sdk-turn-${turns - 1}`, state: { status: 'running' } });
-    if (body.input?.[0]?.type === 'user.tool_approval') write({ type: 'user.tool_approval', id: 'approved', thread_id: 'main', tool_call_id: body.input[0].tool_call_id, approval: body.input[0].approval });
+    if (req.method === 'POST') write({ type: 'turn.created', id: `created-${++turns}`, turn_id: `sdk-turn-${turns}`, previous_turn_id: turns === 1 ? null : `sdk-turn-${turns - 1}`, state: { status: 'running' } });
+    else write({ ...approval, id: 'approved' });
     write({ type: 'model.message.delta', id: `message-${turns}`, thread_id: 'main', content: secret });
     write({ type: 'tool.response', id: `result-${turns}`, thread_id: 'main', tool_call_id: 'sdk-call', content: secret });
+    if (turns === 1 && req.method === 'POST') {
+      write({ type: 'turn.update', id: 'paused', state: { status: 'paused' } }); res.end(); return;
+    }
     const state = mode === 'error' ? { status: 'error', completed_at: stamp, message: secret } : { status: 'done', completed_at: stamp, output: null, required_actions: [], metrics: { total_tokens: 8, total_cost_in_usd: 0.001 } };
     write({ type: 'turn.done', id: `done-${turns}`, state }); res.end();
   });
@@ -277,9 +284,9 @@ test('SDK boundary writes lifecycle, approval, cancellation and safe failures to
   const delivered = [];
   const session = new ForgeSession({ baseUrl: `http://127.0.0.1:${address.port}`, model: 'test/model', connector: '', onEvent: event => delivered.push(event) });
   await session.send([{ type: 'user.message', content: secret }]);
-  await session.send([{ type: 'user.tool_approval', threadId: 'main', toolCallId: 'sdk-call', approval: { status: 'allow' } }]);
+  await session.approve([{ type: 'user.tool_approval', threadId: 'main', toolCallId: 'sdk-call', approval: { status: 'allow' } }]);
   await session.cancel();
-  assert.equal((await log.summary('sdk-session')).tokens, 16);
+  assert.equal((await log.summary('sdk-session')).tokens, 8);
   assert.ok(delivered.some(event => event.type === 'model.message.delta' && event.content === secret), 'Logging must preserve streaming to the UI');
   mode = 'error'; await session.send([{ type: 'user.message', content: secret }]);
   mode = 'reject'; await assert.rejects(session.send([{ type: 'user.message', content: secret }]));
@@ -288,14 +295,14 @@ test('SDK boundary writes lifecycle, approval, cancellation and safe failures to
   assert.ok(!text.includes(secret));
   const rows = text.trim().split('\n').map(line => JSON.parse(line));
   assert.equal(rows.filter(row => row.event === 'session.start').length, 1);
-  assert.equal(rows.filter(row => row.event === 'turn.send').length, 4);
+  assert.equal(rows.filter(row => row.event === 'turn.send').length, 3);
   assert.equal(rows.filter(row => row.event === 'approval.decision').length, 1);
   assert.equal(rows.find(row => row.event === 'approval.decision').toolCallId, 'sdk-call');
   assert.equal(rows.find(row => row.event === 'turn.cancel' && row.outcome === 'accepted').turnId, undefined, 'Idle cancellation must not target a completed turn');
   assert.equal(rows.filter(row => row.event === 'turn.end').at(-1).turnId, undefined, 'A rejected request must not retain the previous turn ID');
   const summary = await log.summary('sdk-session');
   assert.equal(summary.cancels, 2);
-  assert.equal(summary.turns.length, 4);
+  assert.equal(summary.turns.length, 3);
   assert.deepEqual(summary.errorsByType, { TurnError: 1, RequestError: 1, CancelError: 1 });
   assert.equal(summary.tokens, 'not available');
 });

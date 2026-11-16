@@ -63,9 +63,9 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
     assert.equal(createdSpec.model.params.reasoning_effort, 'medium');
     assert.ok(createdSpec.mcp_servers[0].enable_tools.includes('search_code'));
     assert.equal(events.filter(event => event.type === 'model.message.delta').map(event => event.content).join(''), 'Hello Forge');
-    await session.send([{ type: 'user.tool_approval', threadId: 'main', toolCallId: 'tool-1', approval: { status: 'deny', reason: 'Test' } }]);
+    await session.send([{ type: 'user.message', content: 'Follow up' }]);
     assert.equal(requests.filter(request => request.url === '/api/v1/sessions').length, 1);
-    assert.equal(requests.at(-1).body.input[0].tool_call_id, 'tool-1');
+    assert.equal(requests.at(-1).body.input[0].content, 'Follow up');
     await session.cancel();
     assert.ok(requests.at(-1).url.endsWith('/cancel'));
     const beforeReconnect = requests.length;
@@ -87,4 +87,104 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
     await assert.rejects(new ForgeSession(options).send([{ type: 'user.message', content: 'fail' }]));
     assert.throws(() => new ForgeSession({ ...options, baseUrl: 'https://example.com' }), /local/);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
+test('SDK approvals resume a paused turn with a cursor, retry rejected decisions and preserve cancellation', { timeout: 10000 }, async t => {
+  const requests = [], events = [], rows = [];
+  let turns = 0, resumes = 0, decisions = [], rejectApproval = false, holdApproval = false, heldResponse, approvalArrived;
+  const oldObserver = ForgeSession.observe;
+  ForgeSession.observe = row => rows.push(row);
+  t.after(() => { ForgeSession.observe = oldObserver; });
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
+    requests.push({ method: req.method, url: req.url, body });
+    const json = (value, status = 200) => res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/api/v1/sessions') { json({ data: { id: 'approval-session' } }); return; }
+    if (req.url.endsWith('/cancel')) { json({}); return; }
+    if (req.method === 'POST' && req.url.endsWith('/events')) {
+      if (holdApproval) { heldResponse = res; approvalArrived(); return; }
+      if (rejectApproval) { json({ error: { message: 'Temporary approval failure' } }, 400); return; }
+      decisions = body.events;
+      json({ data: decisions.map((decision, i) => ({ ...decision, id: `decision-${resumes}-${i}`, created_at: new Date().toISOString() })) }, 201);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    const write = event => res.write(`data: ${JSON.stringify({ created_at: new Date().toISOString(), thread_id: null, ...event })}\n\n`);
+    if (req.method === 'POST' && req.url.endsWith('/turns')) {
+      turns++;
+      write({ type: 'turn.created', id: 'created', turn_id: `approval-turn-${turns}`, previous_turn_id: null, state: { status: 'running' } });
+      write({ type: 'model.message.delta', id: 'initial', thread_id: 'main', content: 'Before approval' });
+      write({ type: 'tool.approval_required', id: 'ask', thread_id: 'main', tool_calls: [{ id: 'tool-1', source_event_id: 'initial' }, { id: 'tool-2', source_event_id: 'initial' }] });
+      write({ type: 'turn.update', id: 'paused-initial', state: { status: 'paused' } });
+      return; // Deliberately keep the SSE open: the client must release the reader at pause.
+    }
+    if (req.method === 'GET' && req.url.includes('/subscribe')) {
+      resumes++;
+      for (const [i, decision] of decisions.entries()) write({ ...decision, id: `decision-${resumes}-${i}` });
+      write({ type: 'turn.update', id: `running-${resumes}`, state: { status: 'running' } });
+      write({ type: 'model.message.delta', id: `reply-${resumes}`, thread_id: 'main', content: `Resumed ${resumes}` });
+      if (resumes === 1) {
+        write({ type: 'tool.approval_required', id: 'ask-again', thread_id: 'main', tool_calls: [{ id: 'tool-3', source_event_id: 'reply-1' }] });
+        write({ type: 'turn.update', id: 'paused-again', state: { status: 'paused' } });
+      } else {
+        write({ type: 'turn.done', id: 'done', state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [], metrics: { total_tokens: 8 } } });
+        res.end();
+      }
+      return;
+    }
+    res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const session = new ForgeSession({ baseUrl: `http://127.0.0.1:${server.address().port}`, model: 'test/model', connector: '', onEvent: event => events.push(event) });
+  const approve = (id, status = 'allow') => ({ type: 'user.tool_approval', threadId: 'main', toolCallId: id, approval: status === 'allow' ? { status } : { status, reason: 'Declined in VS Code' } });
+  await assert.rejects(session.approve([approve('tool-1')]), /No paused/);
+  assert.equal(requests.length, 0);
+  await session.send([{ type: 'user.message', content: 'Stage changes' }]);
+  assert.equal(session.awaitingApproval, true);
+  assert.equal(rows.filter(row => row.event === 'turn.end').length, 0, 'A pause must not be logged as a failed or completed turn');
+  await assert.rejects(session.send([{ type: 'user.message', content: 'Must wait' }]), /pending tool request/);
+  rejectApproval = true;
+  await assert.rejects(session.approve([approve('tool-1')]), /Temporary approval failure/);
+  assert.equal(session.awaitingApproval, true, 'A rejected decision can be retried');
+  rejectApproval = false;
+  await session.approve([approve('tool-1'), approve('tool-2')]);
+  assert.equal(session.awaitingApproval, true);
+  await session.approve([approve('tool-3', 'deny')]);
+  assert.equal(session.awaitingApproval, false);
+  assert.equal(turns, 1, 'Decisions must not create new turns');
+  const subscriptions = requests.filter(request => request.method === 'GET');
+  assert.deepEqual(subscriptions.map(request => request.url), [
+    '/api/v1/sessions/approval-session/turns/approval-turn-1/subscribe?after_event_id=paused-initial',
+    '/api/v1/sessions/approval-session/turns/approval-turn-1/subscribe?after_event_id=paused-again',
+  ]);
+  const submissions = requests.filter(request => request.method === 'POST' && request.url.endsWith('/events'));
+  assert.deepEqual(submissions[1].body.events.map(event => event.tool_call_id), ['tool-1', 'tool-2']);
+  assert.deepEqual(submissions[2].body.events[0].approval, { status: 'deny', reason: 'Declined in VS Code' });
+  assert.ok(submissions.every(request => !('input' in request.body)));
+  assert.deepEqual(events.filter(event => event.type === 'model.message.delta').map(event => event.content), ['Before approval', 'Resumed 1', 'Resumed 2']);
+  assert.equal(rows.filter(row => row.event === 'turn.start').length, 1);
+  assert.equal(rows.filter(row => row.event === 'approval.decision').length, 3);
+  assert.equal(rows.filter(row => row.event === 'turn.end').length, 1);
+  assert.equal(rows.find(row => row.event === 'turn.end').turnId, 'approval-turn-1');
+  assert.ok(!rows.some(row => row.errorType === 'IncompleteStream'));
+  await assert.rejects(session.approve([approve('tool-3')]), /No paused/);
+  await session.send([{ type: 'user.message', content: 'Another request' }]);
+  await session.cancel();
+  assert.equal(session.awaitingApproval, false);
+  await assert.rejects(session.approve([approve('tool-1')]), /No paused/);
+  assert.equal(rows.find(row => row.event === 'turn.cancel').turnId, 'approval-turn-2');
+  assert.equal(submissions.length, requests.filter(request => request.url.endsWith('/events')).length);
+  await session.send([{ type: 'user.message', content: 'Cancel an in-flight decision' }]);
+  holdApproval = true;
+  const arrived = new Promise(resolve => { approvalArrived = resolve; });
+  const pending = session.approve([approve('tool-1')]);
+  await arrived;
+  await session.cancel();
+  heldResponse.writeHead(201, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data: [] }));
+  await pending;
+  assert.equal(requests.filter(request => request.method === 'GET').length, 2, 'Cancellation must prevent a late decision from reopening the stream');
+  assert.equal(rows.filter(row => row.event === 'turn.end' && row.turnId === 'approval-turn-3').length, 1);
 });

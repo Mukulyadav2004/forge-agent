@@ -12,8 +12,8 @@ importers:
         specifier: 1.32.2
         version: 1.32.2(zod@4.6.7)
       '@truefoundry/trueforge-sdk':
-        specifier: 0.183.0
-        version: 0.183.0
+        specifier: 0.185.0
+        version: 0.185.0
       diff:
         specifier: 8.0.2
         version: 8.0.2
@@ -251,8 +251,8 @@ packages:
       '@cfworker/json-schema':
         optional: true
 
-  '@truefoundry/trueforge-sdk@0.183.0':
-    resolution: {integrity: sha512-yCl9hJQPRNka7kK5L//PbUW1krfrCqyG9ZADALTx6iUaOyWWttja1gL7BcRyrHNg+T5e6q7HFAWluDU0/Ym6ow==}
+  '@truefoundry/trueforge-sdk@0.185.0':
+    resolution: {integrity: sha512-hzNnf4P4KXpOWQQdC7aHu6lIZ5U/EbwuAKzFq7hVx5d2wXDdLm1NLe5NpiQFeF3R5O2msJ47InkOdyOx2I8cgg==}
     engines: {node: '>=22'}
 
   '@types/d3-array@3.2.2':
@@ -1147,7 +1147,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@truefoundry/trueforge-sdk@0.183.0': {}
+  '@truefoundry/trueforge-sdk@0.185.0': {}
 
   '@types/d3-array@3.2.2': {}
 

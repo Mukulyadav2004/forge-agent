@@ -9,10 +9,13 @@ export async function checkReviewFeedback(options: { client: Client; frame: Fram
   const turns: { path: string; text: string[] }[] = [];
   let sessions = 0;
   let failNext = false;
+  let approvalMode = false, resumes = 0;
+  const approvalRequests: { path: string; events: unknown[] }[] = [];
+  let decisions: unknown[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const body: unknown = JSON.parse(Buffer.concat(chunks).toString());
+    const body: unknown = JSON.parse(Buffer.concat(chunks).toString() || '{}');
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/api/v1/settings/mcp-servers') {
       assert.ok(typeof body === 'object' && body !== null && 'manifest' in body);
@@ -23,6 +26,23 @@ export async function checkReviewFeedback(options: { client: Client; frame: Fram
     if (request.url === '/api/v1/sessions') {
       response.end(JSON.stringify({ data: { id: `feedback-session-${++sessions}` } })); return;
     }
+    const write = (event: Record<string, unknown>) => response.write(`data: ${JSON.stringify({ created_at: new Date().toISOString(), thread_id: null, ...event })}\n\n`);
+    if (approvalMode && request.url?.endsWith('/events')) {
+      assert.ok(typeof body === 'object' && body !== null && 'events' in body && Array.isArray(body.events));
+      approvalRequests.push({ path: request.url, events: body.events });
+      if (failNext) { failNext = false; response.writeHead(503).end(JSON.stringify({ error: { message: 'Feedback fixture temporary failure' } })); return; }
+      decisions = body.events;
+      response.end(JSON.stringify({ data: decisions.map((event, i) => ({ ...event as object, id: `decision-${i}`, created_at: new Date().toISOString() })) })); return;
+    }
+    if (approvalMode && request.url?.includes('/subscribe')) {
+      assert.equal(request.url, `/api/v1/sessions/feedback-session-${sessions}/turns/feedback-turn-${turns.length}/subscribe?after_event_id=approval-paused-${turns.length}`);
+      response.setHeader('Content-Type', 'text/event-stream');
+      for (const [i, event] of decisions.entries()) write({ ...event as object, id: `decision-${i}` });
+      write({ type: 'turn.update', id: 'running', state: { status: 'running' } });
+      write({ type: 'model.message.delta', id: `resumed-${++resumes}`, thread_id: 'main', content: `Approval resumed ${resumes}` });
+      write({ type: 'turn.done', id: 'done', state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] } });
+      response.end(); return;
+    }
     assert.ok(typeof body === 'object' && body !== null && 'input' in body && Array.isArray(body.input));
     const text = body.input.map((event: unknown) => {
       assert.ok(typeof event === 'object' && event !== null && 'type' in event && event.type === 'user.message' && 'content' in event && typeof event.content === 'string');
@@ -32,6 +52,11 @@ export async function checkReviewFeedback(options: { client: Client; frame: Fram
     if (failNext) { failNext = false; response.writeHead(503).end(JSON.stringify({ error: { message: 'Feedback fixture temporary failure' } })); return; }
     response.setHeader('Content-Type', 'text/event-stream');
     response.write(`data: ${JSON.stringify({ type: 'turn.created', id: `created-${turns.length}`, turn_id: `feedback-turn-${turns.length}`, previous_turn_id: null, thread_id: null, created_at: new Date().toISOString(), state: { status: 'running' } })}\n\n`);
+    if (approvalMode) {
+      for (const id of ['one', 'two']) write({ type: 'tool.approval_required', id: `ask-${id}`, thread_id: 'main', tool_calls: [{ id, source_event_id: 'model-call' }] });
+      write({ type: 'turn.update', id: `approval-paused-${turns.length}`, state: { status: 'paused' } });
+      return;
+    }
     response.end(`data: ${JSON.stringify({ type: 'model.message.delta', id: `feedback-${turns.length}`, thread_id: 'main', content: `Review feedback response ${turns.length}` })}\n\ndata: ${JSON.stringify({ type: 'turn.done', id: `done-${turns.length}`, thread_id: null, created_at: new Date().toISOString(), state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] } })}\n\n`);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -114,6 +139,28 @@ export async function checkReviewFeedback(options: { client: Client; frame: Fram
     await send('Start a new task.');
     assert.equal(feedback(), undefined, 'New Task must not inherit previous feedback');
     assert.equal(sessions, 2);
+    approvalMode = true;
+    for (const [index, allow] of [true, false].entries()) {
+      await vscode.commands.executeCommand('forgeAgent.newTask');
+      await frame.getByRole('textbox', { name: 'Message', exact: true }).fill('Approval API regression');
+      await frame.getByRole('button', { name: 'Send', exact: true }).click();
+      await frame.locator('#approve-button:not([disabled])').waitFor();
+      const count: number = turns.length;
+      if (allow) {
+        failNext = true;
+        await frame.locator('#approve-button').click();
+        await frame.locator('#status').filter({ hasText: 'Feedback fixture temporary failure' }).waitFor();
+        await frame.locator('#approve-button:not([disabled])').waitFor();
+      }
+      await frame.locator(allow ? '#approve-button' : '#deny-button').click();
+      await frame.getByRole('log').getByText(`Approval resumed ${index + 1}`, { exact: true }).waitFor();
+      await frame.locator('#message-input:not([disabled])').waitFor();
+      await frame.locator('#approve-button').waitFor({ state: 'hidden' });
+      assert.equal(turns.length, count, 'Approve/Deny must resume the existing turn');
+      assert.equal(approvalRequests.at(-1)?.path, `/api/v1/sessions/feedback-session-${sessions}/turns/feedback-turn-${count}/events`);
+      assert.deepEqual(approvalRequests.at(-1)?.events, ['one', 'two'].map(tool_call_id => ({ type: 'user.tool_approval', thread_id: 'main', tool_call_id, approval: allow ? { status: 'allow' } : { status: 'deny', reason: 'Declined in VS Code' } })));
+    }
+    assert.equal(approvalRequests.length, 3, 'One failed submission, one retry and one denial');
     assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(uri)), original);
     await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(options.extensionUri, 'out-test', 'review-feedback-result.json'), new TextEncoder().encode(JSON.stringify({ same_session_apply_undo_repeat: true, fresh_proposal: true, partial_review: true, no_preview_feedback: true, no_extra_model_calls: true, retry_retains_feedback: true, new_task_clears_feedback: true })));
     await vscode.commands.executeCommand('forgeAgent.newTask');
