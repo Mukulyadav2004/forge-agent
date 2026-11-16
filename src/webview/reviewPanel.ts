@@ -3,6 +3,7 @@ import { renderClineDiffLines } from './ClineDiffLines.js';
 
 export function renderReviewPanel(options: { container: HTMLElement; state: ReviewState; disabled: boolean; onCommand: (command: ReviewCommand) => void }): void {
   const { container, state } = options;
+  const previousScroll = container.querySelector<HTMLElement>('.proposal-list')?.scrollTop ?? 0;
   container.hidden = state.proposals.length === 0 && !state.canUndo && !state.recoveryPath;
   const locked = options.disabled || state.busy || !!state.recoveryPath;
   const active = state.proposals.filter(proposal => proposal.status === 'pending' || proposal.status === 'conflict');
@@ -64,4 +65,5 @@ export function renderReviewPanel(options: { container: HTMLElement; state: Revi
     row.append(name, status, explanation, actions, hunks); list.append(row);
   }
   container.replaceChildren(title, message, toolbar, list);
+  list.scrollTop = previousScroll; // The panel is rebuilt after every decision; keep the reviewer's place.
 }
