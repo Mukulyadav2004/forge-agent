@@ -11,7 +11,7 @@ await new Promise((resolve, reject) => {
   socket.setTimeout(2000, () => { socket.destroy(); reject(new Error('Timed out checking the local TrueForge port.')); });
 });
 // The editor MCP server binds to loopback; keep the rest of the outbound URL policy enabled.
-const child = spawn('npx', ['--yes', '@truefoundry/trueforge@0.184.2', '--port', String(port)], {
+const child = spawn('npx', ['--yes', '@truefoundry/trueforge@0.185.1', '--port', String(port)], {
   cwd: homedir(), stdio: 'inherit',
   env: { ...process.env, OUTBOUND_URL_ALLOWED_HOSTS: JSON.stringify(['127.0.0.1', 'localhost']) },
 });
