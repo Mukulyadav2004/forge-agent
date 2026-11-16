@@ -3,7 +3,7 @@ import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { isWebviewMessage } from "../shared/messages";
-import type { ChatMessage, FileEvidence, HostMessage } from "../shared/messages";
+import type { ActivityEntry, ChatMessage, FileEvidence, HostMessage } from "../shared/messages";
 import { isArchitectureRequest } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import type { ReviewCommand } from '../edits/review';
@@ -19,6 +19,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private approvals: TrueForgeApi.UserToolApprovalInputEvent[] = [];
   private readonly messages: ChatMessage[] = [];
   private readonly inspectedFiles: FileEvidence[] = [];
+  private readonly activity: ActivityEntry[] = [];
   private readonly reviewFeedback = new ReviewFeedback();
   private view: vscode.WebviewView | undefined;
   private viewDisposables: vscode.Disposable[] = [];
@@ -113,7 +114,7 @@ ${selectedText}`;
     try {
       await this.actions.edits.newTask();
       this.reviewFeedback.clear();
-      this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.status = "New task ready";
+      this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.activity.length = 0; this.status = "New task ready";
     } catch (error) { this.status = error instanceof Error ? error.message : 'Could not start a new task.'; }
     this.busy = false; this.publish();
   }
@@ -140,7 +141,19 @@ ${selectedText}`;
     if (command.action !== 'preview') this.status += ' Editor state will be sent with your next message.';
     this.publish();
   }
-  recordInspection(file: FileEvidence): void {
+  /** Adds a completed tool call to the feed; an opened file names the most recent search that returned it. */
+  recordActivity(entry: ActivityEntry): void {
+    if (entry.kind === 'open') {
+      const path = entry.path;
+      const search = [...this.activity].reverse().find(item => item.kind === 'search' && item.files.includes(path));
+      if (search?.kind === 'search') entry.foundBy = search.query;
+    }
+    this.activity.push(entry);
+    if (this.activity.length > 200) this.activity.shift();
+    if (entry.kind === 'open' || entry.kind === 'context') this.recordInspection({ path: entry.path, startLine: entry.startLine, endLine: entry.endLine, origin: entry.kind === 'open' ? 'tool' : 'context' });
+    else this.publish();
+  }
+  private recordInspection(file: FileEvidence): void {
     if (!this.inspectedFiles.some(existing => existing.path === file.path && existing.startLine === file.startLine && existing.endLine === file.endLine && existing.origin === file.origin)) this.inspectedFiles.push(file);
     this.publish();
   }
@@ -169,7 +182,7 @@ ${selectedText}`;
     }
   }
   private publish(): void {
-    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, review: this.actions.edits.state };
+    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, activity: this.activity, review: this.actions.edits.state };
     void this.view?.webview.postMessage(response);
   }
   private async cancel(): Promise<void> {

@@ -53,3 +53,7 @@ Preserve upstream licences, identify adapted files and modifications in the READ
 ## Combined edits: 16 Nov 2026
 
 A live Task B run proposed two ranged edits to `src/flask/cli.py`; the second silently superseded the first, so the command registration was lost while the agent was told both were staged. Inspected Cline's editor executor: each `old_text`/`insert_line` edit applies to the file's current content, so later edits build on earlier ones. Adapted that contract onto the pending in-memory proposal (no disk writes). Imports reviewed: `node:fs/promises` and `node:path` (dropped; EditService and WorkspaceFiles own text and paths), `@cline/shared` `AgentToolContext` and `../types` `EditorExecutor` (dropped), `../schemas` `EditFileInput` (replaced by our zod fields), `./line-endings` (dropped; snapshot EOL is used). Cline's `apply_patch` (about 950 lines with its parser) was not adopted.
+
+## Tool activity feed: 16 Nov 2026
+
+Inspected `apps/vscode/webview-ui/src/components/chat/ChatRow.tsx` (1,196 lines, 40 imports including gRPC clients, React state context and MCP rows) and `sdk/packages/ui/components/agent-chat/tool-summary/` (2,128 lines across five files, plus `@cline/shared/browser`). Neither fits our DOM webview without a rewrite or pulling in several Cline files. Decision (user, 16 Nov): write our own small activity entries and labels in Cline's style (`Searched "…"`, `Read file (10–80)`); no Cline code copied.

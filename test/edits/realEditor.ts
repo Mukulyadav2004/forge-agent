@@ -63,6 +63,18 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   await panel.getByRole('button', { name: 'Undo last apply', exact: true }).click();
   await message.filter({ hasText: 'Undid the last applied batch' }).waitFor();
   assert.equal(await disk('example.txt'), hunkOriginal);
+  type Feed = { activity: Record<string, unknown>[]; inspectedFiles: { path: string; startLine: number; endLine: number }[] };
+  await frame.evaluate(() => window.addEventListener('message', event => { (window as unknown as { forgeState?: unknown }).forgeState = event.data; }));
+  await client.callTool({ name: 'search_code', arguments: { query: 'separator', glob: 'example.txt', reason: 'Find the separator line' } });
+  await client.callTool({ name: 'read_file', arguments: { path: 'example.txt', start_line: 2, end_line: 3, reason: 'Check the lines around it' } });
+  const feed = async (): Promise<Feed> => {
+    await frame.waitForFunction(() => ((window as unknown as { forgeState?: Feed }).forgeState?.activity ?? []).some(entry => entry.kind === 'open' && entry.reason === 'Check the lines around it'));
+    return frame.evaluate(() => (window as unknown as { forgeState: Feed }).forgeState);
+  };
+  const afterRead = await feed();
+  assert.deepEqual(afterRead.activity.filter(entry => entry.reason === 'Find the separator line').map(entry => [entry.kind, entry.query, entry.files]), [['search', 'separator', ['example.txt']]]);
+  assert.ok(afterRead.activity.some(entry => entry.kind === 'open' && entry.path === 'example.txt' && entry.startLine === 2 && entry.endLine === 3 && entry.foundBy === 'separator'));
+  assert.equal(afterRead.inspectedFiles.some(file => file.path === 'example.txt' && file.startLine === 3 && file.endLine === 3), false, 'Search hits must not be listed as opened files.');
   const combinedRead = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
   const base_revision = (combinedRead.structuredContent as { base_revision: string }).base_revision;
   const propose = async (extra: Record<string, unknown>) => (await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: 'MCP combine check', ...extra } })).structuredContent as { proposal_id: string; combined: boolean };
@@ -75,6 +87,8 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.equal(await panel.locator('.proposal-row').first().getAttribute('data-proposal-id'), combined.proposal_id, 'The open proposal must be listed first.');
   assert.ok(await panel.locator('.proposal-row.superseded').count() >= 2);
   assert.equal(await panel.locator('.proposal-row.superseded .hunk-row, .proposal-row.superseded button').count(), 0);
+  const proposals = (await feed()).activity.filter(entry => entry.kind === 'propose' && entry.reason === 'MCP combine check').map(entry => entry.detail);
+  assert.deepEqual(proposals, ['lines 2–2', 'insert at line 4, combined with earlier changes', 'replace matched text, combined with earlier changes']);
   assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: '', new_text: 'x', old_text: 'two', insert_line: 1 } })).isError, true);
   await vscode.commands.executeCommand('forgeAgent.rejectAll');
   assert.equal(await disk('example.txt'), hunkOriginal);

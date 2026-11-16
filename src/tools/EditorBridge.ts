@@ -10,7 +10,7 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import { z } from 'zod';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
-import type { FileEvidence } from '../shared/messages';
+import type { ActivityEntry } from '../shared/messages';
 import { buildProjectContext } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
@@ -19,7 +19,7 @@ import type { ToolLog, ToolName } from '../observability/events';
 
 const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 8388608, output_characters: 20000, line_characters: 1000, matches_per_file: 3, timeout_ms: 5000 };
 const SEARCH_EXCLUDE = '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage}/**';
-const SearchInputSchema = z.object({ query: z.string().min(1).max(500), glob: z.string().min(1).max(200).default('**/*').describe('Workspace-relative path filter. Narrow to a folder or extension when results are incomplete.'), regex: z.boolean().default(false), case_sensitive: z.boolean().default(false), max_results: z.number().int().min(1).max(100).default(40) });
+const SearchInputSchema = z.object({ query: z.string().min(1).max(500), glob: z.string().min(1).max(200).default('**/*').describe('Workspace-relative path filter. Narrow to a folder or extension when results are incomplete.'), regex: z.boolean().default(false), case_sensitive: z.boolean().default(false), max_results: z.number().int().min(1).max(100).default(40), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') });
 type SearchInput = z.infer<typeof SearchInputSchema>;
 const SearchMatchEventSchema = z.object({ type: z.literal('match'), data: z.object({ path: z.object({ text: z.string() }), line_number: z.number().int().positive(), lines: z.object({ text: z.string() }), submatches: z.array(z.object({ start: z.number().int().nonnegative() })) }) });
 interface SearchHit { line: number; text: string; line_truncated: boolean }
@@ -28,8 +28,9 @@ interface SearchFile { path: string; match_count: number; matches: SearchHit[] }
 export class EditorBridge implements vscode.Disposable {
   private readonly token = randomBytes(32).toString('hex');
   private readonly instanceId = randomBytes(6).toString('hex');
-  private readonly readEvents = new vscode.EventEmitter<FileEvidence>();
-  readonly onDidReadFile = this.readEvents.event;
+  private readonly activityEvents = new vscode.EventEmitter<ActivityEntry>();
+  /** Completed editor tool calls for the sidebar feed: searches stay separate from files actually opened. */
+  readonly onDidActivity = this.activityEvents.event;
   private readonly server = createServer((request, response) => {
     if (request.url !== '/mcp' || request.method !== 'POST') { response.writeHead(404).end(); return; }
     if (request.headers.origin || request.headers.authorization !== `Bearer ${this.token}`) { response.writeHead(403).end(); return; }
@@ -65,7 +66,7 @@ export class EditorBridge implements vscode.Disposable {
     await vscode.env.clipboard.writeText(JSON.stringify({ name: manifest.name, url: manifest.url, headers: manifest.auth.headers }, null, 2));
     void vscode.window.showInformationMessage('Editor MCP details copied. Forge connects automatically when a new task starts; use these details only for manual setup or diagnostics.');
   }
-  dispose(): void { this.server.close(); this.readEvents.dispose(); }
+  dispose(): void { this.server.close(); this.activityEvents.dispose(); }
   async openFile(options: { path: string; line: number }): Promise<void> {
     const document = await this.options.files.open(options.path);
     const position = new vscode.Position(Math.max(0, Math.min(options.line - 1, document.lineCount - 1)), 0);
@@ -74,7 +75,7 @@ export class EditorBridge implements vscode.Disposable {
   async architectureContext(): Promise<string> {
     const paths = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,.venv,venv,__pycache__}/**', 500);
     const context = await buildProjectContext({ paths: paths.map(uri => vscode.workspace.asRelativePath(uri)), readFile: async path => (await this.options.files.open(path)).getText() });
-    for (const file of context.files) this.readEvents.fire(file);
+    for (const file of context.files) this.activityEvents.fire({ kind: 'context', path: file.path, startLine: file.startLine, endLine: file.endLine });
     return context.text;
   }
   private async searchCode(options: SearchInput & { signal: AbortSignal }): Promise<CallToolResult> {
@@ -119,7 +120,7 @@ export class EditorBridge implements vscode.Disposable {
       }
       signal.throwIfAborted();
       const found = await searchWithRipgrep({ ...options, paths, signal });
-      for (const file of found.files) for (const match of file.matches) this.readEvents.fire({ path: file.path, startLine: match.line, endLine: match.line, origin: 'tool' });
+      this.activityEvents.fire({ kind: 'search', query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files, ...(options.reason ? { reason: options.reason } : {}) });
       const coverageLimited = skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files;
       const truncated = found.truncated || coverageLimited;
       const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, next_step: `${found.returned_matches} of ${found.observed_matches} observed matching lines shown.${truncated ? ' Results or coverage are incomplete: narrow the query or glob path filter using folder_counts, then search again.' : ''} Open relevant ranges with read_file before answering each requested part.`, candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, eligible_files: paths.size, inspected_bytes: bytes, coverage: 'Saved UTF-8 text only. Counts refer to observed matching lines, not occurrences or all workspace files. Dirty, secret, unavailable, binary and oversized files are excluded. Omitted folder counts are aggregated separately. Use read_file for current editor text and an edit revision.', limits: SEARCH_LIMITS };
@@ -133,7 +134,7 @@ export class EditorBridge implements vscode.Disposable {
       return server.registerTool<z.ZodRawShape, typeof schema>(name, { ...config, inputSchema: schema }, (input, extra) => this.options.log.tool({ name, input, signal: extra.signal, run: () => handler(input, extra) }));
     };
     register('search_code', { description: 'Search saved workspace text. Returns hits grouped by file, up to three excerpts per file, observed folder counts and a next-step hint. Use glob to filter paths and narrow incomplete searches. Literal and case-insensitive by default; regex optional. Open relevant files with read_file.', inputSchema: SearchInputSchema.shape, annotations: { readOnlyHint: true } }, async (input, extra) => this.searchCode({ ...input, signal: extra.signal }));
-    register('read_file', { description: 'Read a bounded line range from a workspace file.', inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional() }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line }) => {
+    register('read_file', { description: 'Read a bounded line range from a workspace file.', inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
       const { revision, file } = await this.options.edits.read(path);
       const lines = file.text.split('\n');
       if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
@@ -148,7 +149,7 @@ export class EditorBridge implements vscode.Disposable {
       }
       if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
       const actualEnd = start_line + output.length - 1;
-      this.readEvents.fire({ path, startLine: start_line, endLine: actualEnd, origin: 'tool' });
+      this.activityEvents.fire({ kind: 'open', path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       const text = output.join('\n');
       // TrueForge prefers structured MCP results, so the source must be present there too.
       return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length } };
@@ -156,6 +157,7 @@ export class EditorBridge implements vscode.Disposable {
     register('list_files', { description: 'Discover up to 100 workspace file paths by glob.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');
       const files = await vscode.workspace.findFiles(glob, '**/{node_modules,.git,.env*,out,dist}/**', 100);
+      this.activityEvents.fire({ kind: 'list', glob, count: files.length });
       return { content: [{ type: 'text', text: files.map(uri => vscode.workspace.asRelativePath(uri)).join('\n') }] };
     });
     register('propose_edit', { description: 'Stage a read-only diff using read_file base_revision. Use one mode: old_text replaces that exact text, which must appear once; start_line and end_line replace those inclusive complete lines; insert_line inserts new_text before that line (line count + 1 appends); with none, new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several old_text, line-range or insert proposals for one file combine into a single pending review; a whole-file proposal replaces earlier pending changes. The user applies hunks in the editor.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional(), start_line: z.number().int().min(1).optional(), end_line: z.number().int().min(1).optional(), insert_line: z.number().int().min(1).optional() }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line }) => {
@@ -165,6 +167,8 @@ export class EditorBridge implements vscode.Disposable {
       const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision: base_revision, text: new_text, explanation, range, oldText: old_text, insertLine: insert_line });
       const note = combined ? ` It includes your earlier pending changes to ${path}; all of them are reviewed together.`
         : replaced.length ? ` It replaced an earlier pending proposal for ${path} that could not be combined; include every change this file still needs.` : '';
+      const detail = old_text !== undefined ? 'replace matched text' : range ? `lines ${range.startLine}–${range.endLine}` : insert_line !== undefined ? `insert at line ${insert_line}` : 'whole file';
+      this.activityEvents.fire({ kind: 'propose', path, detail: `${detail}${combined ? ', combined with earlier changes' : replaced.length ? ', replaced an earlier proposal' : ''}`, reason: explanation.slice(0, 300) });
       const message = `Proposal ${id} is staged for ${path}.${note} No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.`;
       return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path, combined, replaced_proposal_ids: replaced, message } };
     });

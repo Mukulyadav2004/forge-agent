@@ -39,7 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
     architectureContext: () => bridge.architectureContext(),
     edits,
   });
-  context.subscriptions.push(bridge.onDidReadFile(file => provider.recordInspection(file)));
+  context.subscriptions.push(bridge.onDidActivity(entry => provider.recordActivity(entry)));
   context.subscriptions.push(backend, editChanges, editChanges.event(() => provider.refreshReview()));
   context.subscriptions.push(
     vscode.commands.registerCommand('forgeAgent.applyAll', () => provider.review({ action: 'apply_all' })),
