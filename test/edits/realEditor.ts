@@ -63,6 +63,18 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   await panel.getByRole('button', { name: 'Undo last apply', exact: true }).click();
   await message.filter({ hasText: 'Undid the last applied batch' }).waitFor();
   assert.equal(await disk('example.txt'), hunkOriginal);
+  const combinedRead = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
+  const base_revision = (combinedRead.structuredContent as { base_revision: string }).base_revision;
+  const propose = async (extra: Record<string, unknown>) => (await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: 'MCP combine check', ...extra } })).structuredContent as { proposal_id: string; combined: boolean };
+  assert.equal((await propose({ new_text: '    ONE', start_line: 2, end_line: 2 })).combined, false);
+  assert.equal((await propose({ new_text: 'added', insert_line: 4 })).combined, true);
+  const combined = await propose({ new_text: 'FOOTER', old_text: 'footer' });
+  assert.equal(combined.combined, true);
+  await row(combined.proposal_id).locator('.hunk-row').nth(2).waitFor();
+  assert.equal(await row(combined.proposal_id).locator('.hunk-row').count(), 3);
+  assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: '', new_text: 'x', old_text: 'two', insert_line: 1 } })).isError, true);
+  await vscode.commands.executeCommand('forgeAgent.rejectAll');
+  assert.equal(await disk('example.txt'), hunkOriginal);
   await edit({ path: 'example.txt', text: original['example.txt'], save: true });
   await frame.getByRole('textbox', { name: 'Message', exact: true }).focus();
   for (const [path, text] of Object.entries(original)) await stage({ path, text: `changed ${text}` });

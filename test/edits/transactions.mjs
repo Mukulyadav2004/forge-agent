@@ -286,3 +286,52 @@ test('hunk undo stays valid across an interleaved apply to another file', async 
   assert.equal(backend.get('a.txt').text, 'a\nkeep\nb\n');
   assert.equal(backend.get('b.txt').text, 'old\n');
 });
+
+test('line-range, insert and old_text edits to one file combine into one review, apply and undo', async () => {
+  const { backend, service } = setup({ 'a.txt': 'one\ntwo\nthree\nfour\n' });
+  const read = await service.read('a.txt');
+  const first = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'TWO', range: { startLine: 2, endLine: 2 }, explanation: 'first' });
+  assert.deepEqual([first.combined, first.replaced], [false, []]);
+  const second = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'added\nlines', insertLine: 4, explanation: 'second' });
+  const third = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'ONE', oldText: 'one', explanation: 'third' });
+  assert.deepEqual([second.combined, third.combined, third.replaced], [true, true, []]);
+  assert.equal(service.state.proposals.find(proposal => proposal.id === first.id).status, 'superseded');
+  assert.equal(service.state.proposals.filter(proposal => proposal.status === 'pending').length, 1);
+  await service.apply(); assert.equal(backend.get('a.txt').text, 'ONE\nTWO\nthree\nadded\nlines\nfour\n');
+  await service.undo(); assert.equal(backend.get('a.txt').text, 'one\ntwo\nthree\nfour\n');
+});
+
+test('overlapping, ambiguous or missing edits are refused and keep the pending proposal', async () => {
+  const { service } = setup({ 'a.txt': 'x\ny\nx\nz\n' });
+  const read = await service.read('a.txt');
+  const first = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'Y', range: { startLine: 2, endLine: 3 }, explanation: '' });
+  const attempt = (extra) => service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'new', explanation: '', ...extra });
+  await assert.rejects(attempt({ range: { startLine: 3, endLine: 4 } }), /overlap your pending change at line 2/);
+  await assert.rejects(attempt({ insertLine: 3 }), /overlap your pending change/);
+  await assert.rejects(attempt({ oldText: 'missing' }), /not found in a.txt including your pending changes/);
+  await assert.rejects(attempt({ insertLine: 6 }), /between 1 and 5/);
+  const { service: other } = setup({ 'a.txt': 'x\ny\nx\n' }); const otherRead = await other.read('a.txt');
+  await assert.rejects(other.stageEdit({ path: 'a.txt', revision: otherRead.revision, text: 'q', oldText: 'x', explanation: '' }), /matches 2 places/);
+  assert.equal(service.state.proposals.find(proposal => proposal.id === first.id).status, 'pending');
+});
+
+test('old_text keeps $ sequences literal and inserting after an unterminated last line adds a line break', async () => {
+  const { backend, service } = setup({ 'a.txt': 'cost\nend' });
+  const read = await service.read('a.txt');
+  await service.stageEdit({ path: 'a.txt', revision: read.revision, text: "price = '$&$1'", oldText: 'cost', explanation: '' });
+  await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'tail', insertLine: 3, explanation: '' });
+  await service.apply(); assert.equal(backend.get('a.txt').text, "price = '$&$1'\nend\ntail");
+});
+
+test('a whole-file proposal or a partly reviewed proposal is replaced and reported, not combined', async () => {
+  const { service } = setup({ 'a.txt': 'a\nb\nc\n' });
+  const read = await service.read('a.txt');
+  const first = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'A', range: { startLine: 1, endLine: 1 }, explanation: '' });
+  const whole = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'all new\n', explanation: '' });
+  assert.deepEqual([whole.combined, whole.replaced], [false, [first.id]]);
+  await service.reject(whole.id);
+  const ranged = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'A\nb\nC', range: { startLine: 1, endLine: 3 }, explanation: '' });
+  await service.rejectHunk({ id: ranged.id, hunkId: service.state.proposals.find(proposal => proposal.id === ranged.id).hunks[0].id });
+  const after = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'B', range: { startLine: 2, endLine: 2 }, explanation: '' });
+  assert.deepEqual([after.combined, after.replaced], [false, [ranged.id]]);
+});

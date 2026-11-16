@@ -38,6 +38,13 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - Changes: VS Code's bundled executable, guarded explicit candidate paths, aggregate/file/output/time limits, literal default with optional regex, bounded stderr and typed JSON validation, centered source excerpts, explicit errors and MCP structured results. Secret-target aliases and dirty buffers are excluded through Forge's canonical WorkspaceFiles owner.
 - Omitted: Cline AgentToolContext/SearchExecutor imports, workspace index, manual fallback scanner and agent/provider/SDK integration. TrueForge selects and orchestrates the MCP tool; the helper only executes a bounded local search.
 
+## Cline exact-text and insert edit semantics
+
+- Upstream: https://github.com/cline/cline; exact source commit `7a7878cb52fc33967d8b464b3e3d899beac42d4d`; copyright 2026 Cline Bot Inc.; Apache-2.0 licence preserved in `licenses/Cline-Apache-2.0.txt`.
+- Source: `sdk/packages/core/src/extensions/tools/executors/editor.ts` (`replaceInFile`, `insertInFile`, the `old_text`/`insert_line` contract and its error wording).
+- Adapted in: `src/edits/EditService.ts` (exactly-once `old_text` match with a literal replacer; insert-before-line boundary) and the `propose_edit` schema in `src/tools/EditorBridge.ts`.
+- Changes: edits apply to the in-memory pending proposal, never to disk; line numbers refer to the file as read and are shifted past earlier pending changes; overlaps are refused; Forge's revision, conflict, review and undo checks are unchanged. Omitted: file creation, Cline path resolution, `node:fs` writes, line-ending helpers, `@cline/shared` and executor types.
+
 ## jsdiff dependency
 
 - Package: `diff@8.0.2`, https://github.com/kpdecker/jsdiff.

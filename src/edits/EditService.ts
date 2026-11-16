@@ -28,6 +28,16 @@ export interface EditBackend {
 interface Proposal { view: ProposalView; before: FileSnapshot; original: string; after: string; parts: ReviewPart[]; task: string }
 interface UndoBatch { id: string; selections: { proposalId: string; hunkIds: string[] }[]; before: FileSnapshot[]; after: FileSnapshot[] }
 interface ReadReceipt { task: string; file: FileSnapshot }
+export interface StageOptions { path: string; revision: string; text: string; explanation: string; range?: { startLine: number; endLine: number }; oldText?: string; insertLine?: number }
+
+function replaceLines(options: { text: string; eol: string; start: number; endExclusive: number; insert: string }): string {
+  const lines = options.text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const head = lines.slice(0, options.start - 1).join('');
+  let insert = options.insert;
+  if (options.endExclusive <= lines.length && insert && !insert.endsWith(options.eol)) insert += options.eol;
+  if (head && !head.endsWith('\n') && insert) insert = options.eol + insert;
+  return head + insert + lines.slice(options.endExclusive - 1).join('');
+}
 
 export function contentHash(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -112,7 +122,11 @@ export class EditService {
     this.receipts.set(revision, { task, file });
     return { revision, file };
   }
-  async stage(options: { path: string; revision: string; text: string; explanation: string; range?: { startLine: number; endLine: number } }): Promise<string> {
+  async stage(options: StageOptions): Promise<string> {
+    return (await this.stageEdit(options)).id;
+  }
+  /** Line-based and old_text edits build on an untouched pending proposal for the same unchanged file; whole-file text replaces it. */
+  async stageEdit(options: StageOptions): Promise<{ id: string; combined: boolean; replaced: string[] }> {
     this.assertAvailable();
     const receipt = this.receipts.get(options.revision);
     if (!receipt || receipt.task !== this.task || this.cancelled || receipt.file.path !== options.path) throw new Error('Read this file again and pass its current base_revision to propose_edit.');
@@ -121,12 +135,40 @@ export class EditService {
     if (actual.dirty) throw new Error(`Save your unsaved changes in ${options.path}, then read it again before proposing edits.`);
     if (!matches({ actual, expected: receipt.file })) throw new Error(`${options.path} changed after it was read. Read it again before proposing edits.`);
     let text = options.text.replace(/\r\n|\r|\n/g, actual.eol);
-    if (options.range) {
-      const { startLine, endLine } = options.range;
-      const lines = actual.text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-      if (!Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length) throw new Error('Choose complete lines inside this file for a ranged proposal.');
-      if (endLine < lines.length && text && !text.endsWith(actual.eol)) text += actual.eol;
-      text = lines.slice(0, startLine - 1).join('') + text + lines.slice(endLine).join('');
+    const partial = options.range !== undefined || options.oldText !== undefined || options.insertLine !== undefined;
+    const pending = partial ? [...this.proposals.values()].find(previous => previous.task === this.task && previous.view.status === 'pending'
+      && previous.view.hunks.every(hunk => hunk.status === 'pending') && matches({ actual, expected: previous.before })) : undefined;
+    const base = pending?.after ?? actual.text;
+    const readLines = (actual.text.match(/[^\n]*\n|[^\n]+$/g) ?? []).length;
+    if (options.range || options.insertLine !== undefined) {
+      // Line numbers always refer to the file as read_file returned it; earlier pending changes shift them.
+      const start = options.range?.startLine ?? options.insertLine ?? 0;
+      const endExclusive = options.range ? options.range.endLine + 1 : start;
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(endExclusive) || start < 1 || endExclusive < start
+        || (options.range ? endExclusive - 1 > readLines || endExclusive === start : start > readLines + 1)) {
+        throw new Error(options.range ? 'Choose complete lines inside this file for a ranged proposal.' : `insert_line must be between 1 and ${readLines + 1}; use ${readLines + 1} to append at the end of the file.`);
+      }
+      let shift = 0;
+      for (const hunk of pending?.view.hunks ?? []) {
+        const hunkEnd = hunk.oldStart + hunk.oldLines;
+        if (hunk.oldLines ? hunk.oldStart < endExclusive && hunkEnd > start : start < hunk.oldStart && hunk.oldStart < endExclusive) {
+          throw new Error(`These lines overlap your pending change at line ${hunk.oldStart} of ${options.path}. Propose one change that covers both.`);
+        }
+        if (hunkEnd <= start) shift += hunk.newLines - hunk.oldLines;
+      }
+      text = replaceLines({ text: base, eol: actual.eol, start: start + shift, endExclusive: endExclusive + shift, insert: text });
+    } else if (options.oldText !== undefined) {
+      // Adapted from cline/cline sdk/packages/core/src/extensions/tools/executors/editor.ts (replaceInFile)
+      // at 7a7878cb52fc33967d8b464b3e3d899beac42d4d; Copyright 2026 Cline Bot Inc., Apache-2.0.
+      // Applied to the in-memory proposal text instead of writing the file.
+      const oldText = options.oldText.replace(/\r\n|\r|\n/g, actual.eol);
+      const occurrences = oldText ? base.split(oldText).length - 1 : 0;
+      if (occurrences !== 1) {
+        throw new Error(occurrences ? `No change staged: old_text matches ${occurrences} places in ${options.path}. Include more surrounding lines so it matches exactly once.`
+          : `No change staged: old_text was not found in ${options.path}${pending ? ' including your pending changes' : ''}. Copy the exact current text, including indentation.`);
+      }
+      const replacement = text;
+      text = base.replace(oldText, () => replacement); // A replacer keeps "$" sequences in code literal.
     }
     if (text.length > MAX_EDIT_CHARACTERS || text.includes('\0') || options.text.startsWith('\uFEFF') || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'utf8')) !== text) {
       throw new Error('Proposals must contain valid UTF-8 text within the file limit, without NUL characters or a leading BOM. Encoding metadata is preserved automatically.');
@@ -134,7 +176,8 @@ export class EditService {
     if (text === actual.text) throw new Error('The proposed content is identical to the current file.');
     const { parts, hunks } = buildLineChanges({ before: actual.text, after: text });
     const id = randomUUID();
-    const proposal: Proposal = { view: { id, path: options.path, explanation: options.explanation, status: 'pending', hunks }, before: actual, original: actual.text, after: text, parts, task: this.task };
+    const explanation = pending ? `${pending.view.explanation}\n${options.explanation}`.slice(-4000) : options.explanation;
+    const proposal: Proposal = { view: { id, path: options.path, explanation, status: 'pending', hunks }, before: actual, original: actual.text, after: text, parts, task: this.task };
     this.proposals.set(id, proposal);
     try {
       await this.options.backend.preview({ id, path: options.path, before: actual.text, after: text });
@@ -153,7 +196,7 @@ export class EditService {
     }
     this.changed(`Proposed ${options.path}. Review the diff, then apply or reject.`);
     await this.closePreviews(superseded);
-    return id;
+    return { id, combined: pending !== undefined, replaced: superseded.filter(previous => previous !== pending?.view.id) };
   }
   async preview(id: string): Promise<void> {
     this.assertAvailable();
