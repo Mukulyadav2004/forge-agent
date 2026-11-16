@@ -237,7 +237,7 @@ export class EditService {
       for (const hunk of proposal.view.hunks) if (hunk.id === options.hunkId) hunk.status = 'rejected';
       this.updateStatus(proposal);
       await this.refreshPreview(proposal);
-      this.changed('Rejected this hunk. No files were changed. Previously accepted hunks remain saved.');
+      this.changed(`Rejected this hunk. No files were changed. Previously accepted hunks remain saved. ${this.remaining()}`);
     } finally { this.busy = false; this.changed(); }
   }
   private pendingHunk(options: { id: string; hunkId: string }): Proposal {
@@ -245,6 +245,12 @@ export class EditService {
     if (!proposal || proposal.task !== this.task || !['pending', 'conflict'].includes(proposal.view.status)
       || !proposal.view.hunks.some(hunk => hunk.id === options.hunkId && hunk.status === 'pending')) throw new Error('This hunk is no longer pending.');
     return proposal;
+  }
+  /** Counts pending hunks across every open proposal, not just the file that was just reviewed. */
+  private remaining(): string {
+    const open = [...this.proposals.values()].filter(proposal => proposal.view.status === 'pending' || proposal.view.status === 'conflict');
+    const hunks = open.reduce((count, proposal) => count + proposal.view.hunks.filter(hunk => hunk.status === 'pending').length, 0);
+    return hunks ? `${hunks} hunk(s) in ${open.length} file(s) still pending.` : 'No pending hunks remain.';
   }
   private updateStatus(proposal: Proposal): void {
     proposal.view.status = proposal.view.hunks.some(hunk => hunk.status === 'pending') ? proposal.view.status === 'conflict' ? 'conflict' : 'pending'
@@ -294,7 +300,7 @@ export class EditService {
         this.updateStatus(proposal);
       }
       this.receipts.clear();
-      this.changed(options.hunkId ? `Accepted and saved this hunk. Undo is available. ${selected.some(proposal => proposal.view.status === 'pending') ? 'Other hunks stay pending.' : 'No pending hunks remain.'}` : `Applied and saved ${selected.length} file(s). Undo is available.`);
+      this.changed(`${options.hunkId ? 'Accepted and saved this hunk.' : `Applied and saved ${selected.length} file(s).`} Undo is available. ${this.remaining()}`);
       for (const proposal of selected) await this.refreshPreview(proposal);
     } catch (error) {
       this.changed(error instanceof Error ? error.message : 'Apply failed.');

@@ -335,3 +335,17 @@ test('a whole-file proposal or a partly reviewed proposal is replaced and report
   const after = await service.stageEdit({ path: 'a.txt', revision: read.revision, text: 'B', range: { startLine: 2, endLine: 2 }, explanation: '' });
   assert.deepEqual([after.combined, after.replaced], [false, [ranged.id]]);
 });
+
+test('review messages count pending hunks across every open file', async () => {
+  const { service } = setup();
+  const a = await stage({ service, path: 'a.txt', text: 'new a\n' });
+  await stage({ service, path: 'b.txt', text: 'new b\n' });
+  const c = await stage({ service, path: 'c.txt', text: 'new c\n' });
+  const hunk = id => service.state.proposals.find(proposal => proposal.id === id).hunks[0].id;
+  await service.applyHunk({ id: a, hunkId: hunk(a) });
+  assert.match(service.state.message, /^Accepted and saved this hunk\. Undo is available\. 2 hunk\(s\) in 2 file\(s\) still pending\.$/);
+  await service.rejectHunk({ id: c, hunkId: hunk(c) });
+  assert.match(service.state.message, /1 hunk\(s\) in 1 file\(s\) still pending\.$/);
+  await service.apply();
+  assert.match(service.state.message, /^Applied and saved 1 file\(s\)\. Undo is available\. No pending hunks remain\.$/);
+});

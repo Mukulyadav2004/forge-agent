@@ -72,6 +72,9 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.equal(combined.combined, true);
   await row(combined.proposal_id).locator('.hunk-row').nth(2).waitFor();
   assert.equal(await row(combined.proposal_id).locator('.hunk-row').count(), 3);
+  assert.equal(await panel.locator('.proposal-row').first().getAttribute('data-proposal-id'), combined.proposal_id, 'The open proposal must be listed first.');
+  assert.ok(await panel.locator('.proposal-row.superseded').count() >= 2);
+  assert.equal(await panel.locator('.proposal-row.superseded .hunk-row, .proposal-row.superseded button').count(), 0);
   assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: '', new_text: 'x', old_text: 'two', insert_line: 1 } })).isError, true);
   await vscode.commands.executeCommand('forgeAgent.rejectAll');
   assert.equal(await disk('example.txt'), hunkOriginal);

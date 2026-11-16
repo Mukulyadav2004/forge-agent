@@ -29,11 +29,17 @@ export function renderReviewPanel(options: { container: HTMLElement; state: Revi
   );
   const list = document.createElement('div');
   list.className = 'proposal-list';
-  for (const proposal of state.proposals) {
+  // Open proposals first; a superseded proposal is a one-line note because its changes live in the newer one.
+  for (const proposal of [...active, ...state.proposals.filter(item => !active.includes(item))]) {
     const row = document.createElement('article');
     row.className = 'proposal-row'; row.dataset.proposalId = proposal.id;
     const name = document.createElement('h3'); name.textContent = proposal.path;
     const status = document.createElement('span'); status.className = 'proposal-status'; status.textContent = proposal.status;
+    if (proposal.status === 'superseded') {
+      row.classList.add('superseded');
+      const note = document.createElement('p'); note.className = 'hint'; note.textContent = 'Replaced by a newer proposal for this file.';
+      row.append(name, status, note); list.append(row); continue;
+    }
     const explanation = document.createElement('p'); explanation.textContent = proposal.explanation;
     const actions = document.createElement('div'); actions.className = 'review-actions';
     actions.append(button({ text: 'Preview', command: { action: 'preview', id: proposal.id }, disabled: locked }));
