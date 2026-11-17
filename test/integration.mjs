@@ -33,8 +33,11 @@ test('approval prompts name the file, change and reason from the tool call argum
   assert.match(describeApproval({ name: 'propose_edit', arguments: 'not json' }), /Approve `propose_edit`/u);
   assert.match(describeApproval(undefined), /details were not received/u);
   assert.doesNotMatch(ranged, /will refuse/u);
-  assert.match(describeApproval(call({ new_text: 'x', old_text: 'y', start_line: 2, end_line: 2 })), /editor will refuse this call:\*\* it mixes/u);
-  assert.match(describeApproval(call({ new_text: 'x', old_text: 'y', end_line: 2 })), /editor will refuse this call:\*\* it gives only one of start_line and end_line/u);
+  const located = describeApproval(call({ new_text: 'x', old_text: 'y', start_line: 2, end_line: 2, insert_line: 3 }));
+  assert.match(located, /replace one matched passage/u);
+  assert.doesNotMatch(located, /will refuse/u, 'old_text alone locates the change; line numbers sent with it are ignored.');
+  assert.match(describeApproval(call({ new_text: 'x', start_line: 2, end_line: 2, insert_line: 3 })), /editor will refuse this call:\*\* it asks both to replace lines and to insert/u);
+  assert.match(describeApproval(call({ new_text: 'x', end_line: 2 })), /editor will refuse this call:\*\* it gives only one of start_line and end_line/u);
 });
 
 test('streamed tool call deltas are rebuilt for the approval that names them', () => {

@@ -36,14 +36,15 @@ export function describeApproval(call: PendingToolCall | undefined): string {
   if (call.name !== 'propose_edit' || text('path') === undefined) return `**Approve \`${call.name}\`?**\n\nArguments: \`${clip(call.arguments, 300).replace(/`/gu, "'")}\``;
   const start = number('start_line'), end = number('end_line'), insert = number('insert_line'), oldText = text('old_text');
   const added = lineCount(text('new_text') ?? '');
-  const change = insert !== undefined ? `insert ${added} line(s) at line ${insert}`
+  const change = oldText !== undefined ? `replace one matched passage of ${lineCount(oldText)} line(s) with ${added} line(s)`
+    : insert !== undefined ? `insert ${added} line(s) at line ${insert}`
     : start !== undefined ? `replace lines ${start}–${end ?? start} with ${added} line(s)`
-    : oldText !== undefined ? `replace one matched passage of ${lineCount(oldText)} line(s) with ${added} line(s)`
     : `replace the whole file (${added} line(s))`;
   const reason = clip((text('explanation') ?? '').trim(), 300) || 'none given';
   // Same checks as propose_edit in EditorBridge: a call that fails them stages nothing.
-  const invalid = (start === undefined) !== (end === undefined) ? 'it gives only one of start_line and end_line'
-    : [oldText, start, insert].filter(value => value !== undefined).length > 1 ? 'it mixes more than one of old_text, start_line/end_line and insert_line' : undefined;
+  const invalid = oldText !== undefined ? undefined
+    : (start === undefined) !== (end === undefined) ? 'it gives only one of start_line and end_line'
+    : start !== undefined && insert !== undefined ? 'it asks both to replace lines and to insert' : undefined;
   const note = invalid ? `\n\n**The editor will refuse this call:** ${invalid}. Nothing will be staged either way; approving returns the exact error so the agent can correct the call, while denying only says it was declined.` : '';
   return `**Approve staging an edit?**\n\n- File: \`${text('path')}\`\n- Change: ${change}\n- Agent's reason: ${reason}${note}\n\nApproving only stages a diff for review. Nothing is written until you accept it.`;
 }

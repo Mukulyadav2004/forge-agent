@@ -101,7 +101,10 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.equal(await frame.locator('#activity-feed').getAttribute('open'), '', 'The feed should start expanded.');
   await nestedOpen.first().scrollIntoViewIfNeeded();
   await frame.locator('#activity-feed').screenshot({ path: vscode.Uri.joinPath(options.extensionUri, 'out-test', 'activity-feed.png').fsPath });
-  assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: '', new_text: 'x', old_text: 'two', insert_line: 1 } })).isError, true);
+  assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: '', new_text: 'x', start_line: 1, end_line: 1, insert_line: 1 } })).isError, true, 'A line range plus an insert is ambiguous.');
+  const hinted = await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: '', new_text: 'TWO', old_text: 'two', start_line: 1, insert_line: 1 } });
+  assert.equal(hinted.isError, undefined, 'old_text locates the change; line numbers sent with it are ignored.');
+  assert.match(JSON.stringify(hinted.content), /Ignored start_line, insert_line because old_text already locates the change/u);
   await vscode.commands.executeCommand('forgeAgent.rejectAll');
   assert.equal(await disk('example.txt'), hunkOriginal);
   const manyLines = Array.from({ length: 40 }, (_, index) => `line ${index}\n`);
