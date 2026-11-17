@@ -33,6 +33,16 @@ export function renderMarkdown(options: { container: HTMLElement; text: string }
     FORBID_TAGS: ['img', 'style', 'form', 'input', 'button', 'iframe'],
     FORBID_ATTR: ['style', 'id', 'name'],
   });
+  // Colour diff blocks line by line; each line is set as plain text, so nothing from the model is parsed as HTML.
+  for (const code of Array.from(options.container.querySelectorAll('pre > code.language-diff'))) {
+    const lines = (code.textContent ?? '').replace(/\n$/u, '').split('\n');
+    code.replaceChildren(...lines.map(line => {
+      const row = document.createElement('span');
+      row.className = line.startsWith('-') ? 'diff-line diff-line-removed' : line.startsWith('+') ? 'diff-line diff-line-added' : 'diff-line';
+      row.textContent = line;
+      return row;
+    }));
+  }
 }
 
 export async function renderDiagrams(container: HTMLElement): Promise<void> {

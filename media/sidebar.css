@@ -99,6 +99,9 @@ header #cancel-button:disabled { display: none; }
 .markdown-body ul, .markdown-body ol { padding-left: 1.25rem; }
 .markdown-body pre { overflow: auto; padding: 0.75rem; background: var(--vscode-textCodeBlock-background); border-radius: 0.375rem; }
 .markdown-body code { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.8rem; }
+.markdown-body .diff-line { display: block; min-width: max-content; padding-left: 0.25rem; border-left: 0.1875rem solid transparent; }
+.markdown-body .diff-line-added { background: var(--vscode-diffEditor-insertedTextBackground); border-left-color: var(--vscode-gitDecoration-addedResourceForeground, currentColor); }
+.markdown-body .diff-line-removed { background: var(--vscode-diffEditor-removedTextBackground); border-left-color: var(--vscode-gitDecoration-deletedResourceForeground, currentColor); }
 .markdown-body :not(pre) > code { padding: 0.0625rem 0.25rem; background: var(--vscode-textCodeBlock-background); }
 .markdown-body a { color: var(--vscode-textLink-foreground); }
 .markdown-body table { display: block; width: 100%; overflow-x: auto; border-collapse: collapse; font-size: 0.8rem; }

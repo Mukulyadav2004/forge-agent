@@ -278,6 +278,13 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
       receivedArchitectureContext ||= turnPayload.input.some((message: unknown) => typeof message === 'object' && message !== null && 'content' in message && typeof message.content === 'string' && message.content.includes('Workspace source excerpts supplied by the editor'));
     }
     if (typeof turnPayload === 'object' && turnPayload !== null && 'previous_turn_id' in turnPayload) retryTurnIds.push(turnPayload.previous_turn_id);
+    if (JSON.stringify(turnPayload).includes('Diff render check')) {
+      const now = new Date().toISOString();
+      const content = 'Proposed change:\n\n```diff\n-     return bool(val)\n+     return bool(val and val.lower() not in FALSE)\n+ <img src=x onerror="window.forgeDiffInjected=true">\n```';
+      response.setHeader("Content-Type", "text/event-stream");
+      response.end([{ type: 'model.message.delta', id: `dr-${++turnNumber}`, thread_id: 'main', content }, { type: 'turn.done', id: `drd-${turnNumber}`, created_at: now, thread_id: null, state: { status: 'done', completed_at: now, output: null, required_actions: [] } }].map(event => `data: ${JSON.stringify(event)}\n\n`).join(''));
+      return;
+    }
     if (JSON.stringify(turnPayload).includes('Compaction check')) {
       // Event shapes as TrueForge 0.185.1 emits them when the context passes the configured input_tokens threshold.
       const now = new Date().toISOString();
@@ -381,6 +388,16 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await compacted.filter({ hasText: 'summarised it to' }).waitFor();
     assert.match(await compacted.innerText(), /Compacted context 41k tokens reached the 32k-token threshold; TrueForge summarised it to 5.1k tokens in 2\.1 s[\s\S]*re-reads what it still needs/u);
     await frame.locator('#activity-feed').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'compaction-feed.png').fsPath });
+    await input.fill('Diff render check');
+    await frame.getByRole('button', { name: 'Send', exact: true }).click();
+    const removed = frame.locator('.markdown-body .diff-line-removed');
+    await removed.first().waitFor();
+    assert.deepEqual([await removed.count(), await frame.locator('.markdown-body .diff-line-added').count()], [1, 2]);
+    assert.match(await removed.first().innerText(), /^- {5}return bool\(val\)$/u);
+    const colours = await frame.evaluate(() => [...document.querySelectorAll('.markdown-body .diff-line-removed, .markdown-body .diff-line-added')].map(row => getComputedStyle(row).backgroundColor));
+    assert.ok(colours.every(colour => colour !== 'rgba(0, 0, 0, 0)') && new Set(colours).size === 2, `Removed and added lines need two different backgrounds: ${colours.join(', ')}`);
+    assert.equal(await frame.evaluate(() => (window as unknown as { forgeDiffInjected?: boolean }).forgeDiffInjected ?? false), false, 'HTML inside a diff block stays text.');
+    await frame.locator('.markdown-body pre').last().screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'approval-diff.png').fsPath });
     await config.update('fallbackModel', undefined, vscode.ConfigurationTarget.Workspace);
   } finally {
     server.closeAllConnections();
