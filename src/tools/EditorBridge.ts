@@ -36,7 +36,7 @@ export class EditorBridge implements vscode.Disposable {
   private budgetUsed = 0;
   get budget(): { used: number; limit: number } { return { used: this.budgetUsed, limit: CONTEXT_BUDGET }; }
   /** Called once per user request (not for approvals or retries of it). */
-  beginRequest(): void { this.budgetUsed = 0; }
+  beginRequest(): void { this.budgetUsed = 0; this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
   private remaining(): number { return Math.max(0, CONTEXT_BUDGET - this.budgetUsed); }
   private budgetNote(): string { return `Context budget: ${this.budgetUsed.toLocaleString('en-US')} of ${CONTEXT_BUDGET.toLocaleString('en-US')} characters used for this request.`; }
   private budgetError(): Error { return new Error(`${this.budgetNote()} Too little remains for this call. Answer from the evidence you already have and label anything unverified, or ask the user to continue in a new message.`); }
@@ -87,7 +87,7 @@ export class EditorBridge implements vscode.Disposable {
     const paths = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,.venv,venv,__pycache__}/**', 500);
     const context = await buildProjectContext({ paths: paths.map(uri => vscode.workspace.asRelativePath(uri)), readFile: async path => (await this.options.files.open(path)).getText() });
     this.budgetUsed += context.text.length;
-    for (const file of context.files) this.activityEvents.fire({ kind: 'context', path: file.path, startLine: file.startLine, endLine: file.endLine });
+    for (const file of context.files) this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: file.path, startLine: file.startLine, endLine: file.endLine });
     return context.text;
   }
   private async searchCode(options: SearchInput & { signal: AbortSignal }): Promise<CallToolResult> {
@@ -134,11 +134,11 @@ export class EditorBridge implements vscode.Disposable {
       }
       signal.throwIfAborted();
       const found = await searchWithRipgrep({ ...options, paths, signal, output_characters: outputCharacters });
-      this.activityEvents.fire({ kind: 'search', query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files, ...(options.reason ? { reason: options.reason } : {}) });
       const coverageLimited = skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files;
       const truncated = found.truncated || coverageLimited;
       const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, next_step: `${found.returned_matches} of ${found.observed_matches} observed matching lines shown.${truncated ? ' Results or coverage are incomplete: narrow the query or glob path filter using folder_counts, then search again.' : ''} Open relevant ranges with read_file before answering each requested part.`, candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, eligible_files: paths.size, inspected_bytes: bytes, coverage: 'Saved UTF-8 text only. Counts refer to observed matching lines, not occurrences or all workspace files. Dirty, secret, unavailable, binary and oversized files are excluded. Omitted folder counts are aggregated separately. Use read_file for current editor text and an edit revision.', limits: SEARCH_LIMITS };
       this.budgetUsed += JSON.stringify(result).length;
+      this.activityEvents.fire({ kind: 'search', used: this.budgetUsed, query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files, ...(options.reason ? { reason: options.reason } : {}) });
       const budgeted = { ...result, context_budget: this.budget };
       return { content: [{ type: 'text', text: JSON.stringify(budgeted) }], structuredContent: budgeted };
     } finally { signal.removeEventListener('abort', abort); cancellation.dispose(); }
@@ -167,9 +167,9 @@ export class EditorBridge implements vscode.Disposable {
       }
       if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
       const actualEnd = start_line + output.length - 1;
-      this.activityEvents.fire({ kind: 'open', path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       const text = output.join('\n');
       this.budgetUsed += text.length;
+      this.activityEvents.fire({ kind: 'open', used: this.budgetUsed, path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       // TrueForge prefers structured MCP results, so the source must be present there too.
       return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${this.budgetNote()}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length, context_budget: this.budget } };
     });
@@ -180,7 +180,7 @@ export class EditorBridge implements vscode.Disposable {
       const listed = files.map(uri => vscode.workspace.asRelativePath(uri)).join('\n');
       if (listed.length > this.remaining()) throw this.budgetError();
       this.budgetUsed += listed.length;
-      this.activityEvents.fire({ kind: 'list', glob, count: files.length });
+      this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob, count: files.length });
       return { content: [{ type: 'text', text: `${listed}${found.length > 100 ? '\nMore files match; narrow the glob to see them.' : ''}\n${this.budgetNote()}` }] };
     });
     register('propose_edit', { description: 'Stage an edit for the user to review; nothing is written until they accept it. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the exact current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line }) => {

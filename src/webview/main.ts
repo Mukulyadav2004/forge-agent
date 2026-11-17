@@ -106,8 +106,10 @@ function renderMessages(options: { messages: ChatMessage[]; complete: boolean })
 let renderedActivity = '';
 const plural = (count: number, word: string, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
 const where = (glob: string) => !glob || glob === '**/*' ? 'codebase' : glob;
+const size = (characters: number) => characters < 1000 ? `${characters}` : characters < 10000 ? `${(characters / 1000).toFixed(1)}k` : `${Math.round(characters / 1000)}k`;
 
-/** One row per completed editor tool call, oldest first; a file opened from a search is nested under it. Paths open the file; reasons are the agent's own words. */
+/** One row per completed editor tool call, oldest first; a file opened from a search is nested under it. Paths open the file; reasons are the agent's own words.
+ * Each read, search or listing shows the characters it added; the header shows the current request's context budget. */
 function renderActivity(entries: ActivityEntry[]): void {
   const feed = document.getElementById('activity-feed');
   const list = document.getElementById('activity-list');
@@ -117,7 +119,11 @@ function renderActivity(entries: ActivityEntry[]): void {
   renderedActivity = key;
   feed.hidden = entries.length === 0;
   const tally = (kind: ActivityEntry['kind']) => entries.filter(entry => entry.kind === kind).length;
-  if (count) count.textContent = `(${[plural(tally('search'), 'search', 'searches'), plural(tally('open'), 'read'), plural(tally('propose'), 'proposal')].join(', ')})`;
+  const lastRequest = entries.map(entry => entry.kind).lastIndexOf('request');
+  const request = entries[lastRequest];
+  const spent = entries.slice(lastRequest + 1).reduce((used, entry) => 'used' in entry && entry.used !== undefined ? entry.used : used, 0);
+  const budget = request?.kind === 'request' ? `context ${size(spent)} of ${size(request.limit)} chars` : `context ${size(spent)} chars`;
+  if (count) count.textContent = `(${[plural(tally('search'), 'search', 'searches'), plural(tally('open'), 'read'), plural(tally('propose'), 'proposal')].join(', ')} · ${budget})`;
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
   const link = (path: string, line: number, label: string) => {
     const button = document.createElement('button');
@@ -128,6 +134,7 @@ function renderActivity(entries: ActivityEntry[]): void {
   };
   const searches = new Map<string, HTMLElement>();
   const rows: HTMLElement[] = [];
+  let previousUsed = 0;
   for (const entry of entries) {
     const row = document.createElement('li');
     row.className = `activity-row activity-${entry.kind}`;
@@ -136,6 +143,11 @@ function renderActivity(entries: ActivityEntry[]): void {
     const notes: string[] = [];
     let main: (string | HTMLElement)[];
     switch (entry.kind) {
+      case 'request':
+        kind.textContent = 'New request';
+        main = [`context budget ${size(entry.limit)} characters`];
+        searches.clear(); previousUsed = 0;
+        break;
       case 'search':
         kind.textContent = 'Searched';
         main = [`"${entry.query}" in ${where(entry.glob)}: ${plural(entry.matches, 'match', 'matches')} in ${plural(entry.fileCount, 'file')}${entry.truncated ? ' (limited)' : ''}`];
@@ -159,8 +171,9 @@ function renderActivity(entries: ActivityEntry[]): void {
         main = [link(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];
         break;
     }
-    if (entry.kind !== 'list' && entry.kind !== 'context' && entry.reason) notes.push(entry.reason);
-    row.append(kind, ...main);
+    if ('reason' in entry && entry.reason) notes.push(entry.reason);
+    if ('used' in entry && entry.used !== undefined) { if (entry.used > previousUsed) main.push(` (+${size(entry.used - previousUsed)} chars)`); previousUsed = entry.used; }
+    row.append(kind, ' ', ...main);
     for (const text of notes) {
       const note = document.createElement('span');
       note.className = 'activity-note';

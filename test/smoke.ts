@@ -350,6 +350,8 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await input.fill('Fallback check');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.getByRole('log').getByText(/Switching to the fallback model/).waitFor();
+    assert.equal(await frame.locator('#activity-list .activity-request').count(), 1, 'A new request starts a fresh context budget in the feed.');
+    assert.match(await frame.locator('#activity-count').innerText(), /· context 0 of 200k chars\)$/u);
     await frame.getByRole('log').getByText('Recovered with the corrected model.', { exact: true }).waitFor();
     await frame.locator('#message-input:not([disabled])').waitFor();
     assert.ok((await frame.getByRole('log').innerText()).includes('API key not valid'), 'The error must be shown in plain words.');
