@@ -1,6 +1,7 @@
 import { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import { agentInstructions } from './instructions';
+import definition from './forge-agent.json';
 import { SessionTrace } from '../observability/events';
 import type { SessionEvent } from '../observability/events';
 
@@ -12,6 +13,16 @@ export function classifyModelError(message: string): { transient: boolean; summa
   // TrueForge ends a turn this way when the agent used every allowed step; another model would not help.
   const stepLimit = /iteration limit/iu.test(message);
   return { transient: transient && !stepLimit, summary, stepLimit };
+}
+
+/** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
+export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string }): TrueForgeApi.AgentSpec {
+  return {
+    model: { name: options.model, ...(options.reasoningEffort ? { params: { reasoningEffort: options.reasoningEffort } } : {}) },
+    instructions: agentInstructions,
+    config: definition.config,
+    mcpServers: options.connector ? [{ name: options.connector, ...definition.editorServer }] : [],
+  };
 }
 
 function createClient(baseUrl: string): TrueForge {
@@ -78,14 +89,7 @@ export class ForgeSession {
     this.options.model = model;
   }
   private spec(model: string): TrueForgeApi.AgentSpec {
-    const connector = this.options.editorManifest?.name ?? this.options.connector;
-    return {
-      model: { name: model, ...(this.options.reasoningEffort ? { params: { reasoningEffort: this.options.reasoningEffort } } : {}) },
-      instructions: agentInstructions,
-      // Enable harness capabilities as the editor gains support for their interactions.
-      config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 64 },
-      mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'search_code', 'propose_edit', 'run_command'], requireApprovalForTools: ['propose_edit', 'run_command'] }] : [],
-    };
+    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort });
   }
   private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], previousTurnId?: string): Promise<void> {
     this.cancelled = false;

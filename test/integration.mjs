@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
+import { agentSpec, classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
+import { readFileSync } from 'node:fs';
 import { buildProjectContext, isArchitectureRequest } from '../out/context/projectContext.js';
 import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
@@ -56,6 +57,17 @@ test('streamed tool call deltas are rebuilt for the approval that names them', (
   assert.equal(calls.find('msg-2', 'call_1'), undefined, 'A call id must match the message that produced it.');
   calls.clear();
   assert.equal(calls.find('msg-1', 'call_1'), undefined);
+});
+
+test('the agent definition file is what TrueForge receives', () => {
+  const definition = JSON.parse(readFileSync(new URL('../src/agent/forge-agent.json', import.meta.url), 'utf8'));
+  const spec = agentSpec({ model: 'test/model', connector: 'forge-editor-abc', reasoningEffort: 'low' });
+  assert.deepEqual(spec.config, definition.config);
+  assert.deepEqual(spec.mcpServers, [{ name: 'forge-editor-abc', ...definition.editorServer }]);
+  assert.deepEqual(spec.model, { name: 'test/model', params: { reasoningEffort: 'low' } });
+  assert.ok(spec.instructions.startsWith('You are Forge Agent'));
+  assert.deepEqual(definition.editorServer.requireApprovalForTools, ['propose_edit', 'run_command'], 'Every tool that writes or runs needs approval.');
+  assert.deepEqual(agentSpec({ model: 'test/model' }).mcpServers, []);
 });
 
 test('model errors are classified for retry and summarised without the provider prefix', () => {
