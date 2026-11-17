@@ -210,6 +210,9 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
   let receivedArchitectureContext = false;
   let turnNumber = 0;
   let holdNextTurn = false;
+  let sessionModel = '';
+  const patchedModels: string[] = [];
+  const retryTurnIds: unknown[] = [];
   let releaseTurn: (() => void) | undefined;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -228,6 +231,13 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
       response.end(JSON.stringify({ data: [{ name: "test/current" }, { name: "test/selected" }] }));
       return;
     }
+    if (request.method === 'PATCH' && request.url === '/api/v1/sessions/recovered-session') {
+      const patch = JSON.parse(Buffer.concat(chunks).toString()) as { agent: { spec: { model: { name: string } } } };
+      sessionModel = patch.agent.spec.model.name;
+      patchedModels.push(sessionModel);
+      response.end(JSON.stringify({ data: { id: 'recovered-session' } }));
+      return;
+    }
     if (request.url === "/api/v1/sessions") {
       const payload: unknown = JSON.parse(Buffer.concat(chunks).toString());
       if (typeof payload !== "object" || payload === null || !("agent" in payload)) throw new Error("Missing agent");
@@ -238,6 +248,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
       const model = spec.model;
       if (typeof model !== "object" || model === null || !("name" in model) || typeof model.name !== "string") throw new Error("Missing model name");
       attemptedModels.push(model.name);
+      sessionModel = model.name;
       if (model.name === "test/old") {
         response.writeHead(422).end(JSON.stringify({ error: { message: "Test model mismatch" } }));
       } else {
@@ -248,6 +259,12 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     const turnPayload: unknown = JSON.parse(Buffer.concat(chunks).toString());
     if (typeof turnPayload === 'object' && turnPayload !== null && 'input' in turnPayload && Array.isArray(turnPayload.input)) {
       receivedArchitectureContext ||= turnPayload.input.some((message: unknown) => typeof message === 'object' && message !== null && 'content' in message && typeof message.content === 'string' && message.content.includes('Workspace source excerpts supplied by the editor'));
+    }
+    if (typeof turnPayload === 'object' && turnPayload !== null && 'previous_turn_id' in turnPayload) retryTurnIds.push(turnPayload.previous_turn_id);
+    if (sessionModel === 'test/broken') {
+      response.setHeader("Content-Type", "text/event-stream");
+      response.end(`data: ${JSON.stringify({ type: 'turn.done', id: `failed-${++turnNumber}`, created_at: new Date().toISOString(), thread_id: null, state: { status: 'error', completed_at: new Date().toISOString(), message: '[Model Error] Request failed (401): API key not valid. Please pass a valid API key.' } })}\n\n`);
+      return;
     }
     if (holdNextTurn) { holdNextTurn = false; await new Promise<void>(resolve => { releaseTurn = resolve; }); }
     response.setHeader("Content-Type", "text/event-stream");
@@ -312,6 +329,19 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await picker.press("Enter");
     await frame.locator("#status").getByText("Model: test/selected", { exact: true }).waitFor();
     assert.equal(vscode.workspace.getConfiguration("forgeAgent").get<string>("model"), "test/selected");
+    await config.update('model', 'test/broken', vscode.ConfigurationTarget.Workspace);
+    await config.update('fallbackModel', 'test/current', vscode.ConfigurationTarget.Workspace);
+    await vscode.commands.executeCommand('forgeAgent.newTask');
+    await input.fill('Fallback check');
+    await frame.getByRole('button', { name: 'Send', exact: true }).click();
+    await frame.getByRole('log').getByText(/Switching to the fallback model/).waitFor();
+    await frame.getByRole('log').getByText('Recovered with the corrected model.', { exact: true }).waitFor();
+    await frame.locator('#message-input:not([disabled])').waitFor();
+    assert.ok((await frame.getByRole('log').innerText()).includes('API key not valid'), 'The error must be shown in plain words.');
+    assert.deepEqual(patchedModels, ['test/current'], 'A non-transient error goes straight to the fallback, without retries.');
+    assert.deepEqual(retryTurnIds, ['none'], 'The retry must not include the failed turn.');
+    await frame.locator('body').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'model-fallback.png').fsPath });
+    await config.update('fallbackModel', undefined, vscode.ConfigurationTarget.Workspace);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));

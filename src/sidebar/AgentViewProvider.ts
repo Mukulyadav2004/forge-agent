@@ -1,4 +1,4 @@
-import { ForgeSession, listModelNames } from "../agent/ForgeSession";
+import { classifyModelError, ForgeSession, listModelNames } from "../agent/ForgeSession";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
@@ -20,6 +20,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private approvals: TrueForgeApi.UserToolApprovalInputEvent[] = [];
   /** Recent streamed tool calls; an approval event names only the call id, so its prompt is built from here. */
   private readonly toolCalls = new StreamedToolCalls();
+  /** The last failed turn's model error, and the user input that turn answered, so it can be retried. */
+  private turnError: string | undefined;
+  private lastInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] | undefined;
   private readonly messages: ChatMessage[] = [];
   private readonly inspectedFiles: FileEvidence[] = [];
   private readonly activity: ActivityEntry[] = [];
@@ -200,6 +203,32 @@ ${selectedText}`;
     catch { this.status = "Could not confirm cancellation. Check the local TrueForge server."; }
     this.publish();
   }
+  /** A model error ends the turn with status "error": retry a transient one twice (2 s, 4 s), then continue once on forgeAgent.fallbackModel. Files are never written here. */
+  private async recover(): Promise<void> {
+    const fallback = vscode.workspace.getConfiguration('forgeAgent').get<string>('fallbackModel', '').trim();
+    const delays = [2, 4];
+    let attempt = 0, switched = false;
+    while (this.turnError && this.session && this.lastInput && !this.cancellationRequested && !this.session.awaitingApproval) {
+      const { transient, summary } = classifyModelError(this.turnError);
+      const say = (text: string) => { this.messages.push({ id: randomUUID(), role: 'assistant', text }); this.status = text.replace(/\*\*/gu, ''); this.publish(); };
+      const seconds = transient ? delays[attempt] : undefined;
+      if (seconds !== undefined) {
+        attempt++;
+        say(`**Model error** on \`${this.session.model}\`: ${summary}\n\nRetrying in ${seconds} s (attempt ${attempt} of ${delays.length}). No files were changed.`);
+        for (let waited = 0; waited < seconds * 1000 && !this.cancellationRequested; waited += 100) await new Promise(resolve => setTimeout(resolve, 100));
+        if (this.cancellationRequested) return;
+      } else if (fallback && fallback !== this.session.model) {
+        say(`**Model error** on \`${this.session.model}\`: ${summary}\n\nSwitching to the fallback model \`${fallback}\` and repeating your request. No files were changed.`);
+        await this.session.switchModel(fallback);
+        attempt = delays.length; switched = true; // the fallback gets one attempt; a second failure ends with a clear error
+      } else {
+        say(`**The request failed** on \`${this.session.model}\`: ${summary}\n\n${transient && attempt ? 'Retries did not help. ' : ''}${switched ? 'The fallback model also failed. ' : fallback ? '' : 'Set forgeAgent.fallbackModel to a second configured model for automatic takeover. '}No files were changed; check the model and its provider in TrueForge, then send again.`);
+        return;
+      }
+      this.turnError = undefined;
+      await this.session.send(this.lastInput, { retry: true });
+    }
+  }
   private async run(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], approvals?: TrueForgeApi.UserToolApprovalInputEvent[]): Promise<void> {
     this.cancellationRequested = false;
     this.busy = true; this.status = "Connecting to TrueForge…"; this.publish();
@@ -223,8 +252,11 @@ ${selectedText}`;
         const editorManifest = connector ? await this.actions.getEditorManifest(connector) : undefined;
         this.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), onEvent: event => this.event(event) });
       }
+      this.turnError = undefined;
+      if (!approvals) this.lastInput = preparedInput;
       if (approvals) await this.session.approve(approvals);
       else await this.session.send(preparedInput);
+      await this.recover();
       if (feedback && !this.cancellationRequested) this.reviewFeedback.clear();
     } catch (error: unknown) {
       if (approvals && this.session?.awaitingApproval && !this.cancellationRequested) this.approvals = approvals;
@@ -255,7 +287,7 @@ ${selectedText}`;
         }
       }
     }
-    if (event.type === "turn.done" && event.state.status === "error") this.status = event.state.message;
+    if (event.type === "turn.done" && event.state.status === "error") { this.turnError = event.state.message; this.status = `Model error: ${classifyModelError(event.state.message).summary}`; }
     this.publish();
   }
 

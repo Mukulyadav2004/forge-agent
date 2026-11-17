@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
+import { classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
 import { buildProjectContext, isArchitectureRequest } from '../out/context/projectContext.js';
 import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
@@ -52,6 +52,54 @@ test('streamed tool call deltas are rebuilt for the approval that names them', (
   assert.equal(calls.find('msg-2', 'call_1'), undefined, 'A call id must match the message that produced it.');
   calls.clear();
   assert.equal(calls.find('msg-1', 'call_1'), undefined);
+});
+
+test('model errors are classified for retry and summarised without the provider prefix', () => {
+  // Message shape captured from TrueForge 0.185.1 when the provider quota is zero.
+  const quota = classifyModelError('[Model Error] Request failed (429): You exceeded your current quota.\n* Quota exceeded for metric: x');
+  assert.deepEqual(quota, { transient: true, summary: 'Request failed (429): You exceeded your current quota.' });
+  assert.equal(classifyModelError('[Model Error] Request failed (503): overloaded').transient, true);
+  assert.equal(classifyModelError('connect ECONNREFUSED 127.0.0.1:9').transient, true);
+  assert.equal(classifyModelError('[Model Error] Request failed (401): API key not valid').transient, false);
+  assert.equal(classifyModelError('[Model Error] Request failed (404): model not found').transient, false);
+  assert.equal(classifyModelError('').summary, 'The model request failed.');
+});
+
+test('a failed turn can switch the session model with the full spec and retry without the failed turn', async () => {
+  const requests = [];
+  let fail = true;
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    requests.push({ method: req.method, url: req.url, body: body ? JSON.parse(body) : null });
+    if (req.url === '/api/v1/sessions' || req.method === 'PATCH') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data: { id: 's1' } })); return; }
+    const done = fail ? { status: 'error', completed_at: new Date().toISOString(), message: '[Model Error] Request failed (401): API key not valid' } : { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] };
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    for (const event of [{ type: 'turn.created', id: 'c', created_at: new Date().toISOString(), thread_id: null, turn_id: `t${requests.length}`, previous_turn_id: null, state: { status: 'running' } }, { type: 'turn.done', id: 'd', created_at: new Date().toISOString(), thread_id: null, state: done }]) res.write(`data: ${JSON.stringify(event)}\n\n`);
+    res.end();
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const events = [];
+  try {
+    const session = new ForgeSession({ baseUrl: `http://127.0.0.1:${address.port}`, model: 'broken/model', connector: 'forge-editor', onEvent: event => events.push(event) });
+    await session.send([{ type: 'user.message', content: 'hello' }]);
+    assert.equal(events.at(-1).state.status, 'error');
+    await assert.rejects(session.switchModel('unqualified'), /provider\/model/);
+    await session.switchModel('backup/model');
+    assert.equal(session.model, 'backup/model');
+    const patch = requests.find(request => request.method === 'PATCH');
+    assert.equal(patch.url, '/api/v1/sessions/s1');
+    assert.equal(patch.body.agent.spec.model.name, 'backup/model');
+    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['propose_edit'], 'PATCH replaces the spec, so approvals must be resent.');
+    assert.equal(patch.body.agent.spec.config.dynamic_sub_agents.enabled, false);
+    fail = false;
+    await session.send([{ type: 'user.message', content: 'hello' }], { retry: true });
+    assert.equal(requests.at(-1).body.previous_turn_id, 'none', 'With no successful turn yet, the retry starts from an empty history.');
+    await session.send([{ type: 'user.message', content: 'again' }], { retry: true });
+    assert.match(requests.at(-1).body.previous_turn_id, /^t\d+$/u, 'Later retries branch from the last successful turn.');
+  } finally { server.close(); }
 });
 
 test('SDK session, stream, approval resume, cancellation and error handling', async () => {

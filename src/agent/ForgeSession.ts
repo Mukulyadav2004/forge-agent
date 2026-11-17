@@ -4,6 +4,14 @@ import { agentInstructions } from './instructions';
 import { SessionTrace } from '../observability/events';
 import type { SessionEvent } from '../observability/events';
 
+/** Model failures arrive as turn.done with status "error" and a message such as "[Model Error] Request failed (429): …". */
+export function classifyModelError(message: string): { transient: boolean; summary: string } {
+  const summary = message.replace(/^\[Model Error\]\s*/u, '').split('\n')[0]?.trim().slice(0, 240) || 'The model request failed.';
+  // Rate limits, timeouts, server errors and network failures can pass; bad keys, missing models and bad requests will not.
+  const transient = /\((?:408|409|425|429|5\d\d)\)/u.test(message) || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|timed? ?out|unreachable|overloaded|temporarily/iu.test(message);
+  return { transient, summary };
+}
+
 function createClient(baseUrl: string): TrueForge {
   const url = new URL(baseUrl);
   if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) throw new Error('Use the local TrueForge HTTP URL.');
@@ -31,13 +39,16 @@ export class ForgeSession {
       throw new Error('Use the full provider/model name. Click Select model or run Forge: Select Model to choose a configured model.');
     }
   }
+  private lastGoodTurnId: string | undefined;
   get id(): string | undefined { return this.sessionId; }
+  get model(): string { return this.options.model; }
   get awaitingApproval(): boolean { return this.paused; }
-  async send(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input']): Promise<void> {
+  /** retry: branch from the last successful turn so a failed attempt is not part of the history. */
+  async send(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], options: { retry?: boolean } = {}): Promise<void> {
     if (this.paused) throw new Error('Approve, deny or cancel the pending tool request before sending another message.');
     this.turnId = undefined; this.lastEventId = undefined;
     this.trace.begin();
-    try { await this.sendTurn(input); }
+    try { await this.sendTurn(input, options.retry ? this.lastGoodTurnId ?? 'none' : undefined); }
     catch (error) { this.trace.fail(); throw error; }
     finally { if (!this.paused) this.trace.finish(); }
   }
@@ -57,31 +68,42 @@ export class ForgeSession {
     }
     finally { if (!this.paused) this.trace.finish(); }
   }
-  private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input']): Promise<void> {
+  /** Continues this session on another model; PATCH replaces the whole spec, so the full spec is sent again. */
+  async switchModel(model: string): Promise<void> {
+    if (!/^[^/\s]+\/\S+$/u.test(model)) throw new Error('Use the full provider/model name for forgeAgent.fallbackModel.');
+    if (this.paused) throw new Error('Answer the pending approval before switching models.');
+    if (this.sessionId) await this.client.sessions.update(this.sessionId, { agent: { spec: this.spec(model) } });
+    this.options.model = model;
+  }
+  private spec(model: string): TrueForgeApi.AgentSpec {
+    const connector = this.options.editorManifest?.name ?? this.options.connector;
+    return {
+      model: { name: model, ...(this.options.reasoningEffort ? { params: { reasoningEffort: this.options.reasoningEffort } } : {}) },
+      instructions: agentInstructions,
+      // Enable harness capabilities as the editor gains support for their interactions.
+      config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 32 },
+      mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'search_code', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
+    };
+  }
+  private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], previousTurnId?: string): Promise<void> {
     this.cancelled = false;
     if (!this.sessionId) {
       if (this.options.editorManifest) {
         await this.client.settings.mcpServers.createOrUpdate({ manifest: this.options.editorManifest }, { timeoutInSeconds: 15 });
       }
       if (this.cancelled) { this.trace.abandoned(); return; }
-      const connector = this.options.editorManifest?.name ?? this.options.connector;
-      const response = await this.client.sessions.create({ agent: { spec: {
-        model: { name: this.options.model, ...(this.options.reasoningEffort ? { params: { reasoningEffort: this.options.reasoningEffort } } : {}) },
-        instructions: agentInstructions,
-        // Enable harness capabilities as the editor gains support for their interactions.
-        config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 32 },
-        mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'search_code', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
-      } } });
+      const response = await this.client.sessions.create({ agent: { spec: this.spec(this.options.model) } });
       this.sessionId = response.data.id;
       this.trace.created(this.sessionId);
     }
     if (this.cancelled) { this.trace.abandoned(); return; }
-    const stream = await this.client.sessions.createTurnStream(this.sessionId, { input });
+    const stream = await this.client.sessions.createTurnStream(this.sessionId, { input, ...(previousTurnId ? { previousTurnId } : {}) });
     await this.readStream(stream);
   }
   private async readStream(stream: AsyncIterable<TrueForgeApi.TurnStreamingEvent>): Promise<void> {
     for await (const event of stream) {
       if (event.type === 'turn.created') this.turnId = event.turnId;
+      if (event.type === 'turn.done' && event.state.status === 'done') this.lastGoodTurnId = this.turnId;
       this.lastEventId = event.id;
       this.paused = event.type === 'turn.update' && event.state.status === 'paused';
       this.trace.stream(event);

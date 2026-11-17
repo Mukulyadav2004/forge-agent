@@ -91,6 +91,11 @@
           "default": "",
           "description": "Fully qualified provider/model name. Use Forge: Select Model to choose from your local TrueForge server."
         },
+        "forgeAgent.fallbackModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional second provider/model name. If a turn fails on forgeAgent.model (after two retries for temporary errors), the session continues on this model automatically. Use a model from a different provider or key so it survives the same failure."
+        },
         "forgeAgent.reasoningEffort": {
           "type": "string",
           "enum": [
