@@ -33,6 +33,13 @@ export function describeApproval(call: PendingToolCall | undefined): string {
   } catch { /* unparsable arguments are shown raw below */ }
   const text = (key: string) => typeof args[key] === 'string' ? args[key] : undefined;
   const number = (key: string) => typeof args[key] === 'number' ? args[key] : undefined;
+  const command = text('command');
+  if (call.name === 'run_command' && command !== undefined) {
+    // Show the whole command; a fence longer than any backtick run inside it keeps it intact.
+    const fence = '`'.repeat(Math.max(3, ...(command.match(/`+/gu) ?? []).map(run => run.length + 1)));
+    const reason = clip((text('reason') ?? '').trim(), 300) || 'none given';
+    return `**Approve running a command?**\n\n${fence}sh\n${command}\n${fence}\n\n- Folder: \`${text('cwd') ?? '.'}\` (inside the workspace)\n- Stops after: ${number('timeout_seconds') ?? 60} s\n- Agent's reason: ${reason}\n\nIt runs with your permissions and can change files; Forge cannot undo what a command does. Deny it if you are unsure.`;
+  }
   if (call.name !== 'propose_edit' || text('path') === undefined) return `**Approve \`${call.name}\`?**\n\nArguments: \`${clip(call.arguments, 300).replace(/`/gu, "'")}\``;
   const start = number('start_line'), end = number('end_line'), insert = number('insert_line'), oldText = text('old_text');
   const added = lineCount(text('new_text') ?? '');

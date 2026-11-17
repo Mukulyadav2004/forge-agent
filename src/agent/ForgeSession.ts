@@ -84,7 +84,7 @@ export class ForgeSession {
       instructions: agentInstructions,
       // Enable harness capabilities as the editor gains support for their interactions.
       config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 64 },
-      mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'search_code', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
+      mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'search_code', 'propose_edit', 'run_command'], requireApprovalForTools: ['propose_edit', 'run_command'] }] : [],
     };
   }
   private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], previousTurnId?: string): Promise<void> {

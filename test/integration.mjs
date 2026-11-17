@@ -29,9 +29,13 @@ test('approval prompts name the file, change and reason from the tool call argum
   assert.match(describeApproval(call({ new_text: 'X\n', old_text: 'x\ny\n' })), /replace one matched passage of 2 line\(s\) with 1 line\(s\)/u);
   assert.match(describeApproval(call({ new_text: '' })), /replace the whole file \(0 line\(s\)\)/u);
   assert.match(describeApproval(call({ new_text: 'x', explanation: 'y'.repeat(400) })), /y{300}…/u);
-  assert.match(describeApproval({ name: 'run_command', arguments: '{"command":"rm `x`"}' }), /Approve `run_command`\?[\s\S]*rm 'x'/u);
+  assert.match(describeApproval({ name: 'other_tool', arguments: '{"value":"rm `x`"}' }), /Approve `other_tool`\?[\s\S]*rm 'x'/u);
   assert.match(describeApproval({ name: 'propose_edit', arguments: 'not json' }), /Approve `propose_edit`/u);
   assert.match(describeApproval(undefined), /details were not received/u);
+  const command = describeApproval({ name: 'run_command', arguments: JSON.stringify({ command: 'python -m pytest tests/test_cli.py -q', cwd: '.', timeout_seconds: 120, reason: 'Run the CLI tests' }) });
+  assert.match(command, /```sh\npython -m pytest tests\/test_cli\.py -q\n```/u, 'The exact command is shown in full.');
+  assert.match(command, /Folder: `\.`[\s\S]*Stops after: 120 s[\s\S]*Run the CLI tests[\s\S]*Forge cannot undo/u);
+  assert.match(describeApproval({ name: 'run_command', arguments: JSON.stringify({ command: 'echo ```x```' }) }), /````sh\necho ```x```\n````/u, 'Backticks in a command cannot break out of its block.');
   assert.doesNotMatch(ranged, /will refuse/u);
   const located = describeApproval(call({ new_text: 'x', old_text: 'y', start_line: 2, end_line: 2, insert_line: 3 }));
   assert.match(located, /replace one matched passage/u);
@@ -98,7 +102,7 @@ test('a failed turn can switch the session model with the full spec and retry wi
     const patch = requests.find(request => request.method === 'PATCH');
     assert.equal(patch.url, '/api/v1/sessions/s1');
     assert.equal(patch.body.agent.spec.model.name, 'backup/model');
-    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['propose_edit'], 'PATCH replaces the spec, so approvals must be resent.');
+    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['propose_edit', 'run_command'], 'PATCH replaces the spec, so approvals must be resent.');
     assert.equal(patch.body.agent.spec.config.dynamic_sub_agents.enabled, false);
     fail = false;
     await session.send([{ type: 'user.message', content: 'hello' }], { retry: true });
