@@ -58,6 +58,30 @@ async function stageBatch(service) {
   for (const path of ['a.txt', 'b.txt', 'c.txt']) await stage({ service, path, text: `new ${path}\n` });
 }
 
+test('an agent turn stages without opening diff tabs and shows one diff when it ends', async () => {
+  const { backend, service } = setup({ 'a.txt': 'one\n', 'b.txt': 'two\n' });
+  service.beginTurn();
+  const a = await stage({ service, path: 'a.txt', text: 'ONE\n' });
+  const b = await stage({ service, path: 'b.txt', text: 'TWO\n' });
+  assert.equal(backend.previews.size, 0, 'Staging during a turn must not switch editor tabs.');
+  await service.endTurn();
+  assert.deepEqual([...backend.previews.keys()], [a], 'Only the first pending proposal opens when the turn ends.');
+  await service.preview(b);
+  assert.equal(backend.previews.has(b), true, 'Preview still opens any proposal on request.');
+  await service.endTurn();
+  assert.equal(backend.previews.size, 2, 'Ending again without a turn opens nothing more.');
+  const c = await stage({ service, path: 'a.txt', text: 'uno\n' });
+  assert.equal(backend.previews.has(c), true, 'Outside a turn, staging still opens its preview at once.');
+});
+
+test('a new task ends quiet staging', async () => {
+  const { backend, service } = setup({ 'a.txt': 'one\n' });
+  service.beginTurn();
+  await service.newTask();
+  const id = await stage({ service, path: 'a.txt', text: 'ONE\n' });
+  assert.equal(backend.previews.has(id), true);
+});
+
 test('preview and rejection do not write files; previews have independent lifetimes', async () => {
   const { backend, service } = setup();
   const a = await stage({ service, path: 'a.txt', text: 'new a\n' });

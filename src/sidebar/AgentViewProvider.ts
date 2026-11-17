@@ -268,7 +268,11 @@ ${selectedText}`;
       if (!this.session?.id) this.session = undefined;
       this.status = error instanceof Error ? error.message : "TrueForge request failed.";
       this.messages.push({ id: randomUUID(), role: "assistant", text: this.status });
-    } finally { this.busy = false; this.publish(); }
+    } finally {
+      // A turn paused for approval is still running; otherwise show one diff now that staging has finished.
+      if (!this.approvals.length) await this.actions.edits.endTurn().catch(() => undefined);
+      this.busy = false; this.publish();
+    }
   }
   private event(event: TrueForgeApi.TurnStreamingEvent): void {
     this.status = `Session ${this.session?.id ?? "starting"} · ${event.type}`;

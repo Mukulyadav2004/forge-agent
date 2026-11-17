@@ -43,10 +43,10 @@ pp. 4-6; eligibility/scoring pp. 6-9; participation/dates/rules pp. 10-12.
 - Keeping an upstream project's own loop, or calling a provider
   directly, makes the entry ineligible.
 
-Our development launcher currently pins TrueForge 0.184.2 for
-reproducibility. That is the recorded test version, not verification of
-whatever release will be latest at submission; recheck the official latest
-release from a clean clone before claiming that compatibility.
+Our development launcher pins TrueForge 0.185.1 for reproducibility. npm
+reported it (and SDK 0.185.0) as latest on 17 Nov 2026, and a clean-clone
+check passed that day; recheck the official latest release before
+submission, since a newer release may appear.
 
 ## Open-source reuse
 

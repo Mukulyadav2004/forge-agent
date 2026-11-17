@@ -113,8 +113,9 @@ pnpm run test
 ```
 
 `dev` opens the Extension Development Host.
-Task A rehearsal: docs/TASK-A.md. The trueforge:local script pins 0.184.2;
-the brief specifies @latest. A latest-version clean-clone check is pending.
+Task A rehearsal: docs/TASK-A.md. The trueforge:local script pins 0.185.1,
+which npm reported as latest on 17 Nov 2026 (SDK 0.185.0); a clean-clone
+check passed that day (docs/STEP-NOTES.md). Recheck @latest before submission.
 Do not replace the esbuild bundling with plain tsc. The pinned TrueForge
 SDK's CommonJS entry fails to load directly.
 

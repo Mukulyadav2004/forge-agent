@@ -55,6 +55,8 @@ function bytesForText(options: { original: Uint8Array; text: string }): Uint8Arr
 
 export class EditService {
   private task = randomUUID();
+  /** While an agent turn runs, staging does not open diff tabs, so the editor does not switch tabs under the user; the review panel shows the diff. */
+  private agentTurn = false;
   private cancelled = false;
   private busy = false;
   private blocked = false;
@@ -87,6 +89,7 @@ export class EditService {
     try {
       this.task = randomUUID();
       this.cancelled = false;
+      this.agentTurn = false;
       this.receipts.clear();
       const ids = [...this.proposals.keys()];
       this.proposals.clear();
@@ -97,6 +100,7 @@ export class EditService {
   async cancel(): Promise<void> {
     if (this.busy) throw new Error('Wait for the edit transaction to finish before cancelling.');
     this.cancelled = true;
+    this.agentTurn = false;
     this.task = randomUUID();
     this.receipts.clear();
     const ids: string[] = [];
@@ -112,6 +116,14 @@ export class EditService {
   beginTurn(): void {
     this.assertAvailable();
     if (this.cancelled) { this.task = randomUUID(); this.cancelled = false; }
+    this.agentTurn = true;
+  }
+  /** Ends quiet staging and opens one diff, the first pending proposal, so the user sees a single tab instead of one per staged edit. */
+  async endTurn(): Promise<void> {
+    if (!this.agentTurn) return;
+    this.agentTurn = false;
+    const first = [...this.proposals.values()].find(proposal => proposal.view.status === 'pending');
+    if (first) try { await this.openPreview(first); } catch { this.changed('The review state is saved, but the preview could not open. Use Preview to open it.'); }
   }
   async read(path: string): Promise<{ revision: string; file: FileSnapshot }> {
     const task = this.task;
@@ -182,7 +194,7 @@ export class EditService {
     const proposal: Proposal = { view: { id, path: options.path, explanation, status: 'pending', hunks }, before: actual, original: actual.text, after: text, parts, task: this.task };
     this.proposals.set(id, proposal);
     try {
-      await this.options.backend.preview({ id, path: options.path, before: actual.text, after: text });
+      if (!this.agentTurn) await this.options.backend.preview({ id, path: options.path, before: actual.text, after: text });
       if (proposal.task !== this.task || this.cancelled || proposal.view.status !== 'pending') throw new Error('This proposal was discarded while its preview was opening.');
     } catch (error) {
       proposal.view.status = 'rejected';
