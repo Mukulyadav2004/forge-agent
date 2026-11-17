@@ -211,8 +211,9 @@ ${selectedText}`;
     const delays = [2, 4];
     let attempt = 0, switched = false;
     while (this.turnError && this.session && this.lastInput && !this.cancellationRequested && !this.session.awaitingApproval) {
-      const { transient, summary } = classifyModelError(this.turnError);
+      const { transient, summary, stepLimit } = classifyModelError(this.turnError);
       const say = (text: string) => { this.messages.push({ id: randomUUID(), role: 'assistant', text }); this.status = text.replace(/\*\*/gu, ''); this.publish(); };
+      if (stepLimit) { say(`**The agent used all its steps** before finishing (${summary}). Anything it staged is still in Review changes and no files were written. Send \"continue\" to let it carry on, or narrow the request.`); return; }
       const seconds = transient ? delays[attempt] : undefined;
       if (seconds !== undefined) {
         attempt++;

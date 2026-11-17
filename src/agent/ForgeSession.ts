@@ -5,11 +5,13 @@ import { SessionTrace } from '../observability/events';
 import type { SessionEvent } from '../observability/events';
 
 /** Model failures arrive as turn.done with status "error" and a message such as "[Model Error] Request failed (429): …". */
-export function classifyModelError(message: string): { transient: boolean; summary: string } {
+export function classifyModelError(message: string): { transient: boolean; summary: string; stepLimit: boolean } {
   const summary = message.replace(/^\[Model Error\]\s*/u, '').split('\n')[0]?.trim().slice(0, 240) || 'The model request failed.';
   // Rate limits, timeouts, server errors and network failures can pass; bad keys, missing models and bad requests will not.
   const transient = /\((?:408|409|425|429|5\d\d)\)/u.test(message) || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|cannot connect|timed? ?out|unreachable|overloaded|temporarily/iu.test(message);
-  return { transient, summary };
+  // TrueForge ends a turn this way when the agent used every allowed step; another model would not help.
+  const stepLimit = /iteration limit/iu.test(message);
+  return { transient: transient && !stepLimit, summary, stepLimit };
 }
 
 function createClient(baseUrl: string): TrueForge {
@@ -81,7 +83,7 @@ export class ForgeSession {
       model: { name: model, ...(this.options.reasoningEffort ? { params: { reasoningEffort: this.options.reasoningEffort } } : {}) },
       instructions: agentInstructions,
       // Enable harness capabilities as the editor gains support for their interactions.
-      config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 32 },
+      config: { generativeUi: { enabled: false }, askUserQuestions: { enabled: false }, dynamicSubAgents: { enabled: false }, sandbox: { enabled: false }, webSearch: { enabled: false }, iterationLimit: 64 },
       mcpServers: connector ? [{ name: connector, preload: true, enableTools: ['read_file', 'list_files', 'search_code', 'propose_edit'], requireApprovalForTools: ['propose_edit'] }] : [],
     };
   }

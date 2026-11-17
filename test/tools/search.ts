@@ -9,7 +9,7 @@ import { z } from 'zod';
 const ResultSchema = z.object({
   files: z.array(z.object({ path: z.string(), match_count: z.number(), matches: z.array(z.object({ line: z.number(), text: z.string(), line_truncated: z.boolean() })) })),
   folder_counts: z.record(z.string(), z.number()), omitted_folder_matches: z.number(), observed_matches: z.number(), returned_matches: z.number(), counts_complete: z.boolean(), path_filter: z.string(), next_step: z.string(),
-  truncated: z.boolean(), candidate_limit_reached: z.boolean(), skipped_files: z.number(), eligible_files: z.number(), inspected_bytes: z.number(),
+  truncated: z.boolean(), candidate_limit_reached: z.boolean(), skipped_files: z.number(), non_text_files: z.number(), eligible_files: z.number(), inspected_bytes: z.number(),
   limits: z.object({ candidate_files: z.number(), file_bytes: z.number(), total_bytes: z.number(), output_characters: z.number(), matches_per_file: z.number() }),
 });
 
@@ -112,7 +112,7 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
     }
     const invalidUtf8 = await search({ query: 'x', glob: 'search-fixtures/invalid-utf8.dat' });
     assert.equal(invalidUtf8.matches.length, 0);
-    assert.equal(invalidUtf8.skipped_files, 1);
+    assert.deepEqual([invalidUtf8.skipped_files, invalidUtf8.non_text_files, invalidUtf8.truncated], [0, 1, false], 'A file that cannot hold text does not make a text search incomplete.');
     for (const args of [{ query: '[', regex: true }, { query: 'x', glob: '../**' }, { query: 'x', max_results: 101 }]) {
       assert.equal((await options.client.callTool({ name: 'search_code', arguments: args })).isError, true);
     }

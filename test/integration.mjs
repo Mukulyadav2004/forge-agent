@@ -57,7 +57,7 @@ test('streamed tool call deltas are rebuilt for the approval that names them', (
 test('model errors are classified for retry and summarised without the provider prefix', () => {
   // Message shape captured from TrueForge 0.185.1 when the provider quota is zero.
   const quota = classifyModelError('[Model Error] Request failed (429): You exceeded your current quota.\n* Quota exceeded for metric: x');
-  assert.deepEqual(quota, { transient: true, summary: 'Request failed (429): You exceeded your current quota.' });
+  assert.deepEqual(quota, { transient: true, summary: 'Request failed (429): You exceeded your current quota.', stepLimit: false });
   assert.equal(classifyModelError('[Model Error] Request failed (503): overloaded').transient, true);
   // Captured from TrueForge 0.185.1 with a provider whose endpoint is closed, and one with an invalid key.
   assert.equal(classifyModelError('[Model Error] Cannot connect to API: connect ECONNREFUSED 127.0.0.1:59999').transient, true);
@@ -66,6 +66,9 @@ test('model errors are classified for retry and summarised without the provider 
   assert.equal(classifyModelError('[Model Error] Request failed (401): API key not valid').transient, false);
   assert.equal(classifyModelError('[Model Error] Request failed (404): model not found').transient, false);
   assert.equal(classifyModelError('').summary, 'The model request failed.');
+  // Captured from TrueForge 0.185.1: the agent used every allowed step. Not a provider failure, so no retry or fallback.
+  assert.deepEqual(classifyModelError('You have reached iteration limit of 32, please request again'), { transient: false, summary: 'You have reached iteration limit of 32, please request again', stepLimit: true });
+  assert.equal(classifyModelError('[Model Error] Request failed (429): quota').stepLimit, false);
 });
 
 test('a failed turn can switch the session model with the full spec and retry without the failed turn', async () => {

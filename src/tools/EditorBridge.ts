@@ -104,7 +104,8 @@ export class EditorBridge implements vscode.Disposable {
       signal.throwIfAborted();
       const candidates = await vscode.workspace.findFiles(new vscode.RelativePattern(root, options.glob), SEARCH_EXCLUDE, SEARCH_LIMITS.candidate_files + 1, cancellation.token);
       const paths = new Map<string, string>();
-      let bytes = 0, pathCharacters = 0, skipped = 0;
+      // Binary and non-UTF-8 files cannot hold a text match, so skipping them does not limit coverage; other skips do.
+      let bytes = 0, pathCharacters = 0, skipped = 0, nonText = 0;
       for (const uri of candidates.slice(0, SEARCH_LIMITS.candidate_files)) {
         signal.throwIfAborted();
         const path = vscode.workspace.asRelativePath(uri, false);
@@ -125,8 +126,9 @@ export class EditorBridge implements vscode.Disposable {
             }
             bytes += bytesRead;
             const source = buffer.subarray(0, bytesRead);
-            if (bytesRead > target.size || source.includes(0)) { skipped++; continue; }
-            new TextDecoder('utf-8', { fatal: true }).decode(source);
+            if (bytesRead > target.size) { skipped++; continue; }
+            if (source.includes(0)) { nonText++; continue; }
+            try { new TextDecoder('utf-8', { fatal: true }).decode(source); } catch { nonText++; continue; }
           } finally { await handle.close(); }
           paths.set(target.realPath, path);
           pathCharacters += target.realPath.length;
@@ -136,9 +138,9 @@ export class EditorBridge implements vscode.Disposable {
       const found = await searchWithRipgrep({ ...options, paths, signal, output_characters: outputCharacters });
       const coverageLimited = skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files;
       const truncated = found.truncated || coverageLimited;
-      const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, next_step: `${found.returned_matches} of ${found.observed_matches} observed matching lines shown.${truncated ? ' Results or coverage are incomplete: narrow the query or glob path filter using folder_counts, then search again.' : ''} Open relevant ranges with read_file before answering each requested part.`, candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, eligible_files: paths.size, inspected_bytes: bytes, coverage: 'Saved UTF-8 text only. Counts refer to observed matching lines, not occurrences or all workspace files. Dirty, secret, unavailable, binary and oversized files are excluded. Omitted folder counts are aggregated separately. Use read_file for current editor text and an edit revision.', limits: SEARCH_LIMITS };
+      const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, next_step: `${found.returned_matches} of ${found.observed_matches} observed matching lines shown.${truncated ? ' Results or coverage are incomplete: narrow the query or glob path filter using folder_counts, then search again.' : ''} Open relevant ranges with read_file before answering each requested part.`, candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, non_text_files: nonText, eligible_files: paths.size, inspected_bytes: bytes, coverage: 'Saved UTF-8 text only. Counts refer to observed matching lines, not occurrences or all workspace files. Dirty, secret, unavailable, binary and oversized files are excluded. Omitted folder counts are aggregated separately. Use read_file for current editor text and an edit revision.', limits: SEARCH_LIMITS };
       this.budgetUsed += JSON.stringify(result).length;
-      this.activityEvents.fire({ kind: 'search', used: this.budgetUsed, query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files, ...(options.reason ? { reason: options.reason } : {}) });
+      this.activityEvents.fire({ kind: 'search', used: this.budgetUsed, query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || coverageLimited, ...(options.reason ? { reason: options.reason } : {}) });
       const budgeted = { ...result, context_budget: this.budget };
       return { content: [{ type: 'text', text: JSON.stringify(budgeted) }], structuredContent: budgeted };
     } finally { signal.removeEventListener('abort', abort); cancellation.dispose(); }
