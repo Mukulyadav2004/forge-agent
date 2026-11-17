@@ -67,6 +67,7 @@ test('the agent definition file is what TrueForge receives', () => {
   assert.deepEqual(spec.model, { name: 'test/model', params: { reasoningEffort: 'low' } });
   assert.ok(spec.instructions.startsWith('You are Forge Agent'));
   assert.deepEqual(definition.editorServer.requireApprovalForTools, ['propose_edit', 'run_command'], 'Every tool that writes or runs needs approval.');
+  assert.deepEqual(definition.config.contextManagement.compaction, { enabled: true, trigger: { type: 'input_tokens', value: 32000 } }, 'TrueForge\'s default threshold (80% of a 1M-token window) would never fire; ours is explicit.');
   assert.deepEqual(agentSpec({ model: 'test/model' }).mcpServers, []);
 });
 

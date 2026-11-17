@@ -20,7 +20,8 @@ export function agentSpec(options: { model: string; connector?: string; reasonin
   return {
     model: { name: options.model, ...(options.reasoningEffort ? { params: { reasoningEffort: options.reasoningEffort } } : {}) },
     instructions: agentInstructions,
-    config: definition.config,
+    // JSON imports widen literals such as "input_tokens" to string; TrueForge validates the spec when the session is created.
+    config: definition.config as TrueForgeApi.RuntimeConfig,
     mcpServers: options.connector ? [{ name: options.connector, ...definition.editorServer }] : [],
   };
 }
