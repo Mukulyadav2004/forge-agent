@@ -21,6 +21,15 @@ export class StreamedToolCalls {
 }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
+/** A bounded diff block of the proposed text, so the user sees the edit before approving it. */
+function previewBlock(options: { removed?: string; added: string; label: string }): string {
+  const lines = (text: string, sign: string) => text === '' ? [] : text.replace(/\n$/u, '').split('\n').map(line => `${sign} ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`);
+  const all = [...(options.removed === undefined ? [] : lines(options.removed, '-')), ...lines(options.added, '+')];
+  const shown = all.slice(0, 40);
+  const body = [...shown, ...(all.length > shown.length ? [`… ${all.length - shown.length} more line(s) not shown`] : [])].join('\n');
+  const fence = '`'.repeat(Math.max(3, ...(body.match(/`+/gu) ?? []).map(run => run.length + 1)));
+  return `\n\n${options.label}\n\n${fence}diff\n${body || '(no lines)'}\n${fence}`;
+}
 const lineCount = (text: string) => text === '' ? 0 : text.replace(/\n$/u, '').split('\n').length;
 
 /** Markdown shown in the chat when TrueForge pauses for approval. Built only from the call's own arguments. */
@@ -53,5 +62,10 @@ export function describeApproval(call: PendingToolCall | undefined): string {
     : (start === undefined) !== (end === undefined) ? 'it gives only one of start_line and end_line'
     : start !== undefined && insert !== undefined ? 'it asks both to replace lines and to insert' : undefined;
   const note = invalid ? `\n\n**The editor will refuse this call:** ${invalid}. Nothing will be staged either way; approving returns the exact error so the agent can correct the call, while denying only says it was declined.` : '';
-  return `**Approve staging an edit?**\n\n- File: \`${text('path')}\`\n- Change: ${change}\n- Agent's reason: ${reason}${note}\n\nApproving only stages a diff for review. Nothing is written until you accept it.`;
+  const newText = text('new_text') ?? '';
+  const preview = oldText !== undefined ? previewBlock({ removed: oldText, added: newText, label: 'Proposed change:' })
+    : insert !== undefined ? previewBlock({ added: newText, label: `Lines inserted at line ${insert}:` })
+    : start !== undefined ? previewBlock({ added: newText, label: `Lines ${start}–${end ?? start} become:` })
+    : previewBlock({ added: newText, label: 'New file content:' });
+  return `**Approve staging an edit?**\n\n- File: \`${text('path')}\`\n- Change: ${change}\n- Agent's reason: ${reason}${note}${preview}\n\nApproving only stages a diff for review. Nothing is written until you accept it.`;
 }

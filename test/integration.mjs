@@ -38,6 +38,13 @@ test('approval prompts name the file, change and reason from the tool call argum
   assert.match(command, /Folder: `\.`[\s\S]*Stops after: 120 s[\s\S]*Run the CLI tests[\s\S]*Forge cannot undo/u);
   assert.match(describeApproval({ name: 'run_command', arguments: JSON.stringify({ command: 'echo ```x```' }) }), /````sh\necho ```x```\n````/u, 'Backticks in a command cannot break out of its block.');
   assert.doesNotMatch(ranged, /will refuse/u);
+  const shown = describeApproval(call({ old_text: '    return bool(val)\n', new_text: '    # off and n are false\n    return bool(val and val.lower() not in FALSE)\n' }));
+  assert.match(shown, /Proposed change:\n\n```diff\n-     return bool\(val\)\n\+     # off and n are false\n\+     return bool\(val and/u, 'The approval shows the exact lines removed and added.');
+  assert.match(describeApproval(call({ new_text: 'a\nb\n', start_line: 28, end_line: 33 })), /Lines 28–33 become:\n\n```diff\n\+ a\n\+ b\n```/u);
+  const long = describeApproval(call({ new_text: Array.from({ length: 60 }, (_, index) => `line ${index}`).join('\n') }));
+  assert.match(long, /\+ line 39\n… 20 more line\(s\) not shown/u);
+  assert.doesNotMatch(long, /line 40\b/u, 'The preview is bounded to 40 lines.');
+  assert.match(describeApproval(call({ old_text: 'x', new_text: 'use ```code```' })), /````diff[\s\S]*use ```code```[\s\S]*````/u, 'Backticks in code cannot break out of the block.');
   const located = describeApproval(call({ new_text: 'x', old_text: 'y', start_line: 2, end_line: 2, insert_line: 3 }));
   assert.match(located, /replace one matched passage/u);
   assert.doesNotMatch(located, /will refuse/u, 'old_text alone locates the change; line numbers sent with it are ignored.');
