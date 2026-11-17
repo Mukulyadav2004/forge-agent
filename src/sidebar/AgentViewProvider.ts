@@ -273,6 +273,11 @@ ${selectedText}`;
   private event(event: TrueForgeApi.TurnStreamingEvent): void {
     this.status = `Session ${this.session?.id ?? "starting"} · ${event.type}`;
     if (event.type === "model.message.delta" && event.toolCalls) this.toolCalls.add(event.id, event.toolCalls);
+    // Compaction comes from TrueForge, not from our tools: show it in the feed with sizes before and after.
+    const compaction = [...this.activity].reverse().find(entry => entry.kind === 'compaction');
+    if (event.type === 'thread.context_compaction_started') this.recordActivity({ kind: 'compaction', contextTokens: Math.round(event.trigger.contextTokens), thresholdTokens: event.trigger.thresholdTokens, done: false });
+    if (event.type === 'thread.context_compaction_finished' && compaction?.kind === 'compaction' && !compaction.done) { compaction.done = true; compaction.durationMs = Math.round(event.durationMs); }
+    if (event.type === 'model.message.delta' && event.usage && compaction?.kind === 'compaction' && compaction.done && compaction.afterTokens === undefined) compaction.afterTokens = event.usage.inputTokens;
     if (event.type === "model.message" && event.threadId === "main" && typeof event.content === "string" && event.content) {
       const existing = this.messages.find(message => message.id === event.id && message.role === "assistant");
       if (existing) existing.text = event.content;

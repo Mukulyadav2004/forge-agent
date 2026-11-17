@@ -23,7 +23,9 @@ export type ActivityEntry =
   | { kind: 'propose'; path: string; detail: string; reason?: string }
   | { kind: 'list'; glob: string; count: number; used?: number }
   | { kind: 'command'; command: string; cwd: string; exitCode: number | null; timedOut: boolean; cancelled: boolean; durationMs: number; reason?: string; used?: number }
-  | { kind: 'context'; path: string; startLine: number; endLine: number; used?: number };
+  | { kind: 'context'; path: string; startLine: number; endLine: number; used?: number }
+  /** TrueForge summarised the conversation: size that triggered it, the threshold, and the size of the next model call afterwards. */
+  | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number };
 
 function isActivityEntry(value: unknown): value is ActivityEntry {
   if (!isRecord(value) || (value.reason !== undefined && typeof value.reason !== 'string')) return false;
@@ -38,6 +40,7 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     case 'list': return text('glob') && count('count');
     case 'command': return text('command') && text('cwd') && (value.exitCode === null || count('exitCode')) && typeof value.timedOut === 'boolean' && typeof value.cancelled === 'boolean' && count('durationMs');
     case 'context': return text('path') && count('startLine') && count('endLine');
+    case 'compaction': return count('contextTokens') && count('thresholdTokens') && typeof value.done === 'boolean' && (value.durationMs === undefined || count('durationMs')) && (value.afterTokens === undefined || count('afterTokens'));
     default: return false;
   }
 }

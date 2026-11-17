@@ -175,6 +175,11 @@ function renderActivity(entries: ActivityEntry[]): void {
         main = [code, `${entry.cwd === '.' ? '' : ` in ${entry.cwd}`}: ${ended} after ${(entry.durationMs / 1000).toFixed(1)} s`];
         break;
       }
+      case 'compaction':
+        kind.textContent = entry.done ? 'Compacted' : 'Compacting';
+        main = [`context ${size(entry.contextTokens)} tokens reached the ${size(entry.thresholdTokens)}-token threshold${entry.afterTokens !== undefined ? `; TrueForge summarised it to ${size(entry.afterTokens)} tokens` : entry.done ? '; TrueForge summarised it' : '…'}${entry.durationMs !== undefined ? ` in ${(entry.durationMs / 1000).toFixed(1)} s` : ''}`];
+        notes.push('Earlier messages and file contents were replaced by a summary; the agent re-reads what it still needs.');
+        break;
       case 'context':
         kind.textContent = 'Given';
         main = [link(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];

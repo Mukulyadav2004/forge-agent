@@ -278,6 +278,20 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
       receivedArchitectureContext ||= turnPayload.input.some((message: unknown) => typeof message === 'object' && message !== null && 'content' in message && typeof message.content === 'string' && message.content.includes('Workspace source excerpts supplied by the editor'));
     }
     if (typeof turnPayload === 'object' && turnPayload !== null && 'previous_turn_id' in turnPayload) retryTurnIds.push(turnPayload.previous_turn_id);
+    if (JSON.stringify(turnPayload).includes('Compaction check')) {
+      // Event shapes as TrueForge 0.185.1 emits them when the context passes the configured input_tokens threshold.
+      const now = new Date().toISOString();
+      const trigger = { type: 'context_threshold_exceeded', context_tokens: 41234, threshold_tokens: 32000 };
+      const events = [
+        { type: 'thread.context_compaction_started', id: `cs-${++turnNumber}`, created_at: now, thread_id: 'main', trigger },
+        { type: 'thread.context_compaction_finished', id: `cf-${turnNumber}`, created_at: now, thread_id: 'main', trigger, duration_ms: 2100, usage: { input_tokens: 40000, output_tokens: 900, total_tokens: 40900 } },
+        { type: 'model.message.delta', id: `cm-${turnNumber}`, thread_id: 'main', content: 'Continued after compaction.', usage: { input_tokens: 5120, output_tokens: 6, input_tokens_breakdown: { harness: 200, skills: 0, instructions: 1800, tool_definitions: 1100, messages: 2020 } } },
+        { type: 'turn.done', id: `cd-${turnNumber}`, created_at: now, thread_id: null, state: { status: 'done', completed_at: now, output: null, required_actions: [] } },
+      ];
+      response.setHeader("Content-Type", "text/event-stream");
+      response.end(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''));
+      return;
+    }
     if (sessionModel === 'test/broken') {
       response.setHeader("Content-Type", "text/event-stream");
       response.end(`data: ${JSON.stringify({ type: 'turn.done', id: `failed-${++turnNumber}`, created_at: new Date().toISOString(), thread_id: null, state: { status: 'error', completed_at: new Date().toISOString(), message: '[Model Error] Request failed (401): API key not valid. Please pass a valid API key.' } })}\n\n`);
@@ -360,6 +374,13 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     assert.deepEqual(patchedModels, ['test/current'], 'A non-transient error goes straight to the fallback, without retries.');
     assert.deepEqual(retryTurnIds, ['none'], 'The retry must not include the failed turn.');
     await frame.locator('body').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'model-fallback.png').fsPath });
+    await input.fill('Compaction check');
+    await frame.getByRole('button', { name: 'Send', exact: true }).click();
+    await frame.getByText('Continued after compaction.', { exact: true }).waitFor();
+    const compacted = frame.locator('#activity-list .activity-compaction');
+    await compacted.filter({ hasText: 'summarised it to' }).waitFor();
+    assert.match(await compacted.innerText(), /Compacted context 41k tokens reached the 32k-token threshold; TrueForge summarised it to 5.1k tokens in 2\.1 s[\s\S]*re-reads what it still needs/u);
+    await frame.locator('#activity-feed').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'compaction-feed.png').fsPath });
     await config.update('fallbackModel', undefined, vscode.ConfigurationTarget.Workspace);
   } finally {
     server.closeAllConnections();
