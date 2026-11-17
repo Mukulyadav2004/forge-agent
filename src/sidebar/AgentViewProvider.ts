@@ -36,6 +36,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       getEditorManifest: (namePrefix: string) => Promise<TrueForgeApi.RemoteMcpServerManifest>;
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
+      /** Starts a fresh context budget for a new user request. */
+      beginRequest: () => void;
       edits: EditService;
     },
   ) {}
@@ -234,6 +236,7 @@ ${selectedText}`;
     this.busy = true; this.status = "Connecting to TrueForge…"; this.publish();
     try {
       this.actions.edits.beginTurn();
+      if (!approvals) this.actions.beginRequest();
       const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
       const feedback = input?.length && input.every(event => event.type === 'user.message') ? this.reviewFeedback.message() : undefined;
       if (feedback) preparedInput.push({ type: 'user.message', content: feedback });

@@ -17,6 +17,8 @@ import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
 import type { ToolLog, ToolName } from '../observability/events';
 
+/** Characters of workspace text one user request may bring into the model's context: reads, searches, listings and supplied context. */
+export const CONTEXT_BUDGET = 200_000;
 const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 8388608, output_characters: 20000, line_characters: 1000, matches_per_file: 3, timeout_ms: 5000 };
 const SEARCH_EXCLUDE = '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage}/**';
 const SearchInputSchema = z.object({ query: z.string().min(1).max(500), glob: z.string().min(1).max(200).default('**/*').describe('Workspace-relative path filter. Narrow to a folder or extension when results are incomplete.'), regex: z.boolean().default(false), case_sensitive: z.boolean().default(false), max_results: z.number().int().min(1).max(100).default(40), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') });
@@ -31,6 +33,13 @@ export class EditorBridge implements vscode.Disposable {
   private readonly activityEvents = new vscode.EventEmitter<ActivityEntry>();
   /** Completed editor tool calls for the sidebar feed: searches stay separate from files actually opened. */
   readonly onDidActivity = this.activityEvents.event;
+  private budgetUsed = 0;
+  get budget(): { used: number; limit: number } { return { used: this.budgetUsed, limit: CONTEXT_BUDGET }; }
+  /** Called once per user request (not for approvals or retries of it). */
+  beginRequest(): void { this.budgetUsed = 0; }
+  private remaining(): number { return Math.max(0, CONTEXT_BUDGET - this.budgetUsed); }
+  private budgetNote(): string { return `Context budget: ${this.budgetUsed.toLocaleString('en-US')} of ${CONTEXT_BUDGET.toLocaleString('en-US')} characters used for this request.`; }
+  private budgetError(): Error { return new Error(`${this.budgetNote()} Too little remains for this call. Answer from the evidence you already have and label anything unverified, or ask the user to continue in a new message.`); }
   private readonly server = createServer((request, response) => {
     if (request.url !== '/mcp') { response.writeHead(404).end(); return; }
     // Streamable HTTP: a server without a GET event stream or session DELETE answers 405 with the allowed method.
@@ -77,6 +86,7 @@ export class EditorBridge implements vscode.Disposable {
   async architectureContext(): Promise<string> {
     const paths = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,.venv,venv,__pycache__}/**', 500);
     const context = await buildProjectContext({ paths: paths.map(uri => vscode.workspace.asRelativePath(uri)), readFile: async path => (await this.options.files.open(path)).getText() });
+    this.budgetUsed += context.text.length;
     for (const file of context.files) this.activityEvents.fire({ kind: 'context', path: file.path, startLine: file.startLine, endLine: file.endLine });
     return context.text;
   }
@@ -84,6 +94,8 @@ export class EditorBridge implements vscode.Disposable {
     const root = vscode.workspace.workspaceFolders?.[0];
     if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');
     if (options.glob.includes('..') || options.glob.startsWith('/') || options.glob.includes('\\')) throw new Error('Use a workspace-relative glob.');
+    const outputCharacters = Math.min(SEARCH_LIMITS.output_characters, this.remaining());
+    if (outputCharacters < 6000) throw this.budgetError();
     const signal = AbortSignal.any([options.signal, AbortSignal.timeout(SEARCH_LIMITS.timeout_ms)]);
     const cancellation = new vscode.CancellationTokenSource();
     const abort = () => cancellation.cancel();
@@ -121,12 +133,14 @@ export class EditorBridge implements vscode.Disposable {
         } catch { skipped++; }
       }
       signal.throwIfAborted();
-      const found = await searchWithRipgrep({ ...options, paths, signal });
+      const found = await searchWithRipgrep({ ...options, paths, signal, output_characters: outputCharacters });
       this.activityEvents.fire({ kind: 'search', query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files, ...(options.reason ? { reason: options.reason } : {}) });
       const coverageLimited = skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files;
       const truncated = found.truncated || coverageLimited;
       const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, next_step: `${found.returned_matches} of ${found.observed_matches} observed matching lines shown.${truncated ? ' Results or coverage are incomplete: narrow the query or glob path filter using folder_counts, then search again.' : ''} Open relevant ranges with read_file before answering each requested part.`, candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, eligible_files: paths.size, inspected_bytes: bytes, coverage: 'Saved UTF-8 text only. Counts refer to observed matching lines, not occurrences or all workspace files. Dirty, secret, unavailable, binary and oversized files are excluded. Omitted folder counts are aggregated separately. Use read_file for current editor text and an edit revision.', limits: SEARCH_LIMITS };
-      return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
+      this.budgetUsed += JSON.stringify(result).length;
+      const budgeted = { ...result, context_budget: this.budget };
+      return { content: [{ type: 'text', text: JSON.stringify(budgeted) }], structuredContent: budgeted };
     } finally { signal.removeEventListener('abort', abort); cancellation.dispose(); }
   }
   private makeServer(): McpServer {
@@ -141,11 +155,13 @@ export class EditorBridge implements vscode.Disposable {
       const lines = file.text.split('\n');
       if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
       const end = Math.min(end_line ?? start_line + 199, start_line + 499, lines.length);
+      const allowance = Math.min(30000, this.remaining());
+      if (allowance < 1000) throw this.budgetError();
       const output: string[] = [];
       let length = 0;
       for (let index = start_line - 1; index < end; index++) {
         const numbered = `${index + 1}: ${lines[index]}`;
-        if (length + numbered.length + 1 > 30000) break;
+        if (length + numbered.length + 1 > allowance) break;
         output.push(numbered);
         length += numbered.length + 1;
       }
@@ -153,15 +169,19 @@ export class EditorBridge implements vscode.Disposable {
       const actualEnd = start_line + output.length - 1;
       this.activityEvents.fire({ kind: 'open', path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       const text = output.join('\n');
+      this.budgetUsed += text.length;
       // TrueForge prefers structured MCP results, so the source must be present there too.
-      return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length } };
+      return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${this.budgetNote()}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length, context_budget: this.budget } };
     });
     register('list_files', { description: 'List up to 100 workspace file paths matching a glob, to get oriented when you do not yet know where relevant code lives. Narrow the glob to a folder or extension when the list is incomplete. A listing shows names only; read files before making claims about them.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');
       const found = await vscode.workspace.findFiles(glob, '**/{node_modules,.git,.env*,out,dist}/**', 101);
       const files = found.slice(0, 100);
+      const listed = files.map(uri => vscode.workspace.asRelativePath(uri)).join('\n');
+      if (listed.length > this.remaining()) throw this.budgetError();
+      this.budgetUsed += listed.length;
       this.activityEvents.fire({ kind: 'list', glob, count: files.length });
-      return { content: [{ type: 'text', text: files.map(uri => vscode.workspace.asRelativePath(uri)).join('\n') + (found.length > 100 ? '\nMore files match; narrow the glob to see them.' : '') }] };
+      return { content: [{ type: 'text', text: `${listed}${found.length > 100 ? '\nMore files match; narrow the glob to see them.' : ''}\n${this.budgetNote()}` }] };
     });
     register('propose_edit', { description: 'Stage an edit for the user to review; nothing is written until they accept it. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the exact current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line }) => {
       // old_text must match exactly once, so it locates the change unambiguously; line numbers sent with it are only hints and are ignored.
@@ -185,7 +205,7 @@ export class EditorBridge implements vscode.Disposable {
 // Adapted from cline/cline sdk/packages/core/src/extensions/tools/executors/search.ts
 // at 7a7878cb52fc33967d8b464b3e3d899beac42d4d; Copyright 2026 Cline Bot Inc., Apache-2.0.
 // Replaces Cline contracts/fallback with guarded paths, typed events and explicit limits/errors.
-function searchWithRipgrep(options: SearchInput & { paths: Map<string, string>; signal: AbortSignal }): Promise<{ files: SearchFile[]; folder_counts: Record<string, number>; omitted_folder_matches: number; observed_matches: number; returned_matches: number; counts_complete: boolean; truncated: boolean }> {
+function searchWithRipgrep(options: SearchInput & { paths: Map<string, string>; signal: AbortSignal; output_characters: number }): Promise<{ files: SearchFile[]; folder_counts: Record<string, number>; omitted_folder_matches: number; observed_matches: number; returned_matches: number; counts_complete: boolean; truncated: boolean }> {
   options.signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const byFile = new Map<string, SearchFile>();
@@ -207,7 +227,7 @@ function searchWithRipgrep(options: SearchInput & { paths: Map<string, string>; 
         const hit = file.matches[index];
         if (!hit || shown >= options.max_results) continue;
         const cost = JSON.stringify(hit).length + (selected.has(file.path) ? 1 : JSON.stringify({ path: file.path, match_count: file.match_count, matches: [] }).length + 1);
-        if (size + cost > SEARCH_LIMITS.output_characters - 4000) continue;
+        if (size + cost > options.output_characters - 4000) continue;
         const group = selected.get(file.path) ?? { path: file.path, match_count: file.match_count, matches: [] };
         group.matches.push(hit); selected.set(file.path, group); size += cost; shown++;
       }
