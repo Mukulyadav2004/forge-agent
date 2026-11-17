@@ -120,7 +120,7 @@ ${selectedText}`;
   }
   refreshReview(): void { this.publish(); }
   async review(command: ReviewCommand): Promise<void> {
-    if (this.busy || this.approvals.length) { this.status = 'Finish or cancel the agent turn before reviewing changes.'; this.publish(); return; }
+    if ((this.busy || this.approvals.length) && command.action !== 'preview') { this.status = 'Finish or cancel the agent turn before applying, rejecting or undoing changes.'; this.publish(); return; }
     const before = this.actions.edits.state;
     let succeeded = false;
     try {

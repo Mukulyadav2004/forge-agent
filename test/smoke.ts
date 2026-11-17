@@ -160,6 +160,9 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   await checkEditorTransactions({ client, frame: restoredFrame, extensionUri: extension.extensionUri });
   await checkReviewFeedback({ client, frame: restoredFrame, extensionUri: extension.extensionUri });
   await checkToolLog({ client, extensionUri: extension.extensionUri, authorization: connection.headers.Authorization });
+  const pendingRead = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
+  const pendingRevision = (pendingRead.structuredContent as { base_revision: string }).base_revision;
+  assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision: pendingRevision, new_text: 'held turn check\n', explanation: 'Pending during a held turn' } })).isError, undefined);
   await client.close();
   const denied = await fetch(connection.url, { method: "POST" });
   assert.equal(denied.status, 403);
@@ -170,6 +173,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   await vscode.env.clipboard.writeText(previousClipboard);
   await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(extension.extensionUri, "out-test", "mcp-result.json"), new TextEncoder().encode(JSON.stringify({ authenticated_tools: true, bounded_read: true, traversal_denied: true, proposal_no_write: true, unauthorized_denied: true })));
   await checkModelRecovery(browser);
+  await vscode.commands.executeCommand('forgeAgent.rejectAll');
   console.log("MCP checks passed: authentication, tools, reads, traversal denial, proposal leaves disk unchanged.");
   console.log(`Smoke check passed: ${extension.id} exchanges sidebar messages and preserves drafts.`);
   await browser.close();
@@ -203,6 +207,8 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
   const connectorNames: string[] = [];
   let receivedArchitectureContext = false;
   let turnNumber = 0;
+  let holdNextTurn = false;
+  let releaseTurn: (() => void) | undefined;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -241,6 +247,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     if (typeof turnPayload === 'object' && turnPayload !== null && 'input' in turnPayload && Array.isArray(turnPayload.input)) {
       receivedArchitectureContext ||= turnPayload.input.some((message: unknown) => typeof message === 'object' && message !== null && 'content' in message && typeof message.content === 'string' && message.content.includes('Workspace source excerpts supplied by the editor'));
     }
+    if (holdNextTurn) { holdNextTurn = false; await new Promise<void>(resolve => { releaseTurn = resolve; }); }
     response.setHeader("Content-Type", "text/event-stream");
     const content = 'Recovered with the corrected model.\n\n## Architecture\n\n```mermaid\nflowchart LR\nA["Read files"] --> B["Review changes"]\n```\n\n| Component | Source |\n| --- | --- |\n| Reader | [example.txt:1](example.txt#L1) |\n\n<img src=x onerror="window.forgeInjected=true">';
     response.end(`data: ${JSON.stringify({ type: "model.message.delta", id: `text-${++turnNumber}`, thread_id: "main", content })}\n\ndata: ${JSON.stringify({ type: "turn.done", id: `done-${turnNumber}`, created_at: new Date().toISOString(), thread_id: null, state: { status: "done", completed_at: new Date().toISOString(), output: null, required_actions: [] } })}\n\n`);
@@ -260,7 +267,17 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await frame.locator("#message-input:not([disabled])").waitFor();
     await config.update("model", "test/current", vscode.ConfigurationTarget.Workspace);
     await input.fill("Retry with corrected settings");
+    holdNextTurn = true;
     await frame.getByRole("button", { name: "Send", exact: true }).click();
+    const review = frame.getByRole('region', { name: 'Proposed changes', exact: true });
+    await review.locator('.review-lock').filter({ hasText: 'paused while the agent works' }).waitFor();
+    assert.equal(await review.getByRole('button', { name: 'Undo last apply', exact: true }).isDisabled(), true);
+    const preview = review.locator('.proposal-row').filter({ hasText: 'Pending during a held turn' }).getByRole('button', { name: 'Preview', exact: true });
+    assert.equal(await preview.isEnabled(), true, 'Preview must stay usable while the agent works.');
+    await preview.click();
+    await frame.locator('#status').filter({ hasNotText: 'Finish or cancel' }).waitFor();
+    await frame.locator('body').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'review-locked.png').fsPath });
+    releaseTurn?.();
     await frame.getByText("Recovered with the corrected model.", { exact: true }).waitFor();
     await frame.locator("#message-input:not([disabled])").waitFor();
     await frame.locator('.architecture-diagram svg').waitFor();

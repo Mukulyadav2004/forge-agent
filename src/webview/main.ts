@@ -231,9 +231,10 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   renderMessages({ messages: event.data.messages, complete: !event.data.busy });
   const reviewPanel = document.getElementById('review-panel');
   const reviewDisabled = event.data.busy || event.data.approval;
-  const reviewKey = JSON.stringify({ state: event.data.review, disabled: reviewDisabled });
+  const lockNote = event.data.approval ? 'Paused until you approve or deny the request above.' : event.data.busy ? 'Paused while the agent works, so files stay put. Preview still works.' : undefined;
+  const reviewKey = JSON.stringify({ state: event.data.review, disabled: reviewDisabled, lockNote });
   if (reviewPanel instanceof HTMLElement && reviewKey !== renderedReview) {
-    renderReviewPanel({ container: reviewPanel, state: event.data.review, disabled: reviewDisabled, onCommand: command => vscode.postMessage({ type: 'review', command }) });
+    renderReviewPanel({ container: reviewPanel, state: event.data.review, disabled: reviewDisabled, lockNote, onCommand: command => vscode.postMessage({ type: 'review', command }) });
     renderedReview = reviewKey;
   }
   const evidence = document.getElementById('file-evidence');

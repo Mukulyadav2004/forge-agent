@@ -1,11 +1,12 @@
 import type { ReviewCommand, ReviewState } from '../edits/review.js';
 import { renderClineDiffLines } from './ClineDiffLines.js';
 
-export function renderReviewPanel(options: { container: HTMLElement; state: ReviewState; disabled: boolean; onCommand: (command: ReviewCommand) => void }): void {
+export function renderReviewPanel(options: { container: HTMLElement; state: ReviewState; disabled: boolean; lockNote?: string; onCommand: (command: ReviewCommand) => void }): void {
   const { container, state } = options;
   const previousScroll = container.querySelector<HTMLElement>('.proposal-list')?.scrollTop ?? 0;
   container.hidden = state.proposals.length === 0 && !state.canUndo && !state.recoveryPath;
   const locked = options.disabled || state.busy || !!state.recoveryPath;
+  const previewLocked = state.busy || !!state.recoveryPath; // Preview only opens a diff editor, so it stays usable while the agent works.
   const active = state.proposals.filter(proposal => proposal.status === 'pending' || proposal.status === 'conflict');
   const title = document.createElement('h2');
   title.textContent = 'Review changes';
@@ -13,6 +14,7 @@ export function renderReviewPanel(options: { container: HTMLElement; state: Revi
   message.className = state.recoveryPath ? 'review-error' : 'hint';
   message.setAttribute('role', 'status');
   message.textContent = state.message;
+  if (options.lockNote) { const lock = document.createElement('strong'); lock.className = 'review-lock'; lock.textContent = options.lockNote; message.prepend(lock, document.createElement('br')); } // first, so the status line's height cap never hides it
   const toolbar = document.createElement('div');
   toolbar.className = 'review-actions';
   function button(options: { text: string; command: ReviewCommand; disabled: boolean }): HTMLButtonElement {
@@ -42,7 +44,7 @@ export function renderReviewPanel(options: { container: HTMLElement; state: Revi
     }
     const explanation = document.createElement('p'); explanation.textContent = proposal.explanation;
     const actions = document.createElement('div'); actions.className = 'review-actions';
-    actions.append(button({ text: 'Preview', command: { action: 'preview', id: proposal.id }, disabled: locked }));
+    actions.append(button({ text: 'Preview', command: { action: 'preview', id: proposal.id }, disabled: previewLocked }));
     if (proposal.status === 'pending' || proposal.status === 'conflict') {
       actions.append(
         button({ text: 'Apply file', command: { action: 'apply', id: proposal.id }, disabled: locked || proposal.status === 'conflict' }),
