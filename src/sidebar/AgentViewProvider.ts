@@ -291,6 +291,7 @@ ${selectedText}`;
   <main id="task-content" aria-label="Task workspace">
   <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>
   <details id="file-evidence" hidden><summary>Files inspected</summary><ul id="file-evidence-list"></ul></details>
+  <details id="activity-feed" open hidden><summary>Activity <span id="activity-count"></span></summary><ol id="activity-list" aria-live="polite"></ol></details>
   <div id="messages" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
     <p class="empty-state">Your messages will appear here.</p>
   </div>

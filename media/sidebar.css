@@ -110,6 +110,12 @@ summary { cursor: pointer; color: var(--vscode-descriptionForeground); }
 #file-evidence { flex: 0 0 auto; max-height: 3rem; overflow: auto; }
 #file-evidence-list { margin: 0.375rem 0; padding-left: 1rem; }
 .source-reference { background: transparent; color: var(--vscode-textLink-foreground); padding: 0.125rem; text-align: left; overflow-wrap: anywhere; font-size: 0.75rem; }
+#activity-feed { flex: 0 0 auto; }
+#activity-list { max-height: 7.5rem; overflow: auto; overscroll-behavior: contain; margin: 0.25rem 0; padding: 0; list-style: none; font-size: 0.75rem; }
+.activity-row { padding: 0.125rem 0; overflow-wrap: anywhere; }
+.activity-kind { margin-right: 0.375rem; color: var(--vscode-descriptionForeground); font-weight: 600; }
+.activity-note { display: block; padding-left: 0.75rem; color: var(--vscode-descriptionForeground); }
+.activity-row > ul { margin: 0.125rem 0 0; padding-left: 0.75rem; list-style: none; border-left: 0.0625rem solid var(--vscode-panel-border); }
 
 form {
   display: flex;

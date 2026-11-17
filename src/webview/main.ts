@@ -1,5 +1,5 @@
 import { isHostMessage } from "../shared/messages.js";
-import type { ChatMessage, WebviewMessage } from "../shared/messages.js";
+import type { ActivityEntry, ChatMessage, WebviewMessage } from "../shared/messages.js";
 import { renderDiagrams, renderMarkdown } from './markdown.js';
 import { renderReviewPanel } from './reviewPanel.js';
 
@@ -103,6 +103,82 @@ function renderMessages(options: { messages: ChatMessage[]; complete: boolean })
   conversation.scrollTop = conversation.scrollHeight;
 }
 
+let renderedActivity = '';
+const plural = (count: number, word: string, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
+const where = (glob: string) => !glob || glob === '**/*' ? 'codebase' : glob;
+
+/** One row per completed editor tool call, oldest first; a file opened from a search is nested under it. Paths open the file; reasons are the agent's own words. */
+function renderActivity(entries: ActivityEntry[]): void {
+  const feed = document.getElementById('activity-feed');
+  const list = document.getElementById('activity-list');
+  const count = document.getElementById('activity-count');
+  const key = JSON.stringify(entries);
+  if (!feed || !list || key === renderedActivity) return;
+  renderedActivity = key;
+  feed.hidden = entries.length === 0;
+  const tally = (kind: ActivityEntry['kind']) => entries.filter(entry => entry.kind === kind).length;
+  if (count) count.textContent = `(${[plural(tally('search'), 'search', 'searches'), plural(tally('open'), 'read'), plural(tally('propose'), 'proposal')].join(', ')})`;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+  const link = (path: string, line: number, label: string) => {
+    const button = document.createElement('button');
+    button.className = 'source-reference';
+    button.textContent = label;
+    button.addEventListener('click', () => vscode.postMessage({ type: 'open_file', path, line }));
+    return button;
+  };
+  const searches = new Map<string, HTMLElement>();
+  const rows: HTMLElement[] = [];
+  for (const entry of entries) {
+    const row = document.createElement('li');
+    row.className = `activity-row activity-${entry.kind}`;
+    const kind = document.createElement('span');
+    kind.className = 'activity-kind';
+    const notes: string[] = [];
+    let main: (string | HTMLElement)[];
+    switch (entry.kind) {
+      case 'search':
+        kind.textContent = 'Searched';
+        main = [`"${entry.query}" in ${where(entry.glob)}: ${plural(entry.matches, 'match', 'matches')} in ${plural(entry.fileCount, 'file')}${entry.truncated ? ' (limited)' : ''}`];
+        if (entry.files.length) row.title = entry.files.join('\n');
+        break;
+      case 'open':
+        kind.textContent = 'Opened';
+        main = [link(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`)];
+        if (entry.foundBy !== undefined && !searches.has(entry.foundBy)) notes.push(`found by search "${entry.foundBy}"`);
+        break;
+      case 'propose':
+        kind.textContent = 'Proposed';
+        main = [link(entry.path, 1, entry.path), ` ${entry.detail}`];
+        break;
+      case 'list':
+        kind.textContent = 'Listed';
+        main = [`${where(entry.glob)}: ${plural(entry.count, 'file')}`];
+        break;
+      case 'context':
+        kind.textContent = 'Given';
+        main = [link(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];
+        break;
+    }
+    if (entry.kind !== 'list' && entry.kind !== 'context' && entry.reason) notes.push(entry.reason);
+    row.append(kind, ...main);
+    for (const text of notes) {
+      const note = document.createElement('span');
+      note.className = 'activity-note';
+      note.textContent = text;
+      row.append(note);
+    }
+    const parent = entry.kind === 'open' && entry.foundBy !== undefined ? searches.get(entry.foundBy) : undefined;
+    if (parent) {
+      let nested = parent.querySelector('ul');
+      if (!nested) parent.append(nested = document.createElement('ul'));
+      nested.append(row);
+    } else rows.push(row);
+    if (entry.kind === 'search') searches.set(entry.query, row);
+  }
+  list.replaceChildren(...rows);
+  if (atBottom) list.scrollTop = list.scrollHeight;
+}
+
 form.addEventListener("submit", (event) => {
   event.preventDefault();
   if (!(input instanceof HTMLTextAreaElement) || pending) {
@@ -175,6 +251,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     });
     evidenceList.replaceChildren(...items);
   }
+  renderActivity(event.data.activity);
   if (awaitingAck && input instanceof HTMLTextAreaElement) {
     input.value = "";
     vscode.setState({ draft: "" });

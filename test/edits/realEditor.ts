@@ -89,6 +89,18 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.equal(await panel.locator('.proposal-row.superseded .hunk-row, .proposal-row.superseded button').count(), 0);
   const proposals = (await feed()).activity.filter(entry => entry.kind === 'propose' && entry.reason === 'MCP combine check').map(entry => entry.detail);
   assert.deepEqual(proposals, ['lines 2–2', 'insert at line 4, combined with earlier changes', 'replace matched text, combined with earlier changes']);
+  const activityRows = frame.locator('#activity-list .activity-row');
+  await activityRows.filter({ hasText: 'replace matched text' }).waitFor();
+  const rendered = await activityRows.allInnerTexts();
+  assert.ok(rendered.some(text => text.includes('Searched') && text.includes('"separator" in example.txt: 1 match in 1 file') && text.includes('Find the separator line')), `Search row missing: ${rendered.join(' | ')}`);
+  const nestedOpen = frame.locator('#activity-list > .activity-search').filter({ hasText: '"separator" in example.txt' }).locator('ul > .activity-open').filter({ hasText: 'example.txt:2-3' });
+  assert.ok((await nestedOpen.count()) >= 1, `The opened range should be nested under the search that found it: ${rendered.join(' | ')}`);
+  assert.ok((await nestedOpen.first().innerText()).includes('Check the lines around it'));
+  assert.match(await frame.locator('#activity-count').innerText(), /^\(\d+ search(es)?, \d+ reads?, \d+ proposals?\)$/u);
+  assert.ok(rendered.some(text => text.includes('Proposed') && text.includes('insert at line 4, combined with earlier changes') && text.includes('MCP combine check')));
+  assert.equal(await frame.locator('#activity-feed').getAttribute('open'), '', 'The feed should start expanded.');
+  await nestedOpen.first().scrollIntoViewIfNeeded();
+  await frame.locator('#activity-feed').screenshot({ path: vscode.Uri.joinPath(options.extensionUri, 'out-test', 'activity-feed.png').fsPath });
   assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: '', new_text: 'x', old_text: 'two', insert_line: 1 } })).isError, true);
   await vscode.commands.executeCommand('forgeAgent.rejectAll');
   assert.equal(await disk('example.txt'), hunkOriginal);
