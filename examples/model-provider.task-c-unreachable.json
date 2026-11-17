@@ -1,0 +1,9 @@
+{
+  "manifest": {
+    "name": "taskc-unreachable",
+    "type": "custom",
+    "base_url": "http://127.0.0.1:59999/v1",
+    "auth": { "api_key": "DUMMY-unreachable-endpoint-for-forge-task-c" },
+    "models": [{ "model_id": "gemini-3.1-flash-lite", "name": "gemini-3-1-flash-lite", "properties": { "context_length": 1048576, "max_output_tokens": 65536 } }]
+  }
+}

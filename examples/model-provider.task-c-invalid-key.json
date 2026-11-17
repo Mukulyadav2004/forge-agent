@@ -1,0 +1,9 @@
+{
+  "manifest": {
+    "name": "taskc-invalid-key",
+    "type": "custom",
+    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "auth": { "api_key": "DUMMY-invalid-key-for-forge-task-c" },
+    "models": [{ "model_id": "gemini-3.1-flash-lite", "name": "gemini-3-1-flash-lite", "properties": { "context_length": 1048576, "max_output_tokens": 65536 } }]
+  }
+}

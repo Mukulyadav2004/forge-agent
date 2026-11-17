@@ -24,11 +24,17 @@ Our apply/undo transaction service and workspace guards were implemented for For
 
 Follow [the Cline-first reuse map](docs/CLINE-REUSE.md) for editor work: inspect and adapt suitable upstream components before implementing equivalents. Custom code must have a concrete integration or behavior requirement; a fresh repository is not a reason to rebuild existing editor components.
 
-## Run
+## Run from a clean clone
+
+Needs Node.js 22+, pnpm, VS Code with its `code` command, and a model key (a free Google Gemini key works).
 
 ```sh
+git clone https://github.com/Mukulyadav2004/forge-agent.git && cd forge-agent
 pnpm install --frozen-lockfile
-pnpm run dev
+pnpm run trueforge:local                 # terminal 1: local TrueForge 0.185.1 on http://127.0.0.1:8790
+export GEMINI_API_KEY=...                # terminal 2: your key stays in your shell and in TrueForge
+pnpm run trueforge:add-provider examples/model-provider.gemini.json
+pnpm run dev                             # opens the Extension Development Host
 ```
 
 In the Extension Development Host, open a trusted local project, then run **Forge: Open Agent** from the Command Palette. The status-bar button and activity-bar icon open the same sidebar.
@@ -37,8 +43,8 @@ Forge commands appear in the **Extension Development Host** launched by `pnpm ru
 
 ## Connect your first model
 
-1. In a separate terminal, run `pnpm run trueforge:local`. This starts pinned TrueForge `0.184.2` with the loopback editor MCP allowance. The extension does not start that server. Default URL: `http://127.0.0.1:8790`. The command refuses to start a second process on an occupied port; stop an older local server first.
-2. Configure a model in TrueForge. Keep provider keys there, not in this extension or Git.
+1. In a separate terminal, run `pnpm run trueforge:local`. This starts pinned TrueForge `0.185.1` (the npm latest when checked on 17 Nov 2026) with the loopback editor MCP allowance. The extension does not start that server. Default URL: `http://127.0.0.1:8790`. The command refuses to start a second process on an occupied port; stop an older local server first.
+2. Configure a model in TrueForge. Keep provider keys there, not in this extension or Git. The example configs in [examples/](examples) are loaded with `pnpm run trueforge:add-provider <file>`, which fills `${GEMINI_API_KEY}`-style placeholders from your environment and creates or updates the provider. Any provider TrueForge supports works, including an OpenAI-compatible endpoint (`"type": "custom"` with a `base_url`); only Gemini models have been tested. Do not run the Gemini example over an existing `google-gemini` provider you configured differently: it replaces that provider's model list.
 3. Click **Select model** in the sidebar, or run **Forge: Select Model**, to choose from your configured TrueForge models. Names include the exact provider prefix, such as `google-gemini/gemini-3-1-flash-lite`. If needed, set **Forge Agent: Base Url** in VS Code Settings first.
 4. TrueForge must permit local outbound MCP connections. Start it with `OUTBOUND_URL_ALLOWED_HOSTS='["localhost","127.0.0.1"]'` in its environment. Keep its outbound URL protections enabled.
 5. Send a task. Before creating the session, the extension automatically registers its current MCP URL and bearer token through TrueForge's settings API. It uses a connector named `forge-editor-<window-id>`, so separate VS Code windows use their own editor tools.
@@ -51,13 +57,32 @@ The current client targets an unauthenticated local TrueForge development server
 
 If you manually change the model during an existing task, run **Forge: New Task** before sending another message. Selecting a model with the picker starts a new task automatically. Failed session creation no longer retains the old model setting.
 
+## Agent definition
+
+The TrueForge agent we use is [src/agent/forge-agent.json](src/agent/forge-agent.json) (harness settings, step limit, editor tools and which tools need approval) plus the instructions in [src/agent/instructions.ts](src/agent/instructions.ts). The extension loads it into every TrueForge session it creates (`POST /api/v1/sessions` with an inline spec) and into model switches (`PATCH`), filling in the model from **Forge Agent: Model** and the editor MCP server for the current window. TrueForge has no separate loader for agent files, so there is nothing to import by hand. To see exactly what TrueForge receives:
+
+```sh
+pnpm run agent:spec google-gemini/gemini-3-1-flash-lite
+```
+
+`propose_edit` and `run_command` always require approval in TrueForge. Approval of `propose_edit` only stages a diff; nothing is written until you accept it in **Review changes**. Approval of `run_command` shows the exact command, folder and timeout.
+
+## Models, fallback and Task C
+
+- **Forge Agent: Model** is the main `provider/model`; **Forge Agent: Fallback Model** is optional. A failed turn is shown in the chat; temporary errors (429, 5xx, timeouts, connection failures) are retried after 2 s and 4 s, then the same session continues on the fallback model and your request is repeated. Errors such as an invalid key switch at once. Use a fallback on a different provider or key so it survives the same failure.
+- Task C rehearsal providers: `pnpm run trueforge:add-provider examples/model-provider.task-c-invalid-key.json` (Google endpoint with a dummy key) and `examples/model-provider.task-c-unreachable.json` (a closed local port). Set **Model** to `taskc-invalid-key/gemini-3-1-flash-lite` or `taskc-unreachable/gemini-3-1-flash-lite` and **Fallback Model** to a working model, run **Forge: New Task**, repeat Task A, then check `git status` in the project. Both keys are dummies.
+
 ## What works in this milestone
 
 - Sidebar messages and streamed assistant text, visible session/event status, errors, Cancel, and New Task.
-- TrueForge tool approval events with approve/deny resumed as a new turn in the same session.
+- TrueForge tool approvals resume the same paused turn. Each approval names the file, kind of change and the agent's reason, or the exact command, folder and timeout, and warns about calls the editor will refuse.
+- A live activity feed lists every search, read, proposal and command with the agent's stated reason, nests files under the search that found them, and shows the context budget.
+- `run_command` runs one approved, non-interactive command in a workspace folder (default 60 s timeout, process group stopped on timeout or cancel, output kept to its start and end within 16,000 characters). Commands can change files and Forge cannot undo them; the tool log never stores command text or output.
+- Each user request has a 200,000-character context budget across reads, searches, listings, command output and supplied context. Tools shrink their output to what remains, refuse when it is spent, and report usage to the agent and in the feed.
+- Model errors are shown in plain words, retried with backoff when temporary, then handed to **Fallback Model** automatically.
 - **Forge: Edit Selection** (`Cmd+Option+F` on Mac): select code, provide an instruction, send the selection and its location.
 - Authenticated loopback MCP tools: `list_files`, bounded `read_file`, `search_code`, and `propose_edit`.
-- `search_code` searches saved UTF-8 text by literal string or optional regex, returning paths, line numbers and matched excerpts in both text and structured results. Per request: five-second deadline, 1,000 candidate files, 256 KiB per file, 8 MiB of bytes inspected during text preflight, 100 results maximum (40 default), 1,000 characters per line and 20,000 characters of result JSON. Output collection is capped at 1 MiB. Dirty/secret/unavailable/oversized files are skipped; bounded text preflight rejects NUL bytes and invalid UTF-8 before ripgrep runs. Skipped candidates and exhausted result/file budgets are reported. No matches is scoped to these limits. Save dirty files to search them, or use `read_file` for current editor text and an edit revision. Search hits appear in the file-evidence list. Start a **New Task** after reloading to enable the tool in a new TrueForge session.
+- `search_code` searches saved UTF-8 text by literal string or optional regex, returning paths, line numbers and matched excerpts in both text and structured results. Per request: five-second deadline, 1,000 candidate files, 256 KiB per file, 8 MiB of bytes inspected during text preflight, 100 results maximum (40 default), 1,000 characters per line and 20,000 characters of result JSON. Output collection is capped at 1 MiB. Dirty/secret/unavailable/oversized files are skipped; bounded text preflight rejects NUL bytes and invalid UTF-8 before ripgrep runs. Skipped candidates and exhausted result/file budgets are reported. No matches is scoped to these limits. Save dirty files to search them, or use `read_file` for current editor text and an edit revision. Search hits appear in the activity feed; only opened ranges appear in the file-evidence list. Start a **New Task** after reloading to enable the tool in a new TrueForge session.
 - Sanitized Markdown, rendered Mermaid diagrams, and clickable source references. Raw HTML and remote images are not executed or loaded.
 - A visible file-evidence list distinguishes MCP reads from source excerpts supplied as context. Architecture requests receive up to seven source files within a 64,000-character budget; larger files are excerpted and require further tool reads.
 - Automatic registration of the active editor connection before session creation, with separate connector names for each extension host. Old inactive connector entries can remain in TrueForge Settings after a window closes.
@@ -66,7 +91,7 @@ If you manually change the model during an existing task, run **Forge: New Task*
 - Accepted existing UTF-8 text files are saved; rollback is attempted on save/verification failures. Undo restores the last accepted batch only when its files still match our saved result. UTF-8 BOM and CRLF are preserved.
 - Workspace trust checks, realpath containment for file reads, basic secret-path exclusion, and literal rendering of model/user text in the sidebar.
 
-**Not implemented yet:** creating/deleting/renaming files, command execution, symbol tools and @-mentions, automatic query-to-context selection reasons and token accounting, automatic model fallback, persistent sessions or conversation history, and scout subagents. Content search is shared retrieval infrastructure, not a complete context assembly system. Basic secret-path exclusion is not a complete secret detector. This is a development milestone, not a contest-ready submission.
+**Not implemented yet:** creating/deleting/renaming files, symbol tools and @-mentions, token-based (rather than character-based) context accounting, persistent sessions or conversation history, scout subagents, and a demonstrated compaction event. `run_command` is tested on macOS only. Content search is shared retrieval infrastructure, not a complete context assembly system. Basic secret-path exclusion is not a complete secret detector. This is a development milestone, not a contest-ready submission.
 
 ## Apply and undo
 
@@ -140,8 +165,8 @@ The build bundles TrueForge's ESM exports into the extension's CommonJS entry be
 1. `src/extension.ts`: commands and extension startup.
 2. `src/webview/main.ts` and `src/shared/messages.ts`: sidebar ↔ extension communication.
 3. `src/sidebar/AgentViewProvider.ts`: conversation, approvals, and state.
-4. `src/agent/ForgeSession.ts`: the TrueForge SDK boundary and agent definition.
-5. `src/tools/EditorBridge.ts`: MCP, workspace access, proposed diffs.
+4. `src/agent/forge-agent.json` and `src/agent/ForgeSession.ts`: the agent definition and the TrueForge SDK boundary (sessions, turns, approvals, retry and fallback).
+5. `src/tools/EditorBridge.ts` and `src/tools/runCommand.ts`: MCP tools, workspace access, context budget, proposed diffs and commands.
 6. `docs/NOV-4-5-HANDOFF.md`: remaining real-world checks.
 7. `src/context/projectContext.ts`, `src/agent/instructions.ts`, and `src/webview/markdown.ts`: bounded context, evidence requirements, and safe presentation.
 8. `src/edits/EditService.ts` and `docs/APPLY-UNDO.md`: proposal revisions, guarded transactions, snapshots, and undo.
