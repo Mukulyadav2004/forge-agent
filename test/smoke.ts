@@ -166,6 +166,8 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   await client.close();
   const denied = await fetch(connection.url, { method: "POST" });
   assert.equal(denied.status, 403);
+  const streamProbe = await fetch(connection.url, { method: 'GET' });
+  assert.deepEqual([streamProbe.status, streamProbe.headers.get('allow')], [405, 'POST'], 'Streamable HTTP servers without a GET stream must answer 405.');
   if (process.env.FORGE_SMOKE_LIVE_REGISTRY === "true") {
     await checkLiveRegistry({ url: connection.url, authorization: connection.headers.Authorization });
     await vscode.workspace.fs.writeFile(vscode.Uri.joinPath(extension.extensionUri, "out-test", "live-editor-result.json"), new TextEncoder().encode(JSON.stringify({ registration: true, trueforge_discovers_editor_tools: true })));

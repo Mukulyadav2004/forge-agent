@@ -32,7 +32,9 @@ export class EditorBridge implements vscode.Disposable {
   /** Completed editor tool calls for the sidebar feed: searches stay separate from files actually opened. */
   readonly onDidActivity = this.activityEvents.event;
   private readonly server = createServer((request, response) => {
-    if (request.url !== '/mcp' || request.method !== 'POST') { response.writeHead(404).end(); return; }
+    if (request.url !== '/mcp') { response.writeHead(404).end(); return; }
+    // Streamable HTTP: a server without a GET event stream or session DELETE answers 405 with the allowed method.
+    if (request.method !== 'POST') { response.writeHead(405, { Allow: 'POST' }).end(); return; }
     if (request.headers.origin || request.headers.authorization !== `Bearer ${this.token}`) { response.writeHead(403).end(); return; }
     const mcp = this.makeServer();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

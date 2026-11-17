@@ -8,6 +8,7 @@ import { isArchitectureRequest } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import type { ReviewCommand } from '../edits/review';
 import { ReviewFeedback } from './ReviewFeedback';
+import { describeApproval, StreamedToolCalls } from '../agent/approvalText';
 
 export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   static readonly viewType = "forgeAgent.chat";
@@ -17,6 +18,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private cancellationRequested = false;
   private status = "Set forgeAgent.model in Settings to connect to local TrueForge.";
   private approvals: TrueForgeApi.UserToolApprovalInputEvent[] = [];
+  /** Recent streamed tool calls; an approval event names only the call id, so its prompt is built from here. */
+  private readonly toolCalls = new StreamedToolCalls();
   private readonly messages: ChatMessage[] = [];
   private readonly inspectedFiles: FileEvidence[] = [];
   private readonly activity: ActivityEntry[] = [];
@@ -114,7 +117,7 @@ ${selectedText}`;
     try {
       await this.actions.edits.newTask();
       this.reviewFeedback.clear();
-      this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.activity.length = 0; this.status = "New task ready";
+      this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.activity.length = 0; this.toolCalls.clear(); this.status = "New task ready";
     } catch (error) { this.status = error instanceof Error ? error.message : 'Could not start a new task.'; }
     this.busy = false; this.publish();
   }
@@ -233,6 +236,7 @@ ${selectedText}`;
   }
   private event(event: TrueForgeApi.TurnStreamingEvent): void {
     this.status = `Session ${this.session?.id ?? "starting"} · ${event.type}`;
+    if (event.type === "model.message.delta" && event.toolCalls) this.toolCalls.add(event.id, event.toolCalls);
     if (event.type === "model.message" && event.threadId === "main" && typeof event.content === "string" && event.content) {
       const existing = this.messages.find(message => message.id === event.id && message.role === "assistant");
       if (existing) existing.text = event.content;
@@ -247,9 +251,9 @@ ${selectedText}`;
       for (const tool of event.toolCalls) {
         if (!this.approvals.some(item => item.threadId === event.threadId && item.toolCallId === tool.id)) {
           this.approvals.push({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } });
+          this.messages.push({ id: randomUUID(), role: "assistant", text: describeApproval(this.toolCalls.find(tool.sourceEventId, tool.id)) });
         }
       }
-      this.messages.push({ id: randomUUID(), role: "assistant", text: "Allow TrueForge to stage a proposed diff? This does not write files. You can apply or reject the proposal after reviewing it." });
     }
     if (event.type === "turn.done" && event.state.status === "error") this.status = event.state.message;
     this.publish();

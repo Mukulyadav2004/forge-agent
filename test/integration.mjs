@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
 import { buildProjectContext, isArchitectureRequest } from '../out/context/projectContext.js';
+import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
 import './observability/events.mjs';
 
@@ -15,6 +16,39 @@ test('architecture context is bounded and includes implementations across direct
   assert.ok(context.files.length >= 3);
   assert.ok(context.files.every(file => file.origin === 'context' && file.path !== 'test_main.py' && file.path !== '.env'));
   assert.equal(context.files[0].path, 'main.py');
+});
+
+test('approval prompts name the file, change and reason from the tool call arguments', () => {
+  const call = (args) => ({ name: 'propose_edit', arguments: JSON.stringify({ path: 'src/flask/cli.py', base_revision: 'r', explanation: 'Register the config command', ...args }) });
+  const ranged = describeApproval(call({ new_text: 'a\nb\n', start_line: 10, end_line: 12 }));
+  assert.match(ranged, /File: `src\/flask\/cli\.py`/u);
+  assert.match(ranged, /replace lines 10–12 with 2 line\(s\)/u);
+  assert.match(ranged, /Agent's reason: Register the config command/u);
+  assert.match(ranged, /Nothing is written until you accept it/u);
+  assert.match(describeApproval(call({ new_text: 'x', insert_line: 4 })), /insert 1 line\(s\) at line 4/u);
+  assert.match(describeApproval(call({ new_text: 'X\n', old_text: 'x\ny\n' })), /replace one matched passage of 2 line\(s\) with 1 line\(s\)/u);
+  assert.match(describeApproval(call({ new_text: '' })), /replace the whole file \(0 line\(s\)\)/u);
+  assert.match(describeApproval(call({ new_text: 'x', explanation: 'y'.repeat(400) })), /y{300}…/u);
+  assert.match(describeApproval({ name: 'run_command', arguments: '{"command":"rm `x`"}' }), /Approve `run_command`\?[\s\S]*rm 'x'/u);
+  assert.match(describeApproval({ name: 'propose_edit', arguments: 'not json' }), /Approve `propose_edit`/u);
+  assert.match(describeApproval(undefined), /details were not received/u);
+  assert.doesNotMatch(ranged, /will refuse/u);
+  assert.match(describeApproval(call({ new_text: 'x', old_text: 'y', start_line: 2, end_line: 2 })), /editor will refuse this call:\*\* it mixes/u);
+  assert.match(describeApproval(call({ new_text: 'x', old_text: 'y', end_line: 2 })), /editor will refuse this call:\*\* it gives only one of start_line and end_line/u);
+});
+
+test('streamed tool call deltas are rebuilt for the approval that names them', () => {
+  // Shapes captured from a live TrueForge 0.185.1 stream: the first delta names the call, a later one carries arguments.
+  const calls = new StreamedToolCalls();
+  calls.add('msg-1', [{ index: 0, id: 'call_1', type: 'function', function: { name: 'propose_edit', arguments: '' } }]);
+  calls.add('msg-1', [{ index: 0, function: { arguments: '{"path":"src/a.py","new_text":"x\\n",' } }]);
+  calls.add('msg-1', [{ index: 0, function: { arguments: '"insert_line":3,"explanation":"Add x"}' } }]);
+  calls.add('msg-2', [{ index: 0, id: 'call_2', function: { name: 'read_file', arguments: '{}' } }]);
+  assert.deepEqual(calls.find('msg-1', 'call_1'), { name: 'propose_edit', arguments: '{"path":"src/a.py","new_text":"x\\n","insert_line":3,"explanation":"Add x"}' });
+  assert.match(describeApproval(calls.find('msg-1', 'call_1')), /File: `src\/a\.py`[\s\S]*insert 1 line\(s\) at line 3[\s\S]*Add x/u);
+  assert.equal(calls.find('msg-2', 'call_1'), undefined, 'A call id must match the message that produced it.');
+  calls.clear();
+  assert.equal(calls.find('msg-1', 'call_1'), undefined);
 });
 
 test('SDK session, stream, approval resume, cancellation and error handling', async () => {
