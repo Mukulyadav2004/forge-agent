@@ -96,7 +96,7 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   const nestedOpen = frame.locator('#activity-list > .activity-search').filter({ hasText: '"separator" in example.txt' }).locator('ul > .activity-open').filter({ hasText: 'example.txt:2-3' });
   assert.ok((await nestedOpen.count()) >= 1, `The opened range should be nested under the search that found it: ${rendered.join(' | ')}`);
   assert.ok((await nestedOpen.first().innerText()).includes('Check the lines around it'));
-  assert.match(await frame.locator('#activity-count').innerText(), /^\(\d+ search(es)?, \d+ reads?, \d+ proposals? · context [\d.]+k? (of 200k )?chars\)$/u);
+  assert.match(await frame.locator('#activity-count').innerText(), /^\(\d+ search(es)?, \d+ reads?, \d+ proposals?(, \d+ commands?)? · context [\d.]+k? (of 200k )?chars\)$/u);
   assert.match(await nestedOpen.first().innerText(), /example\.txt:2-3 \(\+\d+ chars\)/u, 'Each read shows the characters it added to the context budget.');
   assert.ok(rendered.some(text => text.includes('Proposed') && text.includes('insert at line 4, combined with earlier changes') && text.includes('MCP combine check')));
   assert.equal(await frame.locator('#activity-feed').getAttribute('open'), '', 'The feed should start expanded.');

@@ -123,7 +123,7 @@ function renderActivity(entries: ActivityEntry[]): void {
   const request = entries[lastRequest];
   const spent = entries.slice(lastRequest + 1).reduce((used, entry) => 'used' in entry && entry.used !== undefined ? entry.used : used, 0);
   const budget = request?.kind === 'request' ? `context ${size(spent)} of ${size(request.limit)} chars` : `context ${size(spent)} chars`;
-  if (count) count.textContent = `(${[plural(tally('search'), 'search', 'searches'), plural(tally('open'), 'read'), plural(tally('propose'), 'proposal')].join(', ')} · ${budget})`;
+  if (count) count.textContent = `(${[plural(tally('search'), 'search', 'searches'), plural(tally('open'), 'read'), plural(tally('propose'), 'proposal'), ...(tally('command') ? [plural(tally('command'), 'command')] : [])].join(', ')} · ${budget})`;
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
   const link = (path: string, line: number, label: string) => {
     const button = document.createElement('button');
@@ -166,6 +166,15 @@ function renderActivity(entries: ActivityEntry[]): void {
         kind.textContent = 'Listed';
         main = [`${where(entry.glob)}: ${plural(entry.count, 'file')}`];
         break;
+      case 'command': {
+        kind.textContent = 'Ran';
+        const code = document.createElement('code');
+        code.textContent = entry.command.length > 200 ? `${entry.command.slice(0, 200)}…` : entry.command;
+        code.title = entry.command;
+        const ended = entry.cancelled ? 'cancelled' : entry.timedOut ? 'timed out' : `exit ${entry.exitCode ?? 'signal'}`;
+        main = [code, `${entry.cwd === '.' ? '' : ` in ${entry.cwd}`}: ${ended} after ${(entry.durationMs / 1000).toFixed(1)} s`];
+        break;
+      }
       case 'context':
         kind.textContent = 'Given';
         main = [link(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];

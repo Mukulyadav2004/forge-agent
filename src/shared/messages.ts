@@ -22,6 +22,7 @@ export type ActivityEntry =
   | { kind: 'open'; path: string; startLine: number; endLine: number; reason?: string; foundBy?: string; used?: number }
   | { kind: 'propose'; path: string; detail: string; reason?: string }
   | { kind: 'list'; glob: string; count: number; used?: number }
+  | { kind: 'command'; command: string; cwd: string; exitCode: number | null; timedOut: boolean; cancelled: boolean; durationMs: number; reason?: string; used?: number }
   | { kind: 'context'; path: string; startLine: number; endLine: number; used?: number };
 
 function isActivityEntry(value: unknown): value is ActivityEntry {
@@ -35,6 +36,7 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     case 'open': return text('path') && count('startLine') && count('endLine') && (value.foundBy === undefined || text('foundBy'));
     case 'propose': return text('path') && text('detail');
     case 'list': return text('glob') && count('count');
+    case 'command': return text('command') && text('cwd') && (value.exitCode === null || count('exitCode')) && typeof value.timedOut === 'boolean' && typeof value.cancelled === 'boolean' && count('durationMs');
     case 'context': return text('path') && count('startLine') && count('endLine');
     default: return false;
   }

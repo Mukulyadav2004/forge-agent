@@ -326,7 +326,7 @@ ${selectedText}`;
     <button id="copy-mcp-button" type="button">Copy MCP connection</button>
     <button id="select-model-button" type="button">Select model</button>
     <span class="badge" id="status" role="status">Ready</span>
-    <div><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve preview</button> <button id="deny-button" type="button" hidden>Deny</button></div>
+    <div><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve</button> <button id="deny-button" type="button" hidden>Deny</button></div>
   </header>
   <main id="task-content" aria-label="Task workspace">
   <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>

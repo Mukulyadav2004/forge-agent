@@ -141,7 +141,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'run_command', 'search_code']);
   await checkSearch({ client, extensionUri: extension.extensionUri });
-  await checkCommand({ client });
+  await checkCommand({ client, frame: restoredFrame });
   const read = await client.callTool({ name: "read_file", arguments: { path: "example.txt" } });
   assert.equal(read.isError, undefined);
   assert.ok(JSON.stringify(read).includes("original text"));
