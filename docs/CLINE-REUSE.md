@@ -57,3 +57,7 @@ A live Task B run proposed two ranged edits to `src/flask/cli.py`; the second si
 ## Tool activity feed: 16 Nov 2026
 
 Inspected `apps/vscode/webview-ui/src/components/chat/ChatRow.tsx` (1,196 lines, 40 imports including gRPC clients, React state context and MCP rows) and `sdk/packages/ui/components/agent-chat/tool-summary/` (2,128 lines across five files, plus `@cline/shared/browser`). Neither fits our DOM webview without a rewrite or pulling in several Cline files. Decision (user, 16 Nov): write our own small activity entries and labels in Cline's style (`Searched "…"`, `Read file (10–80)`); no Cline code copied.
+
+## Command execution (run_command): 17 Nov 2026
+
+Inspected `sdk/packages/core/src/extensions/tools/executors/bash.ts` at the pinned commit: 1,182 lines importing `@cline/shared` context and shell helpers, process-start probes, a run-command execution controller and detached-session handling. Adapting a foreground subset would still be roughly 200-300 lines plus replacements for those imports. `executors/output-limits.ts` (52 lines, no imports) truncates long output by keeping its start and end. Decision: write our own foreground-only executor (`src/tools/runCommand.ts`, about 60 lines) with the same head-and-tail idea in our own code; no Cline code copied, so no new notice. Cline's `run_commands` tool takes an array of commands; ours takes one command per call so each approval shows exactly one command and folder.

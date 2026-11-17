@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { open, realpath, stat } from 'node:fs/promises';
+import { join, relative, resolve, sep } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { CallToolResult, ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
@@ -16,6 +16,7 @@ import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
 import type { ToolLog, ToolName } from '../observability/events';
+import { COMMAND_LIMITS, runCommand } from './runCommand';
 
 /** Characters of workspace text one user request may bring into the model's context: reads, searches, listings and supplied context. */
 export const CONTEXT_BUDGET = 200_000;
@@ -174,6 +175,22 @@ export class EditorBridge implements vscode.Disposable {
       this.activityEvents.fire({ kind: 'open', used: this.budgetUsed, path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       // TrueForge prefers structured MCP results, so the source must be present there too.
       return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${this.budgetNote()}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length, context_budget: this.budget } };
+    });
+    register('run_command', { description: 'Run one non-interactive shell command in the workspace, such as a test, lint or type check, after the user approves its exact text. Prefer the narrowest command that checks your change (for example one test file). Returns the exit code, duration and combined output; long output keeps the start and the end. There is no input, so prompts, servers and watch modes run until the timeout. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit rather than editing through commands.', inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).default(COMMAND_LIMITS.timeout_seconds_default), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: false } }, async ({ command, cwd, timeout_seconds }, extra) => {
+      const root = vscode.workspace.workspaceFolders?.[0];
+      if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');
+      const rootPath = await realpath(root.uri.fsPath);
+      const folder = await realpath(resolve(rootPath, cwd)).catch(() => { throw new Error('Choose an existing workspace folder for cwd.'); });
+      if (folder !== rootPath && !folder.startsWith(rootPath + sep)) throw new Error('cwd must stay inside the workspace.');
+      if (!(await stat(folder)).isDirectory()) throw new Error('cwd must be a folder.');
+      const outputCharacters = Math.min(COMMAND_LIMITS.output_characters, this.remaining());
+      if (outputCharacters < 1000) throw this.budgetError();
+      const result = await runCommand({ command, cwd: folder, timeoutSeconds: timeout_seconds, outputCharacters, signal: extra.signal });
+      this.budgetUsed += result.output.length;
+      const where = relative(rootPath, folder) || '.';
+      const ended = result.cancelled ? 'cancelled' : result.timed_out ? `stopped at the ${timeout_seconds} s timeout` : `exit code ${result.exit_code ?? result.signal}`;
+      const structured = { command, cwd: where, ...result, context_budget: this.budget };
+      return { content: [{ type: 'text', text: `$ ${command}\n(cwd ${where}) ${ended} after ${(result.duration_ms / 1000).toFixed(1)} s${result.output_truncated ? `; output shortened from ${result.total_output_characters} characters` : ''}\n${result.output}\n${this.budgetNote()}` }], structuredContent: structured };
     });
     register('list_files', { description: 'List up to 100 workspace file paths matching a glob, to get oriented when you do not yet know where relevant code lives. Narrow the glob to a folder or extension when the list is incomplete. A listing shows names only; read files before making claims about them.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');

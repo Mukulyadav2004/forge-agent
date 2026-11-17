@@ -67,7 +67,8 @@ export async function checkToolLog(options: { client: Client; extensionUri: vsco
     assert.ok(all.some(row => row.event === 'error' && row.errorType === 'RequestError' && row.taskId === 'feedback-session-1'));
     assert.ok(all.some(row => row.event === 'model.config' && row.model === 'test/review-feedback'));
     assert.ok(!text.includes('Review feedback response') && !text.includes('Feedback fixture temporary failure') && !text.includes('Change alpha to ALPHA.'));
-    assert.deepEqual([...new Set(rows.map(row => row.name))].sort(), ['list_files', 'propose_edit', 'read_file', 'search_code']);
+    assert.deepEqual([...new Set(rows.map(row => row.name))].sort(), ['list_files', 'propose_edit', 'read_file', 'run_command', 'search_code']);
+    assert.ok(!text.includes('echo checked') && !text.includes('LAST-LINE'), 'Command text and output are never written to the log.');
     const last = rows.slice(-5);
     assert.deepEqual(last.map(row => row.outcome), ['ok', 'ok', 'refused', 'refused', 'error']);
     assert.equal(last[0]?.path, probe);

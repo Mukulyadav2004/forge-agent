@@ -1,6 +1,7 @@
 import { checkEditorTransactions } from './edits/realEditor';
 import { checkReviewFeedback } from './sidebar/reviewFeedback';
 import { checkSearch } from './tools/search';
+import { checkCommand } from './tools/command';
 import { checkToolLog } from './observability/editor';
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -138,8 +139,9 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const client = new Client({ name: "forge-smoke", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(connection.url), { requestInit: { headers: { Authorization: connection.headers.Authorization } } }));
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'search_code']);
+  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'run_command', 'search_code']);
   await checkSearch({ client, extensionUri: extension.extensionUri });
+  await checkCommand({ client });
   const read = await client.callTool({ name: "read_file", arguments: { path: "example.txt" } });
   assert.equal(read.isError, undefined);
   assert.ok(JSON.stringify(read).includes("original text"));
