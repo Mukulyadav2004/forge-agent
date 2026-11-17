@@ -18,7 +18,7 @@ This creates an isolated checkout at `out-test/task-a/flask` and a sibling Pytho
 
 `task:a:open` builds the extension and opens that checkout in an Extension Development Host, with `src/flask/helpers.py` at `get_debug_flag`.
 
-`trueforge:local` pins TrueForge 0.184.2 and allows the editor's loopback MCP connection. It refuses to start on an occupied port. If the running server reports `Outbound URL blocked for host "127.0.0.1"`, stop that older server and start this command; changing an unrelated checkout's `.env` does not change a running process.
+`trueforge:local` pins TrueForge 0.185.1 (npm latest on 17 Nov 2026) and allows the editor's loopback MCP connection. It refuses to start on an occupied port. If the running server reports `Outbound URL blocked for host "127.0.0.1"`, stop that older server and start this command; changing an unrelated checkout's `.env` does not change a running process.
 
 ## Give the agent the exact instruction
 
@@ -67,7 +67,17 @@ For manual use, **Forge Agent: Reasoning Effort** optionally forwards a supporte
 
 Google can return a 429 even after a correct proposal was staged. Follow the provider's retry delay before another rehearsal. A verified change with an errored final model turn is recorded separately from a clean live pass.
 
-The extension has no command-execution tool yet. The verification commands run in the terminal or the test harness, not autonomously inside Forge Agent.
+For Task A the verification commands run in the terminal or the test harness. The agent's `run_command` tool exists, but every command needs your approval and Task A does not need it.
+
+## November 18 rehearsal (live, TrueForge 0.185.1)
+
+| Model | Proposal | Official check (`FLASK_DEBUG=off` prints False) | Strict docstring check (names the empty string) |
+| --- | --- | --- | --- |
+| `google-gemini/gemini-3-1-flash-lite` | replaced lines 28-33 but dropped the `def` line, so `return` ended up outside the function | fails (SyntaxError) | fails |
+| `google-gemini/gemini-3-5-flash-lite` | correct ranged edit; lists `0`, `false`, `no`, `off`, `n`, case-insensitive | passes; every case variant correct; 35 helper tests pass (checked by applying the proposal by hand, then restoring) | fails: says "The default is ``False``" but does not name the empty string |
+| `google-gemini/gemini-flash-lite-latest` | correct ranged edit, same values | passes (first assertion) | fails, same reason |
+
+The strict check is ours, stricter than the brief, which only requires the `False` output and an updated docstring. Recommended for the recording: **Model** `google-gemini/gemini-3-5-flash-lite`, **Fallback Model** `google-gemini/gemini-flash-lite-latest`. One run per model; these are observations, not reliability rates. Every failed run left the checkout restored and clean.
 
 ## November 9 evidence
 
