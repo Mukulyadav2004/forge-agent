@@ -8,7 +8,7 @@ import type { SessionEvent } from '../observability/events';
 export function classifyModelError(message: string): { transient: boolean; summary: string } {
   const summary = message.replace(/^\[Model Error\]\s*/u, '').split('\n')[0]?.trim().slice(0, 240) || 'The model request failed.';
   // Rate limits, timeouts, server errors and network failures can pass; bad keys, missing models and bad requests will not.
-  const transient = /\((?:408|409|425|429|5\d\d)\)/u.test(message) || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|timed? ?out|unreachable|overloaded|temporarily/iu.test(message);
+  const transient = /\((?:408|409|425|429|5\d\d)\)/u.test(message) || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|cannot connect|timed? ?out|unreachable|overloaded|temporarily/iu.test(message);
   return { transient, summary };
 }
 

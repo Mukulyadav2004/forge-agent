@@ -59,7 +59,10 @@ test('model errors are classified for retry and summarised without the provider 
   const quota = classifyModelError('[Model Error] Request failed (429): You exceeded your current quota.\n* Quota exceeded for metric: x');
   assert.deepEqual(quota, { transient: true, summary: 'Request failed (429): You exceeded your current quota.' });
   assert.equal(classifyModelError('[Model Error] Request failed (503): overloaded').transient, true);
-  assert.equal(classifyModelError('connect ECONNREFUSED 127.0.0.1:9').transient, true);
+  // Captured from TrueForge 0.185.1 with a provider whose endpoint is closed, and one with an invalid key.
+  assert.equal(classifyModelError('[Model Error] Cannot connect to API: connect ECONNREFUSED 127.0.0.1:59999').transient, true);
+  assert.equal(classifyModelError('[Model Error] Cannot connect to API: bad port').transient, true);
+  assert.equal(classifyModelError('[Model Error] Request failed (400): Bad Request').transient, false);
   assert.equal(classifyModelError('[Model Error] Request failed (401): API key not valid').transient, false);
   assert.equal(classifyModelError('[Model Error] Request failed (404): model not found').transient, false);
   assert.equal(classifyModelError('').summary, 'The model request failed.');
