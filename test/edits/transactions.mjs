@@ -323,6 +323,17 @@ test('old_text keeps $ sequences literal and inserting after an unterminated las
   await service.apply(); assert.equal(backend.get('a.txt').text, "price = '$&$1'\nend\ntail");
 });
 
+test('a combined proposal lists each distinct explanation once', async () => {
+  const { service } = setup({ 'a.txt': 'one\ntwo\nthree\nfour\n' });
+  const read = await service.read('a.txt');
+  const stage = (extra, explanation) => service.stageEdit({ path: 'a.txt', revision: read.revision, explanation, ...extra });
+  await stage({ text: 'TWO', range: { startLine: 2, endLine: 2 } }, 'Fix casing');
+  await stage({ text: 'ONE', oldText: 'one' }, 'Fix casing');
+  await stage({ text: 'x', insertLine: 4 }, '');
+  const last = await stage({ text: 'FOUR', oldText: 'four' }, 'Add marker');
+  assert.equal(service.state.proposals.find(proposal => proposal.id === last.id).explanation, 'Fix casing\nAdd marker');
+});
+
 test('a whole-file proposal or a partly reviewed proposal is replaced and reported, not combined', async () => {
   const { service } = setup({ 'a.txt': 'a\nb\nc\n' });
   const read = await service.read('a.txt');

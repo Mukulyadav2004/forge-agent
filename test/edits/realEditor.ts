@@ -107,14 +107,14 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   const manyLines = Array.from({ length: 40 }, (_, index) => `line ${index}\n`);
   await edit({ path: 'example.txt', text: manyLines.join(''), save: true });
   const manyHunks = await stage({ path: 'example.txt', text: manyLines.map((line, index) => index % 4 === 0 ? `changed ${line}` : line).join('') });
-  const list = panel.locator('.proposal-list');
   const lastAccept = row(manyHunks).locator('.hunk-row').nth(9).getByRole('button', { name: 'Accept hunk', exact: true });
   await lastAccept.scrollIntoViewIfNeeded();
-  const scrolledTo = await list.evaluate(element => element.scrollTop);
+  const listScroll = () => frame.evaluate(() => document.querySelector('#review-panel .proposal-list')?.scrollTop ?? -1); // one page task, so a re-render cannot detach the list between finding and reading it
+  const scrolledTo = await listScroll();
   assert.ok(scrolledTo > 100, `The proposal list should scroll in the sidebar (scrollTop ${scrolledTo}).`);
   await lastAccept.click();
   await message.filter({ hasText: 'Accepted and saved this hunk' }).waitFor();
-  const afterAccept = await list.evaluate(element => element.scrollTop);
+  const afterAccept = await listScroll();
   assert.ok(Math.abs(afterAccept - scrolledTo) < 80, `Accepting a hunk moved the review list from ${scrolledTo} to ${afterAccept}.`);
   await panel.getByRole('button', { name: 'Undo last apply', exact: true }).click();
   await message.filter({ hasText: 'Undid the last applied batch' }).waitFor();

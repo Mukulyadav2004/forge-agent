@@ -176,7 +176,9 @@ export class EditService {
     if (text === actual.text) throw new Error('The proposed content is identical to the current file.');
     const { parts, hunks } = buildLineChanges({ before: actual.text, after: text });
     const id = randomUUID();
-    const explanation = pending ? `${pending.view.explanation}\n${options.explanation}`.slice(-4000) : options.explanation;
+    // A combined proposal lists each distinct explanation once; agents often repeat one explanation for every edit to a file.
+    const repeated = !options.explanation.trim() || `\n${pending?.view.explanation}\n`.includes(`\n${options.explanation}\n`);
+    const explanation = pending ? (repeated ? pending.view.explanation : `${pending.view.explanation}\n${options.explanation}`.slice(-4000)) : options.explanation;
     const proposal: Proposal = { view: { id, path: options.path, explanation, status: 'pending', hunks }, before: actual, original: actual.text, after: text, parts, task: this.task };
     this.proposals.set(id, proposal);
     try {
