@@ -171,7 +171,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
 
   private blankChat(title: string): HeldChat {
     return {
-      id: randomUUID(), title, session: undefined, busy: false, cancellationRequested: false, status: 'New chat ready',
+      // Without a model a new chat cannot run, so its status says how to connect instead of "ready".
+      id: randomUUID(), title, session: undefined, busy: false, cancellationRequested: false,
+      status: vscode.workspace.getConfiguration('forgeAgent').get<string>('model', '').trim() ? 'New chat ready' : 'Set forgeAgent.model in Settings to connect to local TrueForge.',
       approvals: [], toolCalls: new StreamedToolCalls(), turnError: undefined, editScope: undefined, lastInput: undefined,
       messages: [], inspectedFiles: [], activity: [], heldSelections: [], questions: [],
     };
