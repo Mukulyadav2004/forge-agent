@@ -30,7 +30,7 @@ This creates an isolated checkout at `out-test/task-a/flask` and a sibling Pytho
 
 > Treat the values 'off' and 'n' as false as well, case-insensitively, and update the docstring to list every value that is treated as false.
 
-Allow TrueForge's preview request. The proposed changes must appear in the native diff and **Review changes**; staging must leave the file unchanged. Inspect the docstring and behavior changes. Use **Accept hunk** for each desired hunk. Use **Reject hunk** only for changes you do not want; rejecting a required part means the task is incomplete until a corrected proposal is accepted.
+The agent stages its proposal without asking first (staging writes nothing). The proposed changes must appear in the native diff and **Review changes**; staging must leave the file unchanged. Inspect the docstring and behavior changes. Use **Accept hunk** for each desired hunk. Use **Reject hunk** only for changes you do not want; rejecting a required part means the task is incomplete until a corrected proposal is accepted.
 
 Hunk boundaries depend on the proposed text. The number of hunks is not a success criterion. The docstring should cover unset/empty values and all explicit false strings, including the existing `0`, `false`, `no` and the requested `off`, `n` values.
 

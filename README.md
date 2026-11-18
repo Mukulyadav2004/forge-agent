@@ -65,7 +65,7 @@ The TrueForge agent we use is [src/agent/forge-agent.json](src/agent/forge-agent
 pnpm run agent:spec google-gemini/gemini-3-1-flash-lite
 ```
 
-`propose_edit` and `run_command` always require approval in TrueForge. Approval of `propose_edit` only stages a diff; nothing is written until you accept it in **Review changes**. Approval of `run_command` shows the exact command, folder and timeout.
+`run_command` always requires approval in TrueForge; the approval shows the exact command, folder and timeout, because a command can change files and Forge cannot undo it. `propose_edit` does not ask first: it only stages a diff, which you see in **Review changes** and the editor, and nothing is written until you accept it there. (One decision per edit instead of an approval followed by a review.)
 
 ## Models, fallback and Task C
 
@@ -96,7 +96,7 @@ pnpm run agent:spec google-gemini/gemini-3-1-flash-lite
 ## Apply and undo
 
 1. Save pre-existing unsaved changes in files you want the agent to edit.
-2. Ask for an edit. Allow TrueForge to stage the preview when its tool approval appears.
+2. Ask for an edit. The agent stages its proposal directly; it appears in **Review changes** as it is staged.
 3. Review the actual diff, then use **Accept hunk**, **Apply file** or **Apply all** in the review panel. These are the only user-facing write actions; the model has no apply tool. Reject hunk discards only that pending hunk; remaining applies preserve its original lines.
 4. Use **Undo last apply** or **Forge: Undo Last Apply** to restore the entire last accepted batch. If you have edited an affected file afterward, Undo refuses to overwrite that work.
 

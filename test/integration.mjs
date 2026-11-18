@@ -106,7 +106,7 @@ test('the agent definition file is what TrueForge receives', () => {
   assert.deepEqual(spec.mcpServers, [{ name: 'forge-editor-abc', ...definition.editorServer }]);
   assert.deepEqual(spec.model, { name: 'test/model', params: { reasoningEffort: 'low' } });
   assert.ok(spec.instructions.startsWith('You are Forge Agent'));
-  assert.deepEqual(definition.editorServer.requireApprovalForTools, ['propose_edit', 'run_command'], 'Every tool that writes or runs needs approval.');
+  assert.deepEqual(definition.editorServer.requireApprovalForTools, ['run_command'], 'Commands need approval; propose_edit only stages a diff the user accepts in Review changes.');
   assert.deepEqual(definition.config.contextManagement.compaction, { enabled: true, trigger: { type: 'input_tokens', value: 32000 } }, 'TrueForge\'s default threshold (80% of a 1M-token window) would never fire; ours is explicit.');
   assert.deepEqual(agentSpec({ model: 'test/model' }).mcpServers, []);
 });
@@ -155,7 +155,7 @@ test('a failed turn can switch the session model with the full spec and retry wi
     const patch = requests.find(request => request.method === 'PATCH');
     assert.equal(patch.url, '/api/v1/sessions/s1');
     assert.equal(patch.body.agent.spec.model.name, 'backup/model');
-    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['propose_edit', 'run_command'], 'PATCH replaces the spec, so approvals must be resent.');
+    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['run_command'], 'PATCH replaces the spec, so approvals must be resent.');
     assert.equal(patch.body.agent.spec.config.dynamic_sub_agents.enabled, false);
     fail = false;
     await session.send([{ type: 'user.message', content: 'hello' }], { retry: true });

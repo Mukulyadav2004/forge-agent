@@ -126,7 +126,12 @@ export async function run(): Promise<void> {
     let accepted = 0;
     while (await review.getByRole('button', { name: 'Accept hunk', exact: true }).count()) {
       await review.getByRole('button', { name: 'Accept hunk', exact: true }).first().click();
-      await review.getByRole('status').filter({ hasText: 'Accepted and saved this hunk' }).waitFor();
+      // If the confirmation never comes, keep what the panel and sidebar said, so an intermittent failure can be diagnosed.
+      await review.getByRole('status').filter({ hasText: 'Accepted and saved this hunk' }).waitFor().catch(async (error: unknown) => {
+        report.review_status_at_failure = await review.getByRole('status').innerText().catch(() => '');
+        report.sidebar_status_at_failure = await frame?.locator('#status').innerText().catch(() => '');
+        throw error;
+      });
       accepted++;
       const pending = Date.now() + 5000;
       while (await review.locator('.hunk-row h4').filter({ hasText: 'applied' }).count() < accepted && Date.now() < pending) await setTimeout(50);
