@@ -32,9 +32,19 @@ h1 {
 }
 
 header { display: flex; align-items: center; flex-wrap: wrap; gap: 0.375rem; min-width: 0; }
-header h1 { flex: 1 0 100%; }
+header h1 { flex: 1 1 auto; }
+#chat-list { display: flex; gap: 0.25rem; flex: 1 0 100%; min-width: 0; overflow: auto; }
+#new-chat-button { flex: 0 0 auto; width: 1.5rem; height: 1.5rem; padding: 0; font-size: 1.125rem; line-height: 1; }
+button.chat-tab { display: inline-flex; align-items: center; gap: 0.25rem; flex: 0 0 auto; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0.125rem 0.5rem; font-size: 0.6875rem; border-radius: 0.375rem; background: transparent; color: var(--vscode-descriptionForeground); border-color: transparent; }
+button.chat-tab[aria-selected="true"] { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); border-color: var(--vscode-panel-border); }
+button.chat-tab.busy::before { content: ''; width: 0.4375rem; height: 0.4375rem; flex: 0 0 auto; border: 0.125rem solid currentColor; border-right-color: transparent; border-radius: 50%; animation: forge-spin 0.8s linear infinite; }
+@keyframes forge-spin { to { transform: rotate(360deg); } }
 header .description { display: none; }
 header > button { font-size: 0.6875rem; padding: 0.25rem 0.375rem; }
+header .badge { flex: 1 0 100%; padding: 0; background: transparent; color: var(--vscode-descriptionForeground); font-size: 0.6875rem; }
+/* Quiet toolbar buttons: text colour only, a subtle hover, no blue fill. */
+button.ghost { background: transparent; color: var(--vscode-descriptionForeground); border-color: transparent; }
+button.ghost:hover:enabled { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
 /* Request buttons stay pinned above the composer, under the approval at the end of the conversation; the bar disappears when none is showing. */
 #run-actions { display: flex; flex-wrap: wrap; gap: 0.375rem; }
 #run-actions button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
@@ -124,11 +134,26 @@ form {
   flex-direction: column;
   gap: 0.375rem;
   min-width: 0;
-  padding-top: 0.375rem;
-  border-top: 0.0625rem solid var(--vscode-panel-border);
+  padding-top: 0.25rem;
 }
 
 form > label { position: absolute; width: 0.0625rem; height: 0.0625rem; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+#composer-context { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+/* One rounded input box like Cursor's composer: the text area and its toolbar share one border. */
+.composer { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; padding: 0.5rem; border: 0.0625rem solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 0.5rem; background: var(--vscode-input-background); }
+.composer:focus-within { border-color: var(--vscode-focusBorder); }
+.composer textarea { height: 2.5rem; min-height: 2.5rem; padding: 0.125rem 0.25rem; border: 0; background: transparent; }
+.composer textarea:focus-visible { outline: none; }
+/* Cursor-style toolbar: mode label and small pills on the left, one round send button on the right. */
+.composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; min-width: 0; }
+.mode-pill { padding: 0.125rem 0.5rem; font-size: 0.6875rem; font-weight: 600; color: var(--vscode-foreground); border: 0.0625rem solid var(--vscode-panel-border); border-radius: 0.375rem; }
+button.pill { padding: 0.125rem 0.5rem; font-size: 0.6875rem; border-radius: 0.375rem; }
+.composer .send { width: 1.75rem; height: 1.75rem; padding: 0; border-radius: 50%; font-size: 0.9375rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.context-chip { display: inline-flex; align-items: center; gap: 0.375rem; max-width: 14rem; padding: 0.125rem 0.125rem 0.125rem 0.375rem; border: 0.0625rem solid var(--vscode-panel-border); border-radius: 0.375rem; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); color: var(--vscode-foreground); font-size: 0.75rem; }
+.chip-type { flex-shrink: 0; padding: 0 0.25rem; border-radius: 0.1875rem; font-size: 0.5625rem; font-weight: 700; color: var(--vscode-textLink-foreground); background: var(--vscode-textCodeBlock-background); }
+.context-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-chip button { width: 1.125rem; height: 1.125rem; flex-shrink: 0; padding: 0; border: 0.0625rem solid currentColor; border-radius: 0.25rem; background: transparent; color: inherit; line-height: 1; font-size: 0.75rem; display: inline-flex; align-items: center; justify-content: center; }
 
 textarea {
   box-sizing: border-box;
@@ -156,6 +181,13 @@ textarea::placeholder {
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+.composer-end { display: flex; align-items: center; gap: 0.375rem; margin-left: auto; }
+#context-meter { width: 1rem; height: 1rem; display: inline-flex; flex-shrink: 0; color: var(--vscode-descriptionForeground); }
+#context-meter svg { display: block; width: 1rem; height: 1rem; }
+.meter-track, .meter-value { fill: none; stroke: currentColor; stroke-width: 1.5; }
+.meter-track { opacity: 0.35; }
+.meter-value { stroke-linecap: round; transform: rotate(-90deg); transform-origin: 8px 8px; stroke-dasharray: 37.7; stroke-dashoffset: 37.7; }
 
 .composer-actions button { padding: 0.25rem 0.625rem; font-size: 0.75rem; }
 
@@ -210,6 +242,14 @@ button:focus-visible, textarea:focus-visible {
 .cline-diff-prefix { width: 1.25rem; flex-shrink: 0; text-align: center; padding: 0.125rem 0; user-select: none; }
 .cline-diff-code { white-space: pre; padding: 0.125rem 0.5rem 0.125rem 0; }
 .cline-diff-eof { color: var(--vscode-descriptionForeground); font-size: 0.6875rem; padding: 0.25rem; }
+
+#agent-questions { display: flex; flex-direction: column; gap: 0.5rem; }
+.question-card { margin: 0; padding: 0.5rem; border: 0.0625rem solid var(--vscode-textLink-foreground); border-radius: 0.5rem; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); }
+.question-card legend { padding: 0 0.25rem; color: var(--vscode-textLink-foreground); font-size: 0.6875rem; font-weight: 700; }
+.question-card p { margin: 0.25rem 0 0.5rem; }
+button.choice { display: block; width: 100%; margin-top: 0.25rem; text-align: left; border-radius: 0.375rem; background: transparent; color: var(--vscode-foreground); border-color: var(--vscode-panel-border); }
+button.choice[aria-checked="true"] { background: var(--vscode-textLink-foreground); color: var(--vscode-editor-background, #fff); border-color: var(--vscode-textLink-foreground); }
+button.question-send { align-self: flex-end; }
 
 @media (max-height: 30rem) {
   header h1, form > label, .composer-actions .hint { display: none; }
