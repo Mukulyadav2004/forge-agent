@@ -28,10 +28,11 @@ export async function checkCommand(options: { client: Client; frame: Frame }): P
   assert.ok(long.output.length < 16_200 && long.total_output_characters > 60_000);
   assert.match(long.output, /characters omitted[\s\S]*LAST-LINE/u, 'The end of the output, where errors usually are, is kept.');
   assert.ok(long.context_budget.used > 0);
-  // failing, sleep and long output are three commands that ran (the refused cwd calls do not count), so a fourth is refused.
-  const fourth = await run({ command: 'echo one too many' });
-  assert.equal(fourth.result.isError, true, 'A request runs at most three commands.');
-  assert.match(JSON.stringify(fourth.result.content), /already ran 3 commands, the limit per request/u);
+  // failing, sleep and long output are three commands that ran (the refused cwd calls do not count); five more reach the limit of eight.
+  for (let index = 4; index <= 8; index += 1) assert.equal((await run({ command: `echo command ${index}` })).data?.exit_code, 0, `Command ${index} of 8 runs.`);
+  const ninth = await run({ command: 'echo one too many' });
+  assert.equal(ninth.result.isError, true, 'A request runs at most eight commands.');
+  assert.match(JSON.stringify(ninth.result.content), /already ran 8 commands, the limit per request/u);
   const row = options.frame.locator('#messages .activity-command').filter({ hasText: 'echo checked' });
   await row.waitFor();
   assert.match(await row.innerText(), /^Ran\s+echo checked; echo warn >&2; exit 3\s+exit 3 after [\d.]+ s \(\+\d+ chars\)[\s\S]*Check the exit code/u);

@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 
 /** Bounds for one agent command: it runs in the foreground, without input, and is stopped at its timeout. */
-export const COMMAND_LIMITS = { per_request: 3, command_characters: 2000, timeout_seconds_default: 60, timeout_seconds_max: 300, output_characters: 16000 };
+/** per_request: 8 fits setup (venv, install), a test run, a fix and a rerun; each command is still approved one at a time. */
+export const COMMAND_LIMITS = { per_request: 8, command_characters: 2000, timeout_seconds_default: 60, timeout_seconds_max: 300, output_characters: 16000 };
 
 export interface CommandResult {
   exit_code: number | null;

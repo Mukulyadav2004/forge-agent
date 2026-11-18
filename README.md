@@ -11,7 +11,7 @@ A coding agent for VS Code that runs on [TrueForge](https://github.com/truefound
 - **Ask in the sidebar, or select code and press ⌘⌥F** to change just that selection.
 - **Shows its work as it goes.** Every search, file read, edit and command appears in an activity feed, with the agent's reason and how much context it used.
 - **You decide what gets written.** Edits are staged as diffs. Accept or reject each hunk, apply a file or everything, and undo the last apply.
-- **Runs your tests when you say so.** Commands always ask first and show the exact command and folder. At most three per request.
+- **Runs your tests when you say so.** Commands always ask first and show the exact command and folder. If the tests need setup, it proposes a virtual environment inside the project and the project's declared test dependencies, one approved command at a time; never system-wide installs. At most eight commands per request.
 - **Keeps context in check.** Each request gets a 200,000-character budget for what it reads; long conversations are compacted by TrueForge.
 - **Survives a bad model.** Temporary errors are retried; after that the session continues on a fallback model you choose.
 
