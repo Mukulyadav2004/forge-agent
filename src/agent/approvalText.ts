@@ -6,6 +6,7 @@ export interface PendingToolCall { name: string; arguments: string }
 /** Rebuilds streamed tool calls: TrueForge sends a call as deltas, the first naming it and later ones adding argument text by index. */
 export class StreamedToolCalls {
   private readonly calls = new Map<string, PendingToolCall & { id?: string }>();
+  private readonly complete = new Map<string, PendingToolCall>();
   add(messageId: string, parts: readonly { index: number; id?: string; function?: { name?: string; arguments?: string } }[]): void {
     for (const part of parts) {
       const key = `${messageId}:${part.index}`;
@@ -14,12 +15,21 @@ export class StreamedToolCalls {
       if (this.calls.size > 100) this.calls.delete(this.calls.keys().next().value as string);
     }
   }
+  /** The finished model message has the full name and arguments. Prefer it over streamed fragments. */
+  remember(messageId: string, calls: readonly { id: string; function: { name: string; arguments: string }; toolInfo: { type: string; name: string } }[]): void {
+    for (const call of calls) {
+      const name = call.toolInfo.type === "truefoundry-system" ? call.toolInfo.name : call.function.name;
+      this.complete.set(`${messageId}:${call.id}`, { name, arguments: call.function.arguments.slice(0, 1_000_000) });
+    }
+  }
   /** An approval names the call id and the message that produced it. */
   find(sourceEventId: string, id: string): PendingToolCall | undefined {
+    const finished = this.complete.get(`${sourceEventId}:${id}`);
+    if (finished) return finished;
     for (const [key, call] of this.calls) if (key.startsWith(`${sourceEventId}:`) && call.id === id) return { name: call.name, arguments: call.arguments };
     return undefined;
   }
-  clear(): void { this.calls.clear(); }
+  clear(): void { this.calls.clear(); this.complete.clear(); }
 }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;

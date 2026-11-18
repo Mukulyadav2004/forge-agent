@@ -1,5 +1,5 @@
 import { isHostMessage } from "../shared/messages.js";
-import type { ActivityEntry, ChatMessage, WebviewMessage } from "../shared/messages.js";
+import type { ActivityEntry, AgentQuestion, ChatMessage, ChatTab, ComposerSelection, WebviewMessage } from "../shared/messages.js";
 import { renderDiagrams, renderMarkdown } from './markdown.js';
 import { renderReviewPanel } from './reviewPanel.js';
 
@@ -27,6 +27,141 @@ if (
 }
 
 let pending = false;
+let attached: ComposerSelection[] = [];
+
+function chipName(selection: ComposerSelection): string {
+  const name = selection.path.split(/[\\/]/u).pop() || selection.path;
+  return `${name}:${selection.startLine}-${selection.endLine}`;
+}
+
+function renderAttachment(): void {
+  const box = document.getElementById('composer-context');
+  if (!(box instanceof HTMLElement)) return;
+  box.replaceChildren();
+  box.hidden = attached.length === 0;
+  attached.forEach((selection, index) => {
+    const chip = document.createElement('div');
+    chip.className = 'context-chip';
+    chip.title = `${selection.path}:${selection.startLine}-${selection.endLine}`;
+    const label = document.createElement('span');
+    label.textContent = chipName(selection);
+    const type = document.createElement('span');
+    type.className = 'chip-type';
+    type.textContent = (/\.([^./\\]+)$/u.exec(selection.path)?.[1] ?? '').slice(0, 3).toUpperCase();
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.title = 'Remove selection';
+    remove.setAttribute('aria-label', `Remove ${chipName(selection)}`);
+    remove.textContent = '×';
+    remove.addEventListener('click', () => {
+      attached = attached.filter((_, item) => item !== index);
+      renderAttachment();
+      vscode.postMessage({ type: 'clear_selection', index });
+    });
+    chip.append(type, label, remove);
+    box.append(chip);
+  });
+}
+
+let renderedChats = '';
+
+/** Fills the composer ring from the latest request: characters read, out of that request's limit. */
+let questionKey = "";
+function renderQuestions(questions: AgentQuestion[]): void {
+  const box = document.getElementById("agent-questions");
+  if (!(box instanceof HTMLElement)) return;
+  const key = JSON.stringify(questions);
+  if (key === questionKey) return;
+  questionKey = key;
+  box.replaceChildren();
+  box.hidden = questions.length === 0;
+  if (!questions.length) return;
+  const picked = new Map<string, string>();
+  const submit = document.createElement("button");
+  submit.type = "button";
+  submit.className = "question-send";
+  submit.textContent = "Send answer";
+  submit.disabled = true;
+  for (const [index, question] of questions.entries()) {
+    const card = document.createElement("fieldset");
+    card.className = "question-card";
+    const legend = document.createElement("legend");
+    legend.textContent = questions.length > 1 ? `Question ${index + 1}` : "Question";
+    const prompt = document.createElement("p");
+    prompt.textContent = question.question;
+    card.append(legend, prompt);
+    question.options.forEach((option, optionIndex) => {
+      const choice = document.createElement("button");
+      choice.type = "button";
+      choice.className = "choice";
+      choice.textContent = `${String.fromCharCode(65 + optionIndex)}. ${option}`;
+      choice.setAttribute("role", "radio");
+      choice.setAttribute("aria-checked", "false");
+      choice.addEventListener("click", () => {
+        picked.set(question.toolCallId, option);
+        card.querySelectorAll(".choice").forEach(button => button.setAttribute("aria-checked", button === choice ? "true" : "false"));
+        submit.disabled = picked.size !== questions.length;
+      });
+      card.append(choice);
+    });
+    box.append(card);
+  }
+  submit.addEventListener("click", () => {
+    submit.disabled = true;
+    vscode.postMessage({ type: "answer_question", answers: [...picked].map(([toolCallId, choice]) => ({ toolCallId, choice })) });
+  });
+  box.append(submit);
+}
+
+function renderContextMeter(activity: ActivityEntry[]): void {
+  const meter = document.getElementById('context-meter');
+  const value = meter?.querySelector('.meter-value');
+  if (!(meter instanceof HTMLElement) || !(value instanceof SVGCircleElement)) return;
+  let limit = 0;
+  let used = 0;
+  for (const entry of activity) {
+    if (entry.kind === 'request') { limit = entry.limit; used = 0; }
+    else if ('used' in entry && entry.used !== undefined) used = entry.used;
+  }
+  const ratio = limit > 0 ? Math.min(1, used / limit) : 0;
+  const length = 2 * Math.PI * 6;
+  value.style.strokeDasharray = String(length);
+  value.style.strokeDashoffset = String(length * (1 - ratio));
+  const label = limit > 0
+    ? `Context window: ${used.toLocaleString('en-US')} of ${limit.toLocaleString('en-US')} characters (${Math.round(ratio * 100)}%)`
+    : 'Context window: empty until the next request';
+  meter.title = label;
+  meter.setAttribute('aria-label', label);
+}
+
+function renderChats(chats: ChatTab[]): void {
+  const list = document.getElementById('chat-list');
+  if (!(list instanceof HTMLElement)) return;
+  const key = chats.map(chat => `${chat.id}:${chat.title}:${chat.active}:${chat.busy}`).join('|');
+  if (key === renderedChats) return;
+  renderedChats = key;
+  list.replaceChildren();
+  for (const chat of chats) {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = chat.busy ? 'chat-tab busy' : 'chat-tab';
+    tab.textContent = chat.title;
+    tab.title = chat.title;
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', chat.active ? 'true' : 'false');
+    tab.addEventListener('click', () => vscode.postMessage({ type: 'select_chat', id: chat.id }));
+    list.append(tab);
+  }
+}
+
+document.getElementById('new-chat-button')?.addEventListener('click', () => vscode.postMessage({ type: 'new_chat' }));
+document.getElementById('spin-agents-button')?.addEventListener('click', () => {
+  const draft = input instanceof HTMLTextAreaElement ? input.value : '';
+  vscode.postMessage({ type: 'spin_agents', text: draft });
+});
+document.getElementById('add-selection-button')?.addEventListener('click', () => {
+  vscode.postMessage({ type: 'add_selection' });
+});
 document.getElementById("copy-mcp-button")?.addEventListener("click", () => {
   vscode.postMessage({ type: "copy_mcp_connection" });
 });
@@ -266,7 +401,7 @@ form.addEventListener("submit", (event) => {
   pending = true;
   awaitingAck = true;
   updateComposer();
-  vscode.postMessage({ type: "send_message", text });
+  vscode.postMessage({ type: "send_message", text, ...(attached.length ? { selections: attached } : {}) });
 });
 
 conversation.addEventListener('click', event => {
@@ -300,10 +435,23 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (!isHostMessage(event.data)) {
     return;
   }
+  if (event.data.type === 'focus_composer') {
+    if (input instanceof HTMLTextAreaElement) input.focus();
+    return;
+  }
+  if (event.data.type === 'attach_selection') {
+    attached = event.data.selections;
+    renderAttachment();
+    if (input instanceof HTMLTextAreaElement) input.focus();
+    return;
+  }
 
   // Follow new output only when the reader is already at the bottom, so scrolling back to read is not interrupted.
   const scroller = document.getElementById('task-content');
   const following = !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+  renderChats(event.data.chats);
+  renderQuestions(event.data.questions);
+  renderContextMeter(event.data.activity);
   renderTimeline({ messages: event.data.messages, activity: event.data.activity, complete: !event.data.busy });
   const reviewPanel = document.getElementById('review-panel');
   const reviewWasHidden = reviewPanel?.hidden ?? true;
@@ -318,10 +466,12 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   else if (reviewPanel && reviewWasHidden && !reviewPanel.hidden) reviewPanel.scrollIntoView({ block: 'nearest' });
   if (awaitingAck && input instanceof HTMLTextAreaElement) {
     input.value = "";
+    attached = [];
+    renderAttachment();
     vscode.setState({ draft: "" });
   }
   awaitingAck = false;
-  pending = event.data.busy || event.data.approval || event.data.review.busy;
+  pending = event.data.busy || event.data.approval || event.data.review.busy || event.data.questions.length > 0;
   if (status) status.textContent = event.data.status;
   if (cancel instanceof HTMLButtonElement) cancel.disabled = !event.data.busy && !event.data.approval;
   if (approve instanceof HTMLButtonElement) { approve.hidden = !event.data.approval; approve.disabled = event.data.busy; }

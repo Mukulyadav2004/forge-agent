@@ -2,7 +2,7 @@
   "$comment": "Forge Agent's TrueForge agent definition, sent inline with every new session (POST /api/v1/sessions) and model switch (PATCH). Filled in at run time: model.name from the forgeAgent.model setting (or forgeAgent.fallbackModel), the editor MCP server name (one per VS Code window), and instructions from src/agent/instructions.ts. Print the full spec with: pnpm run agent:spec",
   "config": {
     "generativeUi": { "enabled": false },
-    "askUserQuestions": { "enabled": false },
+    "askUserQuestions": { "enabled": true },
     "dynamicSubAgents": { "enabled": false },
     "sandbox": { "enabled": false },
     "webSearch": { "enabled": false },

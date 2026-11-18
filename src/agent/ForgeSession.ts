@@ -68,6 +68,23 @@ export class ForgeSession {
     catch (error) { this.trace.fail(); throw error; }
     finally { if (!this.paused) this.trace.finish(); }
   }
+  /** Resumes a turn paused on ask_user_question. Each event is the option the user picked. */
+  async respond(events: TrueForgeApi.UserToolResponseInputEvent[]): Promise<void> {
+    if (!this.sessionId || !this.turnId || !this.paused || !events.length) throw new Error('No paused TrueForge turn is waiting for an answer.');
+    this.cancelled = false;
+    try {
+      await this.client.sessions.createTurnEvents(this.sessionId, this.turnId, { events });
+      if (this.cancelled) { if (this.paused) { this.paused = false; this.trace.abandoned(); } return; }
+      this.paused = false;
+      const stream = await this.client.sessions.subscribeToTurn(this.sessionId, this.turnId, { afterEventId: this.lastEventId });
+      await this.readStream(stream);
+    } catch (error) {
+      if (this.paused) ForgeSession.observe({ ts: new Date().toISOString(), taskId: this.sessionId, sessionId: this.sessionId, turnId: this.turnId, event: 'error', outcome: 'error', errorType: 'RequestError', message: 'TrueForge operation failed; details omitted.' });
+      else this.trace.fail();
+      throw error;
+    }
+    finally { if (!this.paused) this.trace.finish(); }
+  }
   async approve(events: TrueForgeApi.UserToolApprovalInputEvent[]): Promise<void> {
     if (!this.sessionId || !this.turnId || !this.paused || !events.length) throw new Error('No paused TrueForge turn is available for approval.');
     this.cancelled = false;
