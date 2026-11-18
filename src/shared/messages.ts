@@ -24,6 +24,8 @@ export type ActivityEntry =
   | { kind: 'list'; glob: string; count: number; used?: number }
   | { kind: 'command'; command: string; cwd: string; exitCode: number | null; timedOut: boolean; cancelled: boolean; durationMs: number; reason?: string; used?: number }
   | { kind: 'context'; path: string; startLine: number; endLine: number; used?: number }
+  /** An editor tool refused or failed; `message` is what the agent was told. */
+  | { kind: 'refused'; tool: string; message: string }
   /** TrueForge summarised the conversation: size that triggered it, the threshold, and the size of the next model call afterwards. */
   | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number };
 
@@ -40,6 +42,7 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     case 'list': return text('glob') && count('count');
     case 'command': return text('command') && text('cwd') && (value.exitCode === null || count('exitCode')) && typeof value.timedOut === 'boolean' && typeof value.cancelled === 'boolean' && count('durationMs');
     case 'context': return text('path') && count('startLine') && count('endLine');
+    case 'refused': return text('tool') && text('message');
     case 'compaction': return count('contextTokens') && count('thresholdTokens') && typeof value.done === 'boolean' && (value.durationMs === undefined || count('durationMs')) && (value.afterTokens === undefined || count('afterTokens'));
     default: return false;
   }

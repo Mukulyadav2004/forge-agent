@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { open, realpath, stat } from 'node:fs/promises';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, normalize, relative, resolve, sep } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import type { CallToolResult, ServerRequest, ServerNotification } from '@modelcontextprotocol/sdk/types.js';
@@ -36,8 +36,10 @@ export class EditorBridge implements vscode.Disposable {
   readonly onDidActivity = this.activityEvents.event;
   private budgetUsed = 0;
   get budget(): { used: number; limit: number } { return { used: this.budgetUsed, limit: CONTEXT_BUDGET }; }
+  /** The one file an Edit Selection request may change; other files are refused until the next request. */
+  private editScope: string | undefined;
   /** Called once per user request (not for approvals or retries of it). */
-  beginRequest(): void { this.budgetUsed = 0; this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
+  beginRequest(scope?: string): void { this.budgetUsed = 0; this.editScope = scope; this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
   private remaining(): number { return Math.max(0, CONTEXT_BUDGET - this.budgetUsed); }
   private budgetNote(): string { return `Context budget: ${this.budgetUsed.toLocaleString('en-US')} of ${CONTEXT_BUDGET.toLocaleString('en-US')} characters used for this request.`; }
   private budgetError(): Error { return new Error(`${this.budgetNote()} Too little remains for this call. Answer from the evidence you already have and label anything unverified, or ask the user to continue in a new message.`); }
@@ -150,7 +152,11 @@ export class EditorBridge implements vscode.Disposable {
     const server = new McpServer({ name: 'forge-editor', version: '0.0.1' });
     const register = <S extends z.ZodRawShape>(name: ToolName, config: { description: string; inputSchema: S; annotations: { readOnlyHint: boolean } }, handler: (input: z.output<z.ZodObject<S>>, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => Promise<CallToolResult>) => {
       const schema = z.object(config.inputSchema);
-      return server.registerTool<z.ZodRawShape, typeof schema>(name, { ...config, inputSchema: schema }, (input, extra) => this.options.log.tool({ name, input, signal: extra.signal, run: () => handler(input, extra) }));
+      return server.registerTool<z.ZodRawShape, typeof schema>(name, { ...config, inputSchema: schema }, (input, extra) => this.options.log.tool({ name, input, signal: extra.signal, run: async () => {
+        // A refused call is shown in the feed too; otherwise the user sees an approval and then nothing.
+        try { return await handler(input, extra); }
+        catch (error) { this.activityEvents.fire({ kind: 'refused', tool: name, message: (error instanceof Error ? error.message : 'The tool call failed.').slice(0, 300) }); throw error; }
+      } }));
     };
     register('search_code', { description: 'Search saved workspace text. Returns hits grouped by file with line numbers, up to three excerpts per file, observed folder counts and a next-step hint. Run one focused search per fact you need (for example where a name is defined, then where it is registered, imported or called); a distinctive identifier finds far fewer, better hits than a common word. Literal and case-insensitive by default; set regex to true for patterns such as alternatives (name_a|name_b). Use glob to filter paths and narrow incomplete searches. Then open each relevant hit with read_file around its line number.', inputSchema: SearchInputSchema.shape, annotations: { readOnlyHint: true } }, async (input, extra) => this.searchCode({ ...input, signal: extra.signal }));
     register('read_file', { description: 'Read numbered lines from a workspace file: 200 lines from start_line by default, at most 500 per call. Returns the actual range, total_lines, whether more lines follow, and the base_revision that propose_edit needs. When a search hit or other evidence gives a line number, start a few lines before it and read to the end of the enclosing block instead of starting at line 1; continue with a later start_line if the block is cut off.', inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
@@ -177,6 +183,7 @@ export class EditorBridge implements vscode.Disposable {
       return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${this.budgetNote()}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length, context_budget: this.budget } };
     });
     register('run_command', { description: 'Run one non-interactive shell command in the workspace, such as a test, lint or type check, after the user approves its exact text. Prefer the narrowest command that checks your change (for example one test file). Returns the exit code, duration and combined output; long output keeps the start and the end. There is no input, so prompts, servers and watch modes run until the timeout. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit rather than editing through commands.', inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).default(COMMAND_LIMITS.timeout_seconds_default), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: false } }, async ({ command, cwd, timeout_seconds, reason }, extra) => {
+      if (this.editScope !== undefined) throw new Error(`This is an inline edit of ${this.editScope}; commands are not part of it. Stage the edit, then tell the user which check to run.`);
       const root = vscode.workspace.workspaceFolders?.[0];
       if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');
       const rootPath = await realpath(root.uri.fsPath);
@@ -204,6 +211,7 @@ export class EditorBridge implements vscode.Disposable {
       return { content: [{ type: 'text', text: `${listed}${found.length > 100 ? '\nMore files match; narrow the glob to see them.' : ''}\n${this.budgetNote()}` }] };
     });
     register('propose_edit', { description: 'Stage an edit for the user to review; nothing is written until they accept it. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the exact current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line }) => {
+      if (this.editScope !== undefined && normalize(path).replace(/^\.\//u, '') !== this.editScope) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not stage changes to other files; mention any other change you think is needed in your reply instead.`);
       // old_text must match exactly once, so it locates the change unambiguously; line numbers sent with it are only hints and are ignored.
       const ignored = old_text === undefined ? [] : Object.entries({ start_line, end_line, insert_line }).filter(([, value]) => value !== undefined).map(([name]) => name);
       if (old_text === undefined && (start_line === undefined) !== (end_line === undefined)) throw new Error('Provide both start_line and end_line to replace lines, or use old_text or insert_line.');

@@ -22,6 +22,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private readonly toolCalls = new StreamedToolCalls();
   /** The last failed turn's model error, and the user input that turn answered, so it can be retried. */
   private turnError: string | undefined;
+  private editScope: string | undefined;
   private lastInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] | undefined;
   private readonly messages: ChatMessage[] = [];
   private readonly inspectedFiles: FileEvidence[] = [];
@@ -36,8 +37,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       getEditorManifest: (namePrefix: string) => Promise<TrueForgeApi.RemoteMcpServerManifest>;
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
-      /** Starts a fresh context budget for a new user request. */
-      beginRequest: () => void;
+      /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
+      beginRequest: (scope?: string) => void;
       edits: EditService;
     },
   ) {}
@@ -114,6 +115,8 @@ Selected lines ${selection.start.line + 1}-${selection.end.line + (selection.end
 ${selectedText}`;
     this.messages.push({ id: randomUUID(), role: "user", text });
     await vscode.commands.executeCommand("forgeAgent.open");
+    // The user chose one file; the editor tools refuse edits to any other file for this request.
+    this.editScope = vscode.workspace.asRelativePath(document.uri, false);
     await this.run([{ type: "user.message", content: text }]);
   }
   async newTask(): Promise<void> {
@@ -237,7 +240,7 @@ ${selectedText}`;
     this.busy = true; this.status = "Connecting to TrueForge…"; this.publish();
     try {
       this.actions.edits.beginTurn();
-      if (!approvals) this.actions.beginRequest();
+      if (!approvals) { this.actions.beginRequest(this.editScope); this.editScope = undefined; }
       const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
       const feedback = input?.length && input.every(event => event.type === 'user.message') ? this.reviewFeedback.message() : undefined;
       if (feedback) preparedInput.push({ type: 'user.message', content: feedback });
@@ -335,7 +338,6 @@ ${selectedText}`;
     <button id="copy-mcp-button" type="button">Copy MCP connection</button>
     <button id="select-model-button" type="button">Select model</button>
     <span class="badge" id="status" role="status">Ready</span>
-    <div><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve</button> <button id="deny-button" type="button" hidden>Deny</button></div>
   </header>
   <main id="task-content" aria-label="Task workspace">
   <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>
@@ -345,6 +347,7 @@ ${selectedText}`;
     <p class="empty-state">Your messages will appear here.</p>
   </div>
   </main>
+  <div id="run-actions" role="group" aria-label="Current request"><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve</button> <button id="deny-button" type="button" hidden>Deny</button></div>
   <form id="message-form">
     <label for="message-input">Message</label>
     <textarea id="message-input" rows="4" placeholder="Try: Hello Forge!" spellcheck="false"></textarea>

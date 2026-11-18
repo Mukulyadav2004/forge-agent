@@ -37,7 +37,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     openFile: options => bridge.openFile(options),
     architectureContext: () => bridge.architectureContext(),
-    beginRequest: () => bridge.beginRequest(),
+    beginRequest: scope => bridge.beginRequest(scope),
     edits,
   });
   context.subscriptions.push(bridge.onDidActivity(entry => provider.recordActivity(entry)));

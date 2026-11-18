@@ -33,4 +33,5 @@ export async function checkCommand(options: { client: Client; frame: Frame }): P
   assert.match(await row.innerText(), /Ran echo checked; echo warn >&2; exit 3: exit 3 after [\d.]+ s \(\+\d+ chars\)[\s\S]*Check the exit code/u);
   assert.ok((await options.frame.locator('#activity-list .activity-command').filter({ hasText: 'sleep 30' }).innerText()).includes('timed out'));
   assert.match(await options.frame.locator('#activity-count').innerText(), /\d+ commands? ·/u);
+  await options.frame.locator('#activity-list .activity-refused').filter({ hasText: 'run_command: cwd must stay inside the workspace.' }).waitFor();
 }
