@@ -119,7 +119,7 @@ export async function run(): Promise<void> {
     const responsiveness = Date.now(); await vscode.commands.executeCommand('forgeAgent.open');
     report.editor_command_ms = Date.now() - responsiveness; assert.ok(Number(report.editor_command_ms) < 1500, 'Editor command was blocked during generation.');
     await frame.locator('body').screenshot({ path: join(config.directory, 'streaming.png') });
-    const clicked = Date.now(); await frame.getByRole('button', { name: 'Cancel', exact: true }).click();
+    const clicked = Date.now(); await frame.locator('#cancel-button').click();
     await frame.locator('#message-input:not([disabled])').waitFor({ timeout: 10_000 });
     report.cancel_to_input_enabled_ms = Date.now() - clicked;
     const stopped = Date.now() + 10_000;
@@ -142,7 +142,7 @@ export async function run(): Promise<void> {
     report.error = error instanceof Error ? error.message : String(error);
     if (frame) {
       await frame.locator('body').screenshot({ path: join(config.directory, 'error.png') }).catch(() => undefined);
-      const cancel = frame.getByRole('button', { name: 'Cancel', exact: true });
+      const cancel = frame.locator('#cancel-button');
       if (await cancel.isVisible() && await cancel.isEnabled()) await cancel.click().catch(() => undefined);
     }
     report.git_status_after = git(['status', '--porcelain']); report.workspace_hash_after = digest();

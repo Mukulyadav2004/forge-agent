@@ -133,10 +133,11 @@ src/tools/EditorBridge.ts      MCP tools: list_files, read_file,
 src/edits/review.ts            review schemas
 src/edits/EditService.ts       proposals, transactions, undo
 src/edits/lineChanges.ts       bounded local hunk computation
-src/context/projectContext.ts bounded architecture context
+src/context/projectContext.ts project instruction files and compaction reserve
 src/workspace/WorkspaceFiles.ts workspace/file safety
 src/editor/ClineEditPreview.ts diff preview adapted from Cline (Apache-2.0)
-src/webview/ClineDiffLines.ts   review rows adapted from Cline
+src/webview/components/        React sidebar UI adapted from Cline
+                               (Apache-2.0; see THIRD_PARTY_NOTICES.md)
 docs/BRIEF.md                  Round 1 tasks, scoring, deliverables
 docs/STEP-NOTES.md             what changed and why, per step
 docs/NOV-4-5-HANDOFF.md        earlier handoff notes

@@ -14,6 +14,7 @@ const profilePath = mkdtempSync(join(tmpdir(), "forge-agent-smoke-"));
 const workspacePath = join(profilePath, "workspace");
 mkdirSync(workspacePath);
 writeFileSync(join(workspacePath, "example.txt"), "original text\n");
+writeFileSync(join(workspacePath, "AGENTS.md"), "Smoke project instruction: prefer read_file.\n");
 writeFileSync(join(workspacePath, "second.txt"), "original second\n");
 writeFileSync(join(workspacePath, "third.txt"), Buffer.from('\uFEFForiginal third λ\r\n'));
 mkdirSync(join(workspacePath, 'src'));

@@ -2,22 +2,46 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { agentSpec, classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { evaluateSession } from '../scripts/eval-session.mjs';
-import { buildProjectContext, isArchitectureRequest } from '../out/context/projectContext.js';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { compactionTriggerTokens, instructionsBesideRead, loadProjectInstructions, renderProjectInstructions } from '../out/context/projectContext.js';
 import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
 import './observability/events.mjs';
+import './context/memory.mjs';
 
-test('architecture context is bounded and includes implementations across directories', async () => {
-  assert.equal(isArchitectureRequest('now make an arctecture mao out of it'), true);
-  assert.equal(isArchitectureRequest('hi'), false);
-  const paths = ['main.py', 'test_main.py', '.env', 'app/service.py', 'data/store.py', 'worker/run.py'];
-  const context = await buildProjectContext({ paths, readFile: async path => `${path}\nclass Component:\n    def run(self):\n        pass\n`.repeat(5000) });
-  assert.ok(context.text.length <= 64000);
-  assert.ok(context.files.length >= 3);
-  assert.ok(context.files.every(file => file.origin === 'context' && file.path !== 'test_main.py' && file.path !== '.env'));
-  assert.equal(context.files[0].path, 'main.py');
+test('project instructions follow Pi and OpenCode, and compaction reserves part of the model window', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'forge-context-'));
+  try {
+    await mkdir(join(root, 'pkg', 'src'), { recursive: true });
+    await writeFile(join(root, '.git'), 'gitdir: .\n');
+    await writeFile(join(root, 'AGENTS.md'), 'root rules\n');
+    await writeFile(join(root, 'CLAUDE.md'), 'ignored because AGENTS.md exists\n');
+    await writeFile(join(root, 'pkg', 'CLAUDE.md'), 'package rules\n');
+    await writeFile(join(root, 'pkg', 'src', 'AGENTS.md'), 'nested rules\n');
+    await writeFile(join(root, 'main.py'), 'class Component:\n    def run(self):\n        pass\n');
+    const loaded = await loadProjectInstructions({ workspaceRoot: join(root, 'pkg'), exists: existsSync, readFile: path => readFile(path, 'utf8'), home: null });
+    assert.match(loaded.text, /<project_instructions path="[^"]*AGENTS\.md">[\s\S]*root rules/u);
+    assert.match(loaded.text, /<project_instructions path="CLAUDE.md">[\s\S]*package rules/u);
+    assert.doesNotMatch(loaded.text, /ignored because AGENTS.md exists|class Component/u, 'Source files are not copied into the prompt, and CLAUDE.md loses to AGENTS.md in the same directory.');
+    const beside = instructionsBesideRead({ workspaceRoot: join(root, 'pkg'), filePath: join(root, 'pkg', 'src', 'service.py'), already: new Set(loaded.files.map(file => file.absolutePath)), exists: existsSync });
+    assert.deepEqual(beside, [resolve(root, 'pkg', 'src', 'AGENTS.md')]);
+    const rendered = renderProjectInstructions([{ path: 'AGENTS.md', text: 'x'.repeat(40_000) }]);
+    assert.ok(rendered.length <= 32_000);
+    assert.match(rendered, /truncated/u);
+  } finally { await rm(root, { recursive: true, force: true }); }
+  assert.equal(compactionTriggerTokens(undefined), undefined);
+  assert.equal(compactionTriggerTokens(0), undefined);
+  assert.equal(compactionTriggerTokens(10_000), 8_500, 'A window under 32,000 tokens keeps only the 15% share, as OpenCode does.');
+  assert.equal(compactionTriggerTokens(64_000), 48_000, 'OpenCode reserves at least 16,000 tokens.');
+  assert.equal(compactionTriggerTokens(128_000), 108_800);
+  assert.equal(compactionTriggerTokens(1_000_000), 850_000);
+  const wide = agentSpec({ model: 'test/model', contextLength: 1_000_000 });
+  assert.equal(wide.config.contextManagement?.compaction?.trigger?.value, 850_000);
+  assert.equal(agentSpec({ model: 'test/model' }).config.contextManagement?.compaction?.trigger, undefined);
 });
 
 test('approval prompts name the file, change and reason from the tool call arguments', () => {
@@ -106,8 +130,9 @@ test('the agent definition file is what TrueForge receives', () => {
   assert.deepEqual(spec.mcpServers, [{ name: 'forge-editor-abc', ...definition.editorServer }]);
   assert.deepEqual(spec.model, { name: 'test/model', params: { reasoningEffort: 'low' } });
   assert.ok(spec.instructions.startsWith('You are Forge Agent'));
-  assert.deepEqual(definition.editorServer.requireApprovalForTools, ['run_command'], 'Commands need approval; propose_edit only stages a diff the user accepts in Review changes.');
-  assert.deepEqual(definition.config.contextManagement.compaction, { enabled: true, trigger: { type: 'input_tokens', value: 100000 } }, 'Compaction is for long conversations: below 100k tokens a coding task keeps every file it read. TrueForge\'s default (80% of a 1M window) would rarely fire.');
+  assert.deepEqual(definition.editorServer.requireApprovalForTools, ['run_command', 'web_fetch'], 'Commands and network fetches need approval; propose_edit, write_file and apply_patch only stage diffs the user accepts in Review changes.');
+  for (const tool of ['read_file', 'grep', 'glob', 'propose_edit', 'write_file', 'apply_patch', 'run_command', 'command_output', 'web_fetch', 'todo_write']) assert.ok(definition.editorServer.enableTools.includes(tool), `${tool} is enabled`);
+  assert.deepEqual(definition.config.contextManagement.compaction, { enabled: true }, 'The file leaves the trigger unset. A session fills it from the model window: context length minus the larger of 15% and 16,000 tokens.');
   assert.deepEqual(agentSpec({ model: 'test/model' }).mcpServers, []);
 });
 
@@ -159,7 +184,7 @@ test('a failed turn can switch the session model with the full spec and retry wi
     const patch = requests.find(request => request.method === 'PATCH');
     assert.equal(patch.url, '/api/v1/sessions/s1');
     assert.equal(patch.body.agent.spec.model.name, 'backup/model');
-    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['run_command'], 'PATCH replaces the spec, so approvals must be resent.');
+    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['run_command', 'web_fetch'], 'PATCH replaces the spec, so approvals must be resent.');
     assert.equal(patch.body.agent.spec.config.dynamic_sub_agents.enabled, false);
     fail = false;
     await session.send([{ type: 'user.message', content: 'hello' }], { retry: true });
@@ -211,7 +236,7 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
     assert.equal(session.id, 'test-session');
     const createdSpec = requests.find(request => request.url === '/api/v1/sessions').body.agent.spec;
     assert.equal(createdSpec.config.generative_ui.enabled, false);
-    assert.equal(createdSpec.config.ask_user_questions.enabled, false);
+    assert.equal(createdSpec.config.ask_user_questions.enabled, true);
     assert.equal(createdSpec.model.params.reasoning_effort, 'medium');
     assert.ok(createdSpec.mcp_servers[0].enable_tools.includes('search_code'));
     assert.equal(events.filter(event => event.type === 'model.message.delta').map(event => event.content).join(''), 'Hello Forge');
@@ -223,19 +248,21 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
     const beforeReconnect = requests.length;
     const firstManifest = { type: 'remote', name: 'forge-editor-window-one', description: 'Test editor', url: 'http://127.0.0.1:43101/mcp', auth: { type: 'header', headers: { Authorization: 'Bearer test-first-token' } } };
     await new ForgeSession({ ...options, editorManifest: firstManifest }).send([{ type: 'user.message', content: 'First window' }]);
-    assert.equal(requests[beforeReconnect].url, '/api/v1/settings/mcp-servers');
-    assert.deepEqual(requests[beforeReconnect].body.manifest, firstManifest);
-    assert.equal(requests[beforeReconnect + 1].body.agent.spec.mcp_servers[0].name, firstManifest.name);
+    assert.equal(requests[beforeReconnect].url, '/api/v1/models', 'The session reads the model window before it registers the editor.');
+    assert.equal(requests[beforeReconnect + 1].url, '/api/v1/settings/mcp-servers');
+    assert.deepEqual(requests[beforeReconnect + 1].body.manifest, firstManifest);
+    assert.equal(requests[beforeReconnect + 2].body.agent.spec.mcp_servers[0].name, firstManifest.name);
     const reopenedManifest = { ...firstManifest, name: 'forge-editor-window-two', url: 'http://127.0.0.1:43102/mcp', auth: { type: 'header', headers: { Authorization: 'Bearer test-new-token' } } };
     const reopenIndex = requests.length;
     await new ForgeSession({ ...options, editorManifest: reopenedManifest }).send([{ type: 'user.message', content: 'Reopened project' }]);
-    assert.deepEqual(requests[reopenIndex].body.manifest, reopenedManifest);
-    assert.equal(requests[reopenIndex + 1].body.agent.spec.mcp_servers[0].name, reopenedManifest.name);
+    assert.equal(requests[reopenIndex].url, '/api/v1/models');
+    assert.deepEqual(requests[reopenIndex + 1].body.manifest, reopenedManifest);
+    assert.equal(requests[reopenIndex + 2].body.agent.spec.mcp_servers[0].name, reopenedManifest.name);
     assert.notEqual(firstManifest.name, reopenedManifest.name);
     reject = true;
     const failedRegistrationIndex = requests.length;
     await assert.rejects(new ForgeSession({ ...options, editorManifest: reopenedManifest }).send([{ type: 'user.message', content: 'Registration must succeed first' }]));
-    assert.equal(requests.length, failedRegistrationIndex + 1);
+    assert.equal(requests.length, failedRegistrationIndex + 2, 'The model lookup and the editor registration are both attempted, and the registration error stops session creation.');
     await assert.rejects(new ForgeSession(options).send([{ type: 'user.message', content: 'fail' }]));
     assert.throws(() => new ForgeSession({ ...options, baseUrl: 'https://example.com' }), /local/);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
@@ -253,6 +280,7 @@ test('SDK approvals resume a paused turn with a cursor, retry rejected decisions
     const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
     requests.push({ method: req.method, url: req.url, body });
     const json = (value, status = 200) => res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify(value));
+    if (req.url === '/api/v1/models') { json({ data: [{ name: 'test/model', properties: { context_length: 128000 } }] }); return; }
     if (req.url === '/api/v1/sessions') { json({ data: { id: 'approval-session' } }); return; }
     if (req.url.endsWith('/cancel')) { json({}); return; }
     if (req.method === 'POST' && req.url.endsWith('/events')) {
@@ -307,7 +335,7 @@ test('SDK approvals resume a paused turn with a cursor, retry rejected decisions
   await session.approve([approve('tool-3', 'deny')]);
   assert.equal(session.awaitingApproval, false);
   assert.equal(turns, 1, 'Decisions must not create new turns');
-  const subscriptions = requests.filter(request => request.method === 'GET');
+  const subscriptions = requests.filter(request => request.method === 'GET' && request.url.includes('/subscribe'));
   assert.deepEqual(subscriptions.map(request => request.url), [
     '/api/v1/sessions/approval-session/turns/approval-turn-1/subscribe?after_event_id=paused-initial',
     '/api/v1/sessions/approval-session/turns/approval-turn-1/subscribe?after_event_id=paused-again',
@@ -337,6 +365,6 @@ test('SDK approvals resume a paused turn with a cursor, retry rejected decisions
   await session.cancel();
   heldResponse.writeHead(201, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data: [] }));
   await pending;
-  assert.equal(requests.filter(request => request.method === 'GET').length, 2, 'Cancellation must prevent a late decision from reopening the stream');
+  assert.equal(requests.filter(request => request.method === 'GET' && request.url.includes('/subscribe')).length, 2, 'Cancellation must prevent a late decision from reopening the stream');
   assert.equal(rows.filter(row => row.event === 'turn.end' && row.turnId === 'approval-turn-3').length, 1);
 });

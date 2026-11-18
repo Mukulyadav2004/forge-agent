@@ -97,7 +97,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
 
   const literalText = '<img src=x onerror="window.forgeInjected=true">';
   await input.fill(literalText);
-  await input.press("Meta+Enter");
+  await input.press("Enter");
   await frame.getByRole("log").getByText(literalText, { exact: true }).waitFor();
   assert.equal(await frame.getByRole("log").locator("img").count(), 0);
 
@@ -139,7 +139,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const client = new Client({ name: "forge-smoke", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(connection.url), { requestInit: { headers: { Authorization: connection.headers.Authorization } } }));
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'run_command', 'search_code']);
+  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['apply_patch', 'command_output', 'glob', 'grep', 'list_files', 'propose_edit', 'read_file', 'run_command', 'search_code', 'todo_write', 'web_fetch', 'write_file']);
   await checkSearch({ client, extensionUri: extension.extensionUri });
   await checkCommand({ client, frame: restoredFrame });
   const read = await client.callTool({ name: "read_file", arguments: { path: "example.txt" } });
@@ -164,20 +164,16 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const pendingRead = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
   const pendingRevision = (pendingRead.structuredContent as { base_revision: string }).base_revision;
   assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision: pendingRevision, new_text: 'held turn check\n', explanation: 'Pending during a held turn' } })).isError, undefined);
-  // Context budget: results report usage, and reads stop once one request has used 200,000 characters (a chat message later resets it).
+  // A read is capped per call. A later read of the same file still runs; there is no per-request character budget that refuses it.
   const budgetProbe = vscode.Uri.joinPath(folder.uri, 'budget-probe.txt');
   await vscode.workspace.fs.writeFile(budgetProbe, new TextEncoder().encode(Array.from({ length: 4000 }, (_, index) => `line ${index} ${'x'.repeat(90)}`).join('\n')));
-  let budgetRefusal = '';
-  let budgetUsed = 0;
-  for (let start = 1; start < 4000 && !budgetRefusal; start += 300) {
-    const result = await client.callTool({ name: 'read_file', arguments: { path: 'budget-probe.txt', start_line: start, end_line: start + 299 } });
-    if (result.isError) { budgetRefusal = JSON.stringify(result.content); continue; }
-    const used = (result.structuredContent as { context_budget: { used: number; limit: number } }).context_budget.used;
-    assert.ok(used > budgetUsed && used <= 200_000, `Budget use must grow and stay within the limit (${budgetUsed} -> ${used}).`);
-    budgetUsed = used;
-  }
-  assert.match(budgetRefusal, /Context budget: [\d,]+ of 200,000 characters used for this request\. Too little remains/u);
-  assert.ok(budgetUsed > 190_000, `The budget should be nearly spent before refusing (${budgetUsed}).`);
+  const wide = await client.callTool({ name: 'read_file', arguments: { path: 'budget-probe.txt', start_line: 1 } });
+  assert.equal(wide.isError, undefined);
+  const wideData = wide.structuredContent as { truncated: boolean; text: string; end_line: number; total_lines: number };
+  assert.equal(wideData.truncated, true);
+  assert.ok(wideData.text.length <= 60_000 && wideData.end_line < wideData.total_lines, 'One read stops at its own character cap.');
+  const again = await client.callTool({ name: 'read_file', arguments: { path: 'budget-probe.txt', start_line: wideData.end_line + 1, end_line: wideData.end_line + 20 } });
+  assert.equal(again.isError, undefined, 'A later read is not blocked by a per-request character budget.');
   await vscode.workspace.fs.delete(budgetProbe);
   await client.close();
   const denied = await fetch(connection.url, { method: "POST" });
@@ -223,7 +219,8 @@ async function checkLiveRegistry(connection: { url: string; authorization: strin
 async function checkModelRecovery(browser: Browser): Promise<void> {
   const attemptedModels: string[] = [];
   const connectorNames: string[] = [];
-  let receivedArchitectureContext = false;
+  let receivedProjectInstructions = false;
+  let stuffedSource = false;
   let turnNumber = 0;
   let holdNextTurn = false;
   let sessionModel = '';
@@ -263,6 +260,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
       if (typeof spec !== "object" || spec === null || !("model" in spec)) throw new Error("Missing model");
       const model = spec.model;
       if (typeof model !== "object" || model === null || !("name" in model) || typeof model.name !== "string") throw new Error("Missing model name");
+      receivedProjectInstructions ||= "instructions" in spec && typeof spec.instructions === "string" && spec.instructions.includes('<project_instructions path="AGENTS.md">') && spec.instructions.includes("Smoke project instruction");
       attemptedModels.push(model.name);
       sessionModel = model.name;
       if (model.name === "test/old") {
@@ -274,7 +272,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     }
     const turnPayload: unknown = JSON.parse(Buffer.concat(chunks).toString());
     if (typeof turnPayload === 'object' && turnPayload !== null && 'input' in turnPayload && Array.isArray(turnPayload.input)) {
-      receivedArchitectureContext ||= turnPayload.input.some((message: unknown) => typeof message === 'object' && message !== null && 'content' in message && typeof message.content === 'string' && message.content.includes('Workspace source excerpts supplied by the editor'));
+      stuffedSource ||= turnPayload.input.some((message: unknown) => typeof message === 'object' && message !== null && 'content' in message && typeof message.content === 'string' && message.content.includes('Workspace source excerpts supplied by the editor'));
     }
     if (typeof turnPayload === 'object' && turnPayload !== null && 'previous_turn_id' in turnPayload) retryTurnIds.push(turnPayload.previous_turn_id);
     if (JSON.stringify(turnPayload).includes('Diff render check')) {
@@ -358,12 +356,12 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await frame.locator('#message-input:not([disabled])').waitFor();
     const contextSources = frame.locator('#messages .activity-context').last().locator('xpath=..').locator('.activity-context');
     await contextSources.first().waitFor();
-    assert.equal(await contextSources.count(), 3);
-    assert.equal(receivedArchitectureContext, true);
+    assert.equal(await contextSources.count(), 1, 'The workspace AGENTS.md is attached once, not a dump of source files.');
+    assert.match(await contextSources.first().innerText(), /AGENTS\.md/u);
+    assert.equal(receivedProjectInstructions, true);
+    assert.equal(stuffedSource, false, 'An architecture question does not have source excerpts pasted into it.');
     await frame.getByRole("button", { name: "Select model", exact: true }).click();
-    const picker = frame.page().locator(".quick-input-widget input");
-    await picker.fill("test/selected");
-    await picker.press("Enter");
+    await frame.getByRole("listbox", { name: "Models" }).getByRole("option", { name: "selected", exact: true }).click();
     await frame.locator("#status").getByText("Model: test/selected", { exact: true }).waitFor();
     assert.equal(vscode.workspace.getConfiguration("forgeAgent").get<string>("model"), "test/selected");
     await config.update('model', 'test/broken', vscode.ConfigurationTarget.Workspace);
@@ -372,8 +370,8 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await input.fill('Fallback check');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.getByRole('log').getByText(/Switching to the fallback model/).waitFor();
-    assert.equal(await frame.locator('#messages .activity-request').count(), 1, 'A new request starts a fresh context budget in the feed.');
-    assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request · context 0 of 200k chars$/u);
+    assert.equal(await frame.locator('#messages .activity-request').count(), 1, 'A new chat starts its own request line.');
+    assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request$/u);
     await frame.getByRole('log').getByText('Recovered with the corrected model.', { exact: true }).waitFor();
     await frame.locator('#message-input:not([disabled])').waitFor();
     assert.ok((await frame.getByRole('log').innerText()).includes('API key not valid'), 'The error must be shown in plain words.');

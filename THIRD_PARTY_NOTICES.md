@@ -19,7 +19,7 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 
 - Upstream, source checkout, exact commit and licence: the same Cline source point recorded above.
 - Source: `apps/vscode/webview-ui/src/components/chat/DiffEditRow.tsx`, specifically `DiffLine` and the old/new line counters in `FileBlock`.
-- Adapted implementation: `src/webview/ClineDiffLines.ts`; integrated by `src/webview/reviewPanel.ts` with styles in `media/sidebar.css`.
+- Adapted implementation: originally `src/webview/ClineDiffLines.ts`; now `src/webview/components/review/DiffLines.tsx` (see "Cline sidebar chat UI" below), integrated by `src/webview/components/review/ReviewPanel.tsx`.
 - Retained behavior: changed-line tints and indicator bars, line-number gutter, explicit addition/deletion prefixes, code content and separate counters for removed/added lines.
 - Changes and reasons: ported React/Tailwind rendering to safe DOM nodes and VS Code theme variables; accepts the host's computed hunks instead of parsing model patch strings; preserves all code indentation after the single diff marker; handles CRLF and terminal-newline display explicitly. Like the upstream component's unknown-position behavior, line numbers are hidden after rejection/undo can invalidate proposed offsets. Cline gRPC services, file-opening dependencies and unused patch parsers are omitted.
 - Full native previews still use the Cline-derived virtual-document adapter. Hunk decisions and guarded apply/undo remain Forge Agent implementations.
@@ -28,8 +28,21 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 
 - Upstream, exact commit, copyright and Apache-2.0 licence: the same Cline source point recorded above.
 - Sources: `apps/vscode/webview-ui/src/components/chat/chat-view/components/layout/ChatLayout.tsx` and the content/footer structure in `apps/vscode/webview-ui/src/components/chat/ChatView.tsx`.
-- Adaptation: `media/sidebar.css` and the task-content wrapper in `src/sidebar/AgentViewProvider.ts`. Retains full-height grid, constrained scrolling content and a separate composer; ports styled-components/React markup to our existing CSS/DOM webview.
+- Adaptation: originally `media/sidebar.css` and the sidebar template; now `src/webview/components/chat/ChatView.tsx` and `src/webview/index.css` (see "Cline sidebar chat UI" below). Retains full-height grid, constrained scrolling content and a separate composer.
 - Forge-specific changes: compact setup/status controls, independently scrolling proposals with review actions outside that scroll area, space shared with conversation, and outer task scrolling when the panel is too short. Cline's React state, virtualized message list, SDK and provider runtime are not included.
+
+## Cline sidebar chat UI
+
+- Upstream: https://github.com/cline/cline; exact source commit `eff43e19b267e171f597ab03733bfed25090f72d`; copyright 2026 Cline Bot Inc.; Apache-2.0 licence preserved in `licenses/Cline-Apache-2.0.txt`.
+- Sources (under `apps/vscode/webview-ui/src/`): `components/chat/ChatView.tsx`, `chat-view/components/layout/*`, `ChatRow.tsx`, `task-header/TaskHeader.tsx` and `ContextWindow.tsx`, `ChatTextArea.tsx`, `chat-view/components/layout/ActionButtons.tsx`, `OptionsButtons.tsx`, `DiffEditRow.tsx`, `components/history/HistoryView.tsx`, `components/welcome/WelcomeSection.tsx` and the `@theme` VS Code variable mapping in `theme.css`.
+- Adapted in: `src/webview/components/**` and `src/webview/index.css`; each derived file carries a header naming its source. `src/webview/App.tsx` (host-state wiring) is Forge Agent's own code.
+- Changes: driven by Forge's postMessage protocol (`src/shared/messages.ts`) instead of Cline's gRPC/proto services and ExtensionState context; Forge activity entries, review panel, model menu, spin agents and agent tabs replace Cline's tool/message types; markdown stays on Forge's Marked + DOMPurify renderer; inline SVG icons instead of codicons/lucide; no virtualized list, styled-components, HeroUI or Cline runtime.
+
+## Webview runtime dependencies
+
+- `react@18.3.1`, `react-dom@18.3.1` and their dependency `scheduler@0.23.2` (MIT, Meta Platforms, Inc.): `licenses/React-MIT.txt` (identical for react and react-dom) and `licenses/scheduler-MIT.txt`.
+- `clsx@2.1.1` (MIT, Luke Edwards): `licenses/clsx-MIT.txt`.
+- `tailwindcss@4.1.13` (MIT, Tailwind Labs, Inc.) generates `out-webview/webview/main.css`, including its preflight base styles: `licenses/tailwindcss-MIT.txt`.
 
 ## Cline content-search helper
 

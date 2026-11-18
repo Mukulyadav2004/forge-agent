@@ -1,15 +1,17 @@
-import { classifyModelError, ForgeSession, listModelNames } from "../agent/ForgeSession";
+import { classifyModelError, deleteRemoteSession, ForgeSession, listModelNames } from "../agent/ForgeSession";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { isWebviewMessage } from "../shared/messages";
-import type { ActivityEntry, AgentQuestion, ChatMessage, ComposerSelection, FileEvidence, HostMessage } from "../shared/messages";
+import type { ActivityEntry, AgentQuestion, ChatMessage, ComposerSelection, FileEvidence, HostMessage, ModelMenu } from "../shared/messages";
 import { isAgentQuestion } from "../shared/messages";
-import { isArchitectureRequest } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import type { ReviewCommand } from '../edits/review';
 import { ReviewFeedback } from './ReviewFeedback';
 import { describeApproval, StreamedToolCalls } from '../agent/approvalText';
+import { estimateTokens, isArchitectureRequest, renderRestoredTranscript } from '../context/projectContext';
+import { latestTodos } from './TaskHistory';
+import type { StoredTask, TaskHistory } from './TaskHistory';
 
 /** One sidebar chat. The live fields on the provider always point at the active chat. */
 interface HeldChat {
@@ -29,6 +31,14 @@ interface HeldChat {
   activity: ActivityEntry[];
   heldSelections: ComposerSelection[];
   questions: Array<AgentQuestion & { threadId: string }>;
+  /** Latest model input tokens, and the model's context window once TrueForge reports it. */
+  contextTokens: number;
+  contextWindow: number;
+  /** Instruction files were already shown in this chat. */
+  notedInstructions: boolean;
+  createdAt: number;
+  /** Set when the chat was reopened from history: the saved TrueForge session to reattach, and the transcript for a new session if it is gone. */
+  restore?: { sessionId?: string; lastGoodTurnId?: string; model?: string; transcript: string };
 }
 
 export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -65,16 +75,29 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private composerReady = false;
   private queuedComposer: Extract<HostMessage, { type: 'attach_selection' | 'focus_composer' }> | undefined;
   private readonly addSelectionCommand = vscode.commands.registerCommand('forgeAgent.addSelection', () => { void this.addSelection(); });
+  /** Model names last read from local TrueForge, for the composer's model menu. */
+  private modelNames: string[] = [];
+  private contextTokens = 0;
+  private contextWindow = 0;
+  private modelsLoading = false;
+  private modelsError: string | undefined;
+  private readonly configListener = vscode.workspace.onDidChangeConfiguration(event => {
+    if (event.affectsConfiguration('forgeAgent.baseUrl')) void this.refreshModels();
+    else if (event.affectsConfiguration('forgeAgent.model')) this.publish();
+  });
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly actions: {
       getEditorManifest: (namePrefix: string) => Promise<TrueForgeApi.RemoteMcpServerManifest>;
       openFile: (options: { path: string; line: number }) => Promise<void>;
+      projectInstructions: () => Promise<{ text: string; files: Array<{ path: string; lines: number }> }>;
       architectureContext: () => Promise<string>;
-      /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
+      /** Resets the per-request character counter. `scope` limits staged edits to one file (Edit Selection). */
       beginRequest: (scope?: string) => void;
       edits: EditService;
+      /** Saved chats for this workspace. Without it, chats live only until the window reloads. */
+      history?: TaskHistory;
     },
   ) {
     const first = this.blankChat('Chat 1');
@@ -104,10 +127,15 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
           this.composerReady = true;
           if (!this.queuedComposer && this.heldSelections.length) this.queuedComposer = { type: 'attach_selection', selections: [...this.heldSelections] };
           this.flushComposer();
+          void this.refreshModels();
         } else if (value.type === "copy_mcp_connection") {
           void vscode.commands.executeCommand("forgeAgent.copyMcp");
         } else if (value.type === "select_model") {
           void this.selectModel();
+        } else if (value.type === "refresh_models") {
+          void this.refreshModels();
+        } else if (value.type === "set_model") {
+          if (this.modelNames.includes(value.name)) void this.applyModel(value.name);
         } else if (value.type === 'review') {
           void this.review(value.command);
         } else if (value.type === "open_file") {
@@ -121,8 +149,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
           void this.newTask();
         } else if (value.type === "select_chat") {
           this.selectChat(value.id);
+        } else if (value.type === "open_history") {
+          void this.openHistory(value.id);
+        } else if (value.type === "delete_history") {
+          void this.deleteHistory(value.id);
         } else if (value.type === "spin_agents") {
-          void this.spinAgents(value.text);
+          void this.spinAgents(value.text, value.count);
         } else if (value.type === "send_message") {
           const chat = this.activeChat();
           const text = value.text.trim();
@@ -164,7 +196,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
 
   dispose(): void {
     this.addSelectionCommand.dispose();
+    this.configListener.dispose();
     this.sync();
+    this.saveChats();
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = undefined; }
+    this.actions.history?.flushSync();
     for (const chat of this.chats) void chat.session?.cancel().catch(() => undefined);
     this.disposeView();
   }
@@ -173,8 +209,87 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     return {
       id: randomUUID(), title, session: undefined, busy: false, cancellationRequested: false, status: 'New chat ready',
       approvals: [], toolCalls: new StreamedToolCalls(), turnError: undefined, editScope: undefined, lastInput: undefined,
-      messages: [], inspectedFiles: [], activity: [], heldSelections: [], questions: [],
+      messages: [], inspectedFiles: [], activity: [], heldSelections: [], questions: [], contextTokens: 0, contextWindow: 0, notedInstructions: false, createdAt: Date.now(),
     };
+  }
+
+  private saveTimer: NodeJS.Timeout | undefined;
+  /** What each chat looked like when last saved, so streaming does not rewrite unchanged chats. */
+  private readonly savedFingerprints = new Map<string, string>();
+  private scheduleSave(): void {
+    if (!this.actions.history || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => { this.saveTimer = undefined; this.saveChats(); }, 500);
+  }
+  private fingerprint(chat: HeldChat): string {
+    const last = chat.messages[chat.messages.length - 1];
+    const lastActivity = chat.activity[chat.activity.length - 1];
+    return [chat.title, chat.messages.length, last?.id, last?.text.length, chat.activity.length, lastActivity ? JSON.stringify(lastActivity).length : 0,
+      chat.session?.id ?? chat.restore?.sessionId ?? '', chat.session?.lastTurnId ?? '', chat.contextTokens, chat.contextWindow].join('|');
+  }
+  /** Saves every open chat that has a conversation and changed since its last save. */
+  private saveChats(): void {
+    const history = this.actions.history;
+    if (!history) return;
+    for (const chat of this.chats) {
+      if (!chat.messages.length) continue;
+      const fingerprint = this.fingerprint(chat);
+      if (this.savedFingerprints.get(chat.id) === fingerprint) continue;
+      this.savedFingerprints.set(chat.id, fingerprint);
+      const task: StoredTask = {
+        version: 1, id: chat.id, title: chat.title, createdAt: chat.createdAt, updatedAt: Date.now(),
+        model: chat.session?.model ?? chat.restore?.model,
+        sessionId: chat.session?.id ?? chat.restore?.sessionId,
+        lastGoodTurnId: chat.session?.lastTurnId ?? chat.restore?.lastGoodTurnId,
+        messages: chat.messages, activity: chat.activity, inspectedFiles: chat.inspectedFiles, todos: latestTodos(chat.activity),
+        contextTokens: chat.contextTokens, contextWindow: chat.contextWindow,
+      };
+      history.save(task);
+    }
+  }
+  /** Reopens a saved chat. Its TrueForge session is reattached on the next message, or replaced by a new one that is given the transcript. */
+  private async openHistory(id: string): Promise<void> {
+    if (this.chats.some(chat => chat.id === id)) { this.selectChat(id); this.publish(); return; }
+    const task = await this.actions.history?.get(id);
+    if (!task) { this.status = 'That task is no longer in history.'; this.publish(); return; }
+    if (this.chats.some(chat => chat.id === id)) { this.selectChat(id); this.publish(); return; }
+    this.sync();
+    const active = this.activeChat();
+    const reuse = active && !active.messages.length && !active.busy && !active.approvals.length && !active.questions.length ? active : undefined;
+    if (!reuse && this.chats.length >= 8) { void vscode.window.showInformationMessage('Eight chats are open. That is the limit for now.'); return; }
+    const chat = this.blankChat((task.title.trim() || 'Restored task').slice(0, 80));
+    chat.id = task.id;
+    chat.createdAt = task.createdAt || task.updatedAt;
+    chat.messages = task.messages;
+    chat.activity = task.activity;
+    chat.inspectedFiles = task.inspectedFiles;
+    if (task.todos?.length && !latestTodos(chat.activity)) chat.activity.push({ kind: 'todo', todos: task.todos, at: chat.messages.length });
+    chat.contextTokens = task.contextTokens || estimateTokens(task.messages.map(message => message.text).join('\n'));
+    chat.contextWindow = task.contextWindow || 0;
+    chat.notedInstructions = true;
+    chat.restore = { sessionId: task.sessionId, lastGoodTurnId: task.lastGoodTurnId, model: task.model, transcript: renderRestoredTranscript(task.messages) };
+    chat.status = 'Restored from history. Send a message to continue this task.';
+    if (reuse) this.chats.splice(this.chats.indexOf(reuse), 1, chat);
+    else this.chats.push(chat);
+    this.savedFingerprints.set(chat.id, this.fingerprint(chat));
+    this.bindChat(chat);
+    this.publish();
+  }
+  /** Removes a saved chat, closing it if it is open and idle. */
+  private async deleteHistory(id: string): Promise<void> {
+    const open = this.chats.find(chat => chat.id === id);
+    if (open && (open.busy || open.approvals.length || open.questions.length)) { this.status = 'Stop this task before deleting it from history.'; this.publish(); return; }
+    if (open) {
+      this.sync();
+      const index = this.chats.indexOf(open);
+      this.chats.splice(index, 1);
+      if (!this.chats.length) this.chats.push(this.blankChat('Chat 1'));
+      if (this.activeId === id) this.bindChat(this.chats[Math.min(index, this.chats.length - 1)]!);
+    }
+    this.savedFingerprints.delete(id);
+    const sessionId = open?.session?.id ?? (await this.actions.history?.get(id))?.sessionId;
+    await this.actions.history?.delete(id).catch(() => undefined);
+    this.publish();
+    if (sessionId) void deleteRemoteSession({ baseUrl: vscode.workspace.getConfiguration('forgeAgent').get<string>('baseUrl', 'http://127.0.0.1:8790'), sessionId });
   }
 
   private activeChat(): HeldChat | undefined {
@@ -188,6 +303,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     chat.session = this.session; chat.busy = this.busy; chat.cancellationRequested = this.cancellationRequested; chat.status = this.status;
     chat.approvals = this.approvals; chat.toolCalls = this.toolCalls; chat.turnError = this.turnError; chat.editScope = this.editScope;
     chat.lastInput = this.lastInput; chat.messages = this.messages; chat.inspectedFiles = this.inspectedFiles; chat.activity = this.activity; chat.heldSelections = this.heldSelections; chat.questions = this.questions;
+    chat.contextTokens = this.contextTokens; chat.contextWindow = this.contextWindow;
   }
 
   /** Makes one stored chat the live one and restores its attached selections. */
@@ -196,6 +312,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     this.session = chat.session; this.busy = chat.busy; this.cancellationRequested = chat.cancellationRequested; this.status = chat.status;
     this.approvals = chat.approvals; this.toolCalls = chat.toolCalls; this.turnError = chat.turnError; this.editScope = chat.editScope;
     this.lastInput = chat.lastInput; this.messages = chat.messages; this.inspectedFiles = chat.inspectedFiles; this.activity = chat.activity; this.heldSelections = chat.heldSelections; this.questions = chat.questions;
+    this.contextTokens = chat.contextTokens; this.contextWindow = chat.contextWindow;
     this.queuedComposer = { type: 'attach_selection', selections: [...chat.heldSelections] };
     this.flushComposer();
   }
@@ -214,6 +331,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       this.session = chat.session; this.busy = chat.busy; this.cancellationRequested = chat.cancellationRequested; this.status = chat.status;
       this.approvals = chat.approvals; this.toolCalls = chat.toolCalls; this.turnError = chat.turnError; this.editScope = chat.editScope;
       this.lastInput = chat.lastInput; this.messages = chat.messages; this.inspectedFiles = chat.inspectedFiles; this.activity = chat.activity; this.heldSelections = chat.heldSelections; this.questions = chat.questions;
+      this.contextTokens = chat.contextTokens; this.contextWindow = chat.contextWindow;
     }
     this.publish();
   }
@@ -237,12 +355,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   }
 
   /** Starts several agents with one command. Each agent is its own chat. */
-  private async spinAgents(text: string): Promise<void> {
+  private async spinAgents(text: string, count?: number): Promise<void> {
     const reusable = this.activeChat();
     const reuse = Boolean(reusable && reusable.messages.length === 0 && !reusable.busy);
     const free = 8 - this.chats.length + (reuse ? 1 : 0);
     if (free < 2) { void vscode.window.showInformationMessage('Two agents need two free chats. Eight chats is the limit.'); return; }
-    const picked = await vscode.window.showQuickPick(['2', '3', '4'].filter(count => Number(count) <= free), { title: 'Spin agents', placeHolder: 'How many agents should run this command?' });
+    if (count !== undefined && count > free) { void vscode.window.showInformationMessage(`Only ${free} chats are free. Eight chats is the limit.`); return; }
+    const picked = count !== undefined ? String(count) : await vscode.window.showQuickPick(['2', '3', '4'].filter(option => Number(option) <= free), { title: 'Spin agents', placeHolder: 'How many agents should run this command?' });
     if (!picked) return;
     const command = text.trim() || (await vscode.window.showInputBox({ prompt: 'Command for every agent', placeHolder: 'What should each agent do?' }))?.trim();
     if (!command) return;
@@ -368,8 +487,28 @@ ${selectedText}`;
     }
     this.show(chat);
   }
+  private agentsRunning(): boolean {
+    return this.pumping || this.jobs.length > 0 || this.chats.some(chat => chat.busy || chat.approvals.length > 0 || chat.questions.length > 0) || this.actions.edits.state.busy;
+  }
+  /** Reads the configured models from local TrueForge for the composer's model menu. */
+  async refreshModels(): Promise<void> {
+    if (this.modelsLoading) return;
+    this.modelsLoading = true;
+    this.publish();
+    try {
+      const config = vscode.workspace.getConfiguration("forgeAgent");
+      this.modelNames = await listModelNames({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790") });
+      this.modelsError = this.modelNames.length ? undefined : "No models yet. Add a model provider in local TrueForge.";
+    } catch (error: unknown) {
+      this.modelsError = `Could not reach local TrueForge: ${error instanceof Error ? error.message : "unknown error"}`;
+    } finally {
+      this.modelsLoading = false;
+      this.publish();
+    }
+  }
+  /** Command palette fallback for Forge: Select Model; the composer uses its own menu. */
   async selectModel(): Promise<void> {
-    if (this.pumping || this.jobs.length > 0 || this.chats.some(chat => chat.busy || chat.approvals.length > 0 || chat.questions.length > 0) || this.actions.edits.state.busy) {
+    if (this.agentsRunning()) {
       void vscode.window.showInformationMessage("Finish or cancel the running agents before selecting a model.");
       return;
     }
@@ -377,8 +516,24 @@ ${selectedText}`;
       const config = vscode.workspace.getConfiguration("forgeAgent");
       const names = await listModelNames({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790") });
       if (!names.length) throw new Error("Add a model in local TrueForge first, then select it here.");
+      this.modelNames = names;
       const name = await vscode.window.showQuickPick(names, { title: "Select a TrueForge model", placeHolder: "Models configured in your local TrueForge server" });
       if (!name) return;
+      await this.applyModel(name);
+    } catch (error: unknown) {
+      this.status = error instanceof Error ? error.message : "Could not load TrueForge models.";
+      this.publish();
+      void vscode.window.showErrorMessage(this.status);
+    }
+  }
+  /** Saves the model where forgeAgent.model is already set and starts a fresh task on it. */
+  private async applyModel(name: string): Promise<void> {
+    if (this.agentsRunning()) {
+      void vscode.window.showInformationMessage("Finish or cancel the running agents before selecting a model.");
+      return;
+    }
+    try {
+      const config = vscode.workspace.getConfiguration("forgeAgent");
       const setting = config.inspect<string>("model");
       const target = setting?.workspaceFolderValue !== undefined ? vscode.ConfigurationTarget.WorkspaceFolder
         : setting?.workspaceValue !== undefined ? vscode.ConfigurationTarget.Workspace : vscode.ConfigurationTarget.Global;
@@ -386,19 +541,28 @@ ${selectedText}`;
       await this.actions.edits.newTask();
       this.reviewFeedback.clear();
       this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.activity.length = 0; this.toolCalls.clear();
-      this.turnError = undefined; this.lastInput = undefined; this.heldSelections.length = 0;
+      this.turnError = undefined; this.lastInput = undefined; this.heldSelections.length = 0; this.contextTokens = 0; this.contextWindow = 0;
+      const active = this.activeChat();
+      if (active) { active.contextTokens = 0; active.contextWindow = 0; active.notedInstructions = false; active.session = undefined; }
+      // The cleared chat is a new task; a fresh id keeps the saved conversation it replaced in history.
+      if (active) { active.id = randomUUID(); this.activeId = active.id; active.restore = undefined; active.createdAt = Date.now(); active.title = `Chat ${this.chats.indexOf(active) + 1}`; }
       this.queuedComposer = { type: 'attach_selection', selections: [] };
       this.flushComposer();
       this.status = `Model: ${name}`;
       this.publish();
     } catch (error: unknown) {
-      this.status = error instanceof Error ? error.message : "Could not load TrueForge models.";
+      this.status = error instanceof Error ? error.message : "Could not save the model setting.";
       this.publish();
       void vscode.window.showErrorMessage(this.status);
     }
   }
   private publish(): void {
-    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, activity: this.activity, review: this.actions.edits.state, chats: this.chats.map(chat => ({ id: chat.id, title: chat.title, active: chat.id === this.activeId, busy: chat.busy })), questions: this.questions.map(({ toolCallId, question, options }) => ({ toolCallId, question, options })) };
+    const models: ModelMenu = {
+      current: vscode.workspace.getConfiguration("forgeAgent").get<string>("model", "").trim(),
+      names: this.modelNames, loading: this.modelsLoading, ...(this.modelsError ? { error: this.modelsError } : {}),
+    };
+    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, activity: this.activity, review: this.actions.edits.state, chats: this.chats.map(chat => ({ id: chat.id, title: chat.title, active: chat.id === this.activeId, busy: chat.busy })), questions: this.questions.map(({ toolCallId, question, options }) => ({ toolCallId, question, options })), models, context: { used: this.contextTokens, limit: this.contextWindow }, history: this.actions.history?.list() ?? [] };
+    this.scheduleSave();
     void this.view?.webview.postMessage(response);
   }
   /** Sends the picked options back to the paused TrueForge turn. */
@@ -497,7 +661,19 @@ ${selectedText}`;
         if (!model) throw new Error("Model not configured. Set forgeAgent.model after adding a model in local TrueForge.");
         const connector = config.get<string>("connector", "forge-editor");
         const editorManifest = connector ? await this.actions.getEditorManifest(connector) : undefined;
-        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), onEvent: event => this.event(chat, event) });
+        const instructions = await this.actions.projectInstructions();
+        if (!chat.notedInstructions) {
+          chat.notedInstructions = true;
+          for (const file of instructions.files) this.recordActivity({ kind: 'context', path: file.path, startLine: 1, endLine: file.lines });
+        }
+        const restore = chat.restore;
+        chat.session = new ForgeSession({
+          baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, projectInstructions: instructions.text, reasoningEffort: config.get<string>('reasoningEffort', ''),
+          workspaceRoot: vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme === 'file')?.uri.fsPath,
+          ...(restore?.sessionId ? { resume: { sessionId: restore.sessionId, lastGoodTurnId: restore.lastGoodTurnId } } : {}),
+          ...(restore?.transcript ? { restoredTranscript: restore.transcript } : {}),
+          onEvent: event => this.event(chat, event),
+        });
       }
       chat.turnError = undefined;
       if (!approvals) chat.lastInput = preparedInput;
@@ -521,11 +697,17 @@ ${selectedText}`;
   }
   private event(chat: HeldChat, event: TrueForgeApi.TurnStreamingEvent): void {
     chat.status = `Session ${chat.session?.id ?? "starting"} · ${event.type}`;
+    if (chat.restore && chat.session?.id) {
+      if (chat.restore.sessionId && chat.session.resumed === 'lost') chat.messages.push({ id: randomUUID(), role: 'assistant', text: '_The saved TrueForge session is no longer on the server. This task continues in a new session that was given the earlier conversation._' });
+      chat.restore = undefined;
+    }
     if (event.type === "model.message.delta" && event.toolCalls) chat.toolCalls.add(event.id, event.toolCalls);
     // Compaction comes from TrueForge, not from our tools: show it in the feed with sizes before and after.
     const compaction = [...chat.activity].reverse().find(entry => entry.kind === 'compaction');
     if (event.type === 'thread.context_compaction_started') this.recordActivity({ kind: 'compaction', contextTokens: Math.round(event.trigger.contextTokens), thresholdTokens: event.trigger.thresholdTokens, done: false });
     if (event.type === 'thread.context_compaction_finished' && compaction?.kind === 'compaction' && !compaction.done) { compaction.done = true; compaction.durationMs = Math.round(event.durationMs); }
+    if ((event.type === 'model.message' || event.type === 'model.message.delta') && event.usage) chat.contextTokens = event.usage.inputTokens;
+    if (chat.session?.contextWindow) chat.contextWindow = chat.session.contextWindow;
     if (event.type === 'model.message.delta' && event.usage && compaction?.kind === 'compaction' && compaction.done && compaction.afterTokens === undefined) compaction.afterTokens = event.usage.inputTokens;
     if (event.type === "model.message" && event.toolCalls) chat.toolCalls.remember(event.id, event.toolCalls);
     if (event.type === "model.message" && event.threadId === "main" && typeof event.content === "string" && event.content) {
@@ -581,7 +763,7 @@ ${selectedText}`;
     const scriptUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.extensionUri, "out-webview", "webview", "main.js")
     );
-    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "sidebar.css"));
+    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "out-webview", "webview", "main.css"));
     const nonce = randomUUID().replace(/-/g, "");
 
     return `<!DOCTYPE html>
@@ -594,43 +776,7 @@ ${selectedText}`;
   <title>Forge Agent</title>
 </head>
 <body>
-  <header>
-    <h1>Forge Agent</h1>
-    <button id="new-chat-button" class="ghost" type="button" title="New chat" aria-label="New chat">+</button>
-    <div id="chat-list" role="tablist" aria-label="Chats"></div>
-    <p class="description">Your editor, connected to local TrueForge.</p>
-    <button id="copy-mcp-button" class="ghost" type="button">Copy MCP connection</button>
-    <span class="badge" id="status" role="status">Ready</span>
-  </header>
-  <main id="task-content" aria-label="Task workspace">
-  <div id="messages" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
-    <p class="empty-state">Your messages will appear here.</p>
-  </div>
-  <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>
-  </main>
-  <div id="run-actions" role="group" aria-label="Current request"><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve</button> <button id="deny-button" type="button" hidden>Deny</button></div>
-  <section id="agent-questions" aria-label="Agent questions" hidden></section>
-  <form id="message-form">
-    <label for="message-input">Message</label>
-    <div class="composer">
-      <div id="composer-context" hidden></div>
-      <textarea id="message-input" rows="4" placeholder="Ask Forge, or attach a selection with Ctrl+L" spellcheck="false" title="Ctrl+Enter sends"></textarea>
-      <div class="composer-actions">
-        <div class="composer-tools">
-          <span class="mode-pill" title="Forge runs the TrueForge agent">Agent</span>
-          <button id="select-model-button" class="ghost pill" type="button">Select model</button>
-          <button id="add-selection-button" class="ghost pill" type="button" title="Attach the editor selection (Ctrl+L)">Selection</button>
-          <button id="spin-agents-button" class="ghost pill" type="button" title="Start several agents with this command">Spin</button>
-        </div>
-        <div class="composer-end">
-          <span id="context-meter" role="img" title="Context window" aria-label="Context window empty">
-            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><circle class="meter-track" cx="8" cy="8" r="6"></circle><circle class="meter-value" cx="8" cy="8" r="6"></circle></svg>
-          </span>
-          <button id="send-button" class="send" type="submit" disabled aria-label="Send">&#8593;</button>
-        </div>
-      </div>
-    </div>
-  </form>
+  <div id="root"></div>
   <script type="module" nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

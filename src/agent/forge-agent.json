@@ -7,11 +7,11 @@
     "sandbox": { "enabled": false },
     "webSearch": { "enabled": false },
     "iterationLimit": 64,
-    "contextManagement": { "compaction": { "enabled": true, "trigger": { "type": "input_tokens", "value": 100000 } } }
+    "contextManagement": { "compaction": { "enabled": true } }
   },
   "editorServer": {
     "preload": true,
-    "enableTools": ["read_file", "list_files", "search_code", "propose_edit", "run_command"],
-    "requireApprovalForTools": ["run_command"]
+    "enableTools": ["read_file", "list_files", "search_code", "grep", "glob", "propose_edit", "write_file", "apply_patch", "run_command", "command_output", "web_fetch", "todo_write"],
+    "requireApprovalForTools": ["run_command", "web_fetch"]
   }
 }

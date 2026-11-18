@@ -8,6 +8,7 @@ import { ToolLog } from './observability/events';
 import { realpath } from 'node:fs/promises';
 import { relative, sep } from 'node:path';
 import { ForgeSession } from './agent/ForgeSession';
+import { TaskHistory } from './sidebar/TaskHistory';
 
 let toolLog: ToolLog | undefined;
 
@@ -30,16 +31,22 @@ export function activate(context: vscode.ExtensionContext): void {
   const bridge = new EditorBridge({ files, edits, log: toolLog });
   const bridgeReady = bridge.start();
   void bridgeReady.catch((error: unknown) => vscode.window.showErrorMessage(`Forge MCP: ${error instanceof Error ? error.message : "Start failed"}`));
-  const provider = new AgentViewProvider(context.extensionUri, {
+  // Saved chats belong to the workspace, like OpenCode's per-project sessions; with no folder open they share one global list.
+  const historyRoot = context.storageUri ?? vscode.Uri.joinPath(context.globalStorageUri, 'no-workspace');
+  const history = new TaskHistory(vscode.Uri.joinPath(historyRoot, 'task-history').fsPath, { onChange: () => provider.refreshReview() });
+  const provider: AgentViewProvider = new AgentViewProvider(context.extensionUri, {
+    history,
     getEditorManifest: async (namePrefix: string) => {
       await bridgeReady;
       return bridge.getManifest({ namePrefix });
     },
     openFile: options => bridge.openFile(options),
+    projectInstructions: () => bridge.projectInstructions(),
     architectureContext: () => bridge.architectureContext(),
     beginRequest: scope => bridge.beginRequest(scope),
     edits,
   });
+  void history.load();
   context.subscriptions.push(bridge.onDidActivity(entry => provider.recordActivity(entry)));
   context.subscriptions.push(backend, editChanges, editChanges.event(() => provider.refreshReview()));
   context.subscriptions.push(

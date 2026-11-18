@@ -30,6 +30,20 @@ export interface FileEvidence {
   origin: 'tool' | 'context';
 }
 
+/** One item of the agent's to-do list, written whole by the todo_write tool. */
+export interface TodoItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'cancelled';
+}
+
+/** One saved task in the history view; the transcript itself stays on the extension side. */
+export interface TaskHistoryItem {
+  id: string;
+  title: string;
+  updatedAt: number;
+  messageCount: number;
+}
+
 /** One editor selection attached to the composer. Ctrl+L can attach several. */
 export interface ComposerSelection {
   path: string;
@@ -39,10 +53,10 @@ export interface ComposerSelection {
 }
 
 /** One completed editor tool call, as shown in the sidebar's activity feed. Reasons are the agent's optional words.
- * `used` is the request's context budget spent after this call; a `request` entry marks a new user request and its budget.
+ * `used` is how many characters of tool output this request has added, so a row can show "+N chars". A `request` entry marks a new user request. The context window itself is the model's token count, not this character counter.
  * `at` is how many chat messages existed when it happened, so the sidebar can place it in the conversation. */
 export type ActivityEntry = { at?: number } & (
-  | { kind: 'request'; limit: number }
+  | { kind: 'request' }
   | { kind: 'search'; query: string; glob: string; matches: number; fileCount: number; files: string[]; truncated: boolean; reason?: string; used?: number }
   | { kind: 'open'; path: string; startLine: number; endLine: number; reason?: string; foundBy?: string; used?: number }
   | { kind: 'propose'; path: string; detail: string; reason?: string }
@@ -52,7 +66,21 @@ export type ActivityEntry = { at?: number } & (
   /** An editor tool refused or failed; `message` is what the agent was told. */
   | { kind: 'refused'; tool: string; message: string }
   /** TrueForge summarised the conversation: size that triggered it, the threshold, and the size of the next model call afterwards. */
-  | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number });
+  | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number }
+  /** The agent replaced its to-do list; the latest entry is the current list. */
+  | { kind: 'todo'; todos: TodoItem[] });
+
+const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed', 'cancelled']);
+function isTodoItem(value: unknown): value is TodoItem {
+  return isRecord(value) && typeof value.content === 'string' && value.content.length > 0 && value.content.length <= 500 && typeof value.status === 'string' && TODO_STATUSES.has(value.status);
+}
+
+function isTaskHistoryItem(value: unknown): value is TaskHistoryItem {
+  return isRecord(value) && typeof value.id === 'string' && value.id.length > 0 && value.id.length <= 80
+    && typeof value.title === 'string' && value.title.length <= 200
+    && typeof value.updatedAt === 'number' && Number.isFinite(value.updatedAt)
+    && typeof value.messageCount === 'number' && Number.isSafeInteger(value.messageCount) && value.messageCount >= 0;
+}
 
 function isActivityEntry(value: unknown): value is ActivityEntry {
   if (!isRecord(value) || (value.reason !== undefined && typeof value.reason !== 'string')) return false;
@@ -61,7 +89,7 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
   const text = (key: string) => typeof value[key] === 'string';
   const count = (key: string) => typeof value[key] === 'number' && Number.isSafeInteger(value[key]);
   switch (value.kind) {
-    case 'request': return count('limit');
+    case 'request': return true;
     case 'search': return text('query') && text('glob') && count('matches') && count('fileCount') && typeof value.truncated === 'boolean' && Array.isArray(value.files) && value.files.every(file => typeof file === 'string');
     case 'open': return text('path') && count('startLine') && count('endLine') && (value.foundBy === undefined || text('foundBy'));
     case 'propose': return text('path') && text('detail');
@@ -70,28 +98,41 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     case 'context': return text('path') && count('startLine') && count('endLine');
     case 'refused': return text('tool') && text('message');
     case 'compaction': return count('contextTokens') && count('thresholdTokens') && typeof value.done === 'boolean' && (value.durationMs === undefined || count('durationMs')) && (value.afterTokens === undefined || count('afterTokens'));
+    case 'todo': return Array.isArray(value.todos) && value.todos.length <= 50 && value.todos.every(isTodoItem);
     default: return false;
   }
+}
+
+/** Models configured in local TrueForge, for the composer's model menu. `current` is forgeAgent.model and may be outside `names`. */
+export interface ModelMenu {
+  current: string;
+  names: string[];
+  loading: boolean;
+  error?: string;
 }
 
 export type WebviewMessage =
   | { type: "ready" }
   | { type: "copy_mcp_connection" }
   | { type: "select_model" }
+  | { type: "set_model"; name: string }
+  | { type: "refresh_models" }
   | { type: 'review'; command: ReviewCommand }
   | { type: "open_file"; path: string; line: number }
   | { type: "send_message"; text: string; selections?: ComposerSelection[] }
   | { type: "new_chat" }
   | { type: "select_chat"; id: string }
-  | { type: "spin_agents"; text: string }
+  | { type: "spin_agents"; text: string; count?: number }
   | { type: "add_selection" }
   | { type: "clear_selection"; index: number }
   | { type: "cancel" }
   | { type: "approve"; allow: boolean }
-  | { type: "answer_question"; answers: { toolCallId: string; choice: string }[] };
+  | { type: "answer_question"; answers: { toolCallId: string; choice: string }[] }
+  | { type: "open_history"; id: string }
+  | { type: "delete_history"; id: string };
 
 export type HostMessage =
-  | { type: "state"; messages: ChatMessage[]; busy: boolean; status: string; approval: boolean; inspectedFiles: FileEvidence[]; activity: ActivityEntry[]; review: ReviewState; chats: ChatTab[]; questions: AgentQuestion[] }
+  | { type: "state"; messages: ChatMessage[]; busy: boolean; status: string; approval: boolean; inspectedFiles: FileEvidence[]; activity: ActivityEntry[]; review: ReviewState; chats: ChatTab[]; questions: AgentQuestion[]; models: ModelMenu; context: { used: number; limit: number }; history: TaskHistoryItem[] }
   | { type: "attach_selection"; selections: ComposerSelection[] }
   | { type: "focus_composer" };
 
@@ -134,9 +175,10 @@ function isChatMessage(value: unknown): value is ChatMessage {
 export function isWebviewMessage(value: unknown): value is WebviewMessage {
   return (
     isRecord(value) &&
-    (value.type === "ready" || value.type === "copy_mcp_connection" || value.type === "select_model" || value.type === "cancel" || value.type === "add_selection" || value.type === "new_chat" ||
-      (value.type === "select_chat" && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 80) ||
-      (value.type === "spin_agents" && typeof value.text === "string" && value.text.length <= 20000) ||
+    (value.type === "ready" || value.type === "copy_mcp_connection" || value.type === "select_model" || value.type === "refresh_models" || value.type === "cancel" || value.type === "add_selection" || value.type === "new_chat" ||
+      (value.type === "set_model" && typeof value.name === "string" && value.name.length > 0 && value.name.length <= 200) ||
+      ((value.type === "select_chat" || value.type === "open_history" || value.type === "delete_history") && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 80) ||
+      (value.type === "spin_agents" && typeof value.text === "string" && value.text.length <= 20000 && (value.count === undefined || (typeof value.count === "number" && Number.isSafeInteger(value.count) && value.count >= 2 && value.count <= 4))) ||
       (value.type === "open_file" && typeof value.path === "string" && typeof value.line === "number" && Number.isSafeInteger(value.line) && value.line > 0) ||
       (value.type === 'review' && ReviewCommandSchema.safeParse(value.command).success) ||
       (value.type === "approve" && typeof value.allow === "boolean") ||
@@ -157,6 +199,19 @@ export function isHostMessage(value: unknown): value is HostMessage {
     Array.isArray(value.inspectedFiles) && value.inspectedFiles.every(file => isRecord(file) && typeof file.path === "string" && typeof file.startLine === "number" && typeof file.endLine === "number" && (file.origin === 'tool' || file.origin === 'context')) &&
     typeof value.busy === "boolean" && typeof value.status === "string" && typeof value.approval === "boolean" && Array.isArray(value.messages) &&
     value.messages.every(isChatMessage) && Array.isArray(value.chats) && value.chats.length <= 8 && value.chats.every(isChatTab) &&
-    Array.isArray(value.questions) && value.questions.length <= 4 && value.questions.every(isAgentQuestion)
+    Array.isArray(value.questions) && value.questions.length <= 4 && value.questions.every(isAgentQuestion) &&
+    isModelMenu(value.models) && isContextWindow(value.context) &&
+    Array.isArray(value.history) && value.history.length <= 200 && value.history.every(isTaskHistoryItem)
   );
+}
+
+function isContextWindow(value: unknown): value is { used: number; limit: number } {
+  return isRecord(value) && typeof value.used === 'number' && Number.isFinite(value.used) && value.used >= 0
+    && typeof value.limit === 'number' && Number.isFinite(value.limit) && value.limit >= 0;
+}
+
+function isModelMenu(value: unknown): value is ModelMenu {
+  return isRecord(value) && typeof value.current === "string" && typeof value.loading === "boolean"
+    && Array.isArray(value.names) && value.names.every(name => typeof name === "string")
+    && (value.error === undefined || typeof value.error === "string");
 }

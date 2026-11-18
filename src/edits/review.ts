@@ -12,6 +12,8 @@ export const ProposalViewSchema = z.object({
   id: z.string(), path: z.string(), explanation: z.string(),
   status: z.enum(['pending', 'applied', 'rejected', 'conflict', 'superseded', 'undone']),
   hunks: z.array(HunkViewSchema),
+  /** Set when the proposal creates or deletes the file rather than editing it. */
+  change: z.enum(['create', 'delete']).optional(),
 });
 export type ProposalView = z.infer<typeof ProposalViewSchema>;
 export const ReviewStateSchema = z.object({

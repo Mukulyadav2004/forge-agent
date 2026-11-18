@@ -3,10 +3,11 @@
   "compilerOptions": {
     "module": "ES2022",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
     "types": [],
     "outDir": "out-webview"
   },
-  "include": ["src/webview/**/*.ts"],
+  "include": ["src/webview/**/*.ts", "src/webview/**/*.tsx"],
   "exclude": ["node_modules", "out", "out-webview"]
 }

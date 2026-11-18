@@ -77,7 +77,13 @@ export function describeApproval(call: PendingToolCall | undefined): string {
     // Show the whole command; a fence longer than any backtick run inside it keeps it intact.
     const fence = '`'.repeat(Math.max(3, ...(command.match(/`+/gu) ?? []).map(run => run.length + 1)));
     const reason = clip((text('reason') ?? '').trim(), 300) || 'none given';
-    return `**Approve running a command?**\n\n${fence}sh\n${command}\n${fence}\n\n- Folder: \`${text('cwd') ?? '.'}\` (inside the workspace)\n- Stops after: ${number('timeout_seconds') ?? 60} s\n- Agent's reason: ${reason}\n\nIt runs with your permissions and can change files; Forge cannot undo what a command does. Deny it if you are unsure.`;
+    const background = args.background === true ? '\n- Runs in the background: the agent keeps working and reads its output later' : '';
+    return `**Approve running a command?**\n\n${fence}sh\n${command}\n${fence}\n\n- Folder: \`${text('workdir') ?? text('cwd') ?? '.'}\` (inside the workspace)\n- Stops after: ${number('timeout_seconds') ?? 120} s${background}\n- Agent's reason: ${reason}\n\nIt runs with your permissions and can change files; Forge cannot undo what a command does. Deny it if you are unsure.`;
+  }
+  const url = text('url');
+  if (call.name === 'web_fetch' && url !== undefined) {
+    const reason = clip((text('reason') ?? '').trim(), 300) || 'none given';
+    return `**Approve fetching a web page?**\n\n- URL: \`${clip(url, 500).replace(/`/gu, "'")}\`\n- Returned as: ${text('format') ?? 'markdown'}\n- Agent's reason: ${reason}\n\nThe request comes from your machine and network. The page text goes to the model, so deny URLs you do not recognise.`;
   }
   if (call.name !== 'propose_edit' || text('path') === undefined) return `**Approve \`${call.name}\`?**\n\nArguments: \`${clip(call.arguments, 300).replace(/`/gu, "'")}\``;
   const start = number('start_line'), end = number('end_line'), insert = number('insert_line'), oldText = text('old_text');

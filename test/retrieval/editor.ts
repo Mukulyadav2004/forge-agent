@@ -119,7 +119,7 @@ export async function run(): Promise<void> {
   } catch (error) {
     report.error = error instanceof Error ? error.message : String(error);
     if (frame) {
-      const cancel = frame.getByRole('button', { name: 'Cancel', exact: true });
+      const cancel = frame.locator('#cancel-button');
       if (await cancel.isVisible() && await cancel.isEnabled()) await cancel.click().catch(() => undefined);
     }
     if (sessionId) {

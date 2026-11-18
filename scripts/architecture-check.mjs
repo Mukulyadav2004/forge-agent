@@ -1,34 +1,14 @@
 import { parseArgs } from 'node:util';
-import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { TrueForge } from '@truefoundry/trueforge-sdk';
 import { ForgeSession } from '../out/agent/ForgeSession.js';
-import { buildProjectContext } from '../out/context/projectContext.js';
 
 const { values } = parseArgs({ options: {
   model: { type: 'string' }, connector: { type: 'string' },
   'base-url': { type: 'string', default: 'http://127.0.0.1:8790' },
-  workspace: { type: 'string' },
 } });
 if (!values.model || !values.connector) throw new Error('Pass --model and --connector for the open project. This makes one real architecture request through TrueForge.');
 let failure;
-let context = { text: '', files: [] };
-if (values.workspace) {
-  const root = resolve(values.workspace);
-  const paths = [];
-  const ignored = new Set(['node_modules', '.git', '.venv', 'venv', '__pycache__', 'dist', 'out']);
-  async function walk(directory = '') {
-    for (const entry of await readdir(join(root, directory), { withFileTypes: true })) {
-      if (paths.length >= 500) return;
-      if (entry.name.startsWith('.') || ignored.has(entry.name)) continue;
-      const path = directory ? `${directory}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) await walk(path);
-      else if (entry.isFile()) paths.push(path);
-    }
-  }
-  await walk();
-  context = await buildProjectContext({ paths, readFile: path => readFile(join(root, path), 'utf8') });
-}
 const session = new ForgeSession({ baseUrl: values['base-url'], model: values.model, connector: values.connector,
   onEvent(event) {
     if (event.type === 'turn.done' && event.state.status === 'error') failure = event.state.message;
@@ -37,7 +17,7 @@ const session = new ForgeSession({ baseUrl: values['base-url'], model: values.mo
 const timeout = setTimeout(() => { void session.cancel().catch(() => undefined); }, 180_000);
 try {
   const request = 'Inspect this project and make an architecture map. Verify the important relationships against implementation files, cite the source, and identify important discrepancies between the documentation and the implemented behavior. Do not edit any files or run commands.';
-  await session.send([{ type: 'user.message', content: context.text ? `${request}\n\n${context.text}` : request }]);
+  await session.send([{ type: 'user.message', content: request }]);
   if (failure) throw new Error(failure);
   const client = new TrueForge({ baseUrl: values['base-url'], maxRetries: 0 });
   const events = [];
@@ -64,8 +44,8 @@ try {
   const report = responses.find(event => event.content.includes('```mermaid'))?.content ?? '';
   const checks = {
     model: values.model,
-    source_files_available: [...new Set([...inspected, ...context.files.map(file => file.path)])].filter(path => /\.(?:py|tsx?|jsx?|go|rs|java|rb|c|cpp)$/u.test(path)),
-    source_files_supplied: context.files.map(file => file.path),
+    source_files_available: [...inspected].filter(path => /\.(?:py|tsx?|jsx?|go|rs|java|rb|c|cpp)$/u.test(path)),
+    source_files_supplied: [],
     files_read_via_tools: [...inspected],
     mermaid_present: report.includes('```mermaid'),
     source_links_present: /\]\([^\s)]+#L\d+\)/u.test(report),

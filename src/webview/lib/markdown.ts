@@ -26,6 +26,7 @@ mermaid.initialize({
 });
 let diagramId = 0;
 
+/** Renders model Markdown into `container`. Raw HTML and images are escaped, and the result is sanitised again by DOMPurify. */
 export function renderMarkdown(options: { container: HTMLElement; text: string }): void {
   const html = markdown.parse(options.text, { async: false });
   options.container.innerHTML = DOMPurify.sanitize(html, {
@@ -42,6 +43,24 @@ export function renderMarkdown(options: { container: HTMLElement; text: string }
       row.textContent = line;
       return row;
     }));
+  }
+  // Cline's CodeBlock copy control, added as our own element after sanitising.
+  for (const pre of Array.from(options.container.querySelectorAll('pre'))) {
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'code-copy';
+    copy.title = 'Copy code';
+    copy.setAttribute('aria-label', 'Copy code');
+    copy.textContent = 'Copy';
+    copy.addEventListener('click', event => {
+      event.stopPropagation();
+      void navigator.clipboard?.writeText(pre.querySelector('code')?.textContent ?? pre.textContent ?? '').then(() => {
+        copy.textContent = 'Copied';
+        setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
+      }, () => undefined);
+    });
+    pre.classList.add('has-copy');
+    pre.append(copy);
   }
 }
 
