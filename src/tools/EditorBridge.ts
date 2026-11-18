@@ -11,7 +11,7 @@ import { z } from 'zod';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
 import type { ActivityEntry } from '../shared/messages';
-import { buildProjectContext } from '../context/projectContext';
+import { buildProjectContext, buildProjectOverview } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
@@ -19,7 +19,8 @@ import type { ToolLog, ToolName } from '../observability/events';
 import { COMMAND_LIMITS, runCommand } from './runCommand';
 
 /** Characters of workspace text one user request may bring into the model's context: reads, searches, listings and supplied context. */
-export const CONTEXT_BUDGET = 200_000;
+/** Characters one request may read, about 90k tokens; TrueForge compacts the conversation at 100k tokens (forge-agent.json). */
+export const CONTEXT_BUDGET = 350_000;
 /** One read_file call: big enough to read a typical source file whole (Flask's cli.py is about 1,100 lines and 46,000 characters). */
 const READ_LIMITS = { lines_per_call: 2000, characters_per_call: 60000 };
 const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 8388608, output_characters: 20000, line_characters: 1000, matches_per_file: 3, timeout_ms: 5000 };
@@ -108,6 +109,23 @@ export class EditorBridge implements vscode.Disposable {
     this.budgetUsed += context.text.length;
     for (const file of context.files) this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: file.path, startLine: file.startLine, endLine: file.endLine });
     return context.text;
+  }
+  /** First request of a chat: a depth-2 tree and the project's declared test setup, charged to the budget and shown in the activity. */
+  async projectOverview(): Promise<string> {
+    const root = vscode.workspace.workspaceFolders?.[0];
+    if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) return '';
+    const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage,.tox,.nox,.mypy_cache,.pytest_cache,.ruff_cache,target}/**', 3000);
+    const paths = uris.map(uri => vscode.workspace.asRelativePath(uri, false)).filter(path => !/(^|\/)\.env(\.|$)/u.test(path));
+    const environments: string[] = [];
+    for (const candidate of ['.venv/bin/python', 'venv/bin/python', '.venv/Scripts/python.exe', 'venv/Scripts/python.exe']) {
+      try { await vscode.workspace.fs.stat(vscode.Uri.joinPath(root.uri, candidate)); environments.push(candidate); } catch { /* not present */ }
+    }
+    const overview = await buildProjectOverview({ paths, environments, readFile: async path => (await this.options.files.open(path)).getText() });
+    if (!overview.text) return '';
+    this.budgetUsed += overview.text.length;
+    this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob: 'project overview (folders to depth 2)', count: paths.length });
+    for (const file of overview.files) this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: file.path, startLine: file.startLine, endLine: file.endLine });
+    return overview.text;
   }
   private async searchCode(options: SearchInput & { signal: AbortSignal }): Promise<CallToolResult> {
     const root = vscode.workspace.workspaceFolders?.[0];

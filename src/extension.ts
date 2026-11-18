@@ -37,6 +37,7 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     openFile: options => bridge.openFile(options),
     architectureContext: () => bridge.architectureContext(),
+    projectOverview: () => bridge.projectOverview(),
     beginRequest: scope => bridge.beginRequest(scope),
     edits,
   });

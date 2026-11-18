@@ -72,6 +72,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       getEditorManifest: (namePrefix: string) => Promise<TrueForgeApi.RemoteMcpServerManifest>;
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
+      projectOverview: () => Promise<string>;
       /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
       beginRequest: (scope?: string) => void;
       edits: EditService;
@@ -482,14 +483,21 @@ ${selectedText}`;
     this.show(chat);
     try {
       this.actions.edits.beginTurn();
+      const selectionScoped = Boolean(chat.editScope);
       if (!approvals) { this.actions.beginRequest(chat.editScope); chat.editScope = undefined; }
+      // The first request of a chat gets the project overview (tree and test setup) once; Edit Selection stays on its selection.
+      let overview = !approvals && !chat.session && !selectionScoped ? await this.actions.projectOverview() : '';
       const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
       const feedback = input?.length && input.every(event => event.type === 'user.message') ? this.reviewFeedback.message() : undefined;
       if (feedback) preparedInput.push({ type: 'user.message', content: feedback });
       for (const event of input ?? []) {
         if (event.type === 'user.message' && typeof event.content === 'string' && isArchitectureRequest(event.content)) {
           const context = await this.actions.architectureContext();
-          preparedInput.push({ ...event, content: context ? `${event.content}\n\n${context}` : event.content });
+          preparedInput.push({ ...event, content: [event.content, overview, context].filter(Boolean).join('\n\n') });
+          overview = '';
+        } else if (event.type === 'user.message' && typeof event.content === 'string' && overview) {
+          preparedInput.push({ ...event, content: `${event.content}\n\n${overview}` });
+          overview = '';
         } else preparedInput.push(event);
       }
       if (approvals && !chat.session) throw new Error('The approval session is no longer available. Start a new task.');

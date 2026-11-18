@@ -165,7 +165,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const pendingRead = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
   const pendingRevision = (pendingRead.structuredContent as { base_revision: string }).base_revision;
   assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision: pendingRevision, new_text: 'held turn check\n', explanation: 'Pending during a held turn' } })).isError, undefined);
-  // Context budget: results report usage, and reads stop once one request has used 200,000 characters (a chat message later resets it).
+  // Context budget: results report usage, and reads stop once one request has used 350,000 characters (a chat message later resets it).
   const budgetProbe = vscode.Uri.joinPath(folder.uri, 'budget-probe.txt');
   await vscode.workspace.fs.writeFile(budgetProbe, new TextEncoder().encode(Array.from({ length: 4000 }, (_, index) => `line ${index} ${'x'.repeat(90)}`).join('\n')));
   let budgetRefusal = '';
@@ -174,11 +174,11 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
     const result = await client.callTool({ name: 'read_file', arguments: { path: 'budget-probe.txt', start_line: start, end_line: start + 299 } });
     if (result.isError) { budgetRefusal = JSON.stringify(result.content); continue; }
     const used = (result.structuredContent as { context_budget: { used: number; limit: number } }).context_budget.used;
-    assert.ok(used > budgetUsed && used <= 200_000, `Budget use must grow and stay within the limit (${budgetUsed} -> ${used}).`);
+    assert.ok(used > budgetUsed && used <= 350_000, `Budget use must grow and stay within the limit (${budgetUsed} -> ${used}).`);
     budgetUsed = used;
   }
-  assert.match(budgetRefusal, /Context budget: [\d,]+ of 200,000 characters used for this request\. Too little remains/u);
-  assert.ok(budgetUsed > 190_000, `The budget should be nearly spent before refusing (${budgetUsed}).`);
+  assert.match(budgetRefusal, /Context budget: [\d,]+ of 350,000 characters used for this request\. Too little remains/u);
+  assert.ok(budgetUsed > 340_000, `The budget should be nearly spent before refusing (${budgetUsed}).`);
   await vscode.workspace.fs.delete(budgetProbe);
   await client.close();
   const denied = await fetch(connection.url, { method: "POST" });
@@ -374,7 +374,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.getByRole('log').getByText(/Switching to the fallback model/).waitFor();
     assert.equal(await frame.locator('#messages .activity-request').count(), 1, 'A new request starts a fresh context budget in the feed.');
-    assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request · context 0 of 200k chars$/u);
+    assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request · context [\d.]+k? of 350k chars$/u, 'The first request of a chat counts the project overview in its budget.');
     await frame.getByRole('log').getByText('Recovered with the corrected model.', { exact: true }).waitFor();
     await frame.locator('#message-input:not([disabled])').waitFor();
     assert.ok((await frame.getByRole('log').innerText()).includes('API key not valid'), 'The error must be shown in plain words.');

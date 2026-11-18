@@ -80,7 +80,7 @@ pnpm run agent:spec google-gemini/gemini-3-1-flash-lite
 - TrueForge tool approvals resume the same paused turn. Each approval names the file, kind of change and the agent's reason, or the exact command, folder and timeout, and warns about calls the editor will refuse.
 - A live activity feed lists every search, read, proposal and command with the agent's stated reason, nests files under the search that found them, and shows the context budget.
 - `run_command` runs one approved, non-interactive command in a workspace folder (default 60 s timeout, process group stopped on timeout or cancel, output kept to its start and end within 16,000 characters). Commands can change files and Forge cannot undo them; the tool log never stores command text or output.
-- Each user request has a 200,000-character context budget across reads, searches, listings, command output and supplied context. Tools shrink their output to what remains, refuse when it is spent, and report usage to the agent and in the feed.
+- Each user request has a 350,000-character context budget across reads, searches, listings, command output and supplied context, including the project overview the first request of a chat receives. Tools shrink their output to what remains, refuse when it is spent, and report usage to the agent and in the feed.
 - Model errors are shown in plain words, retried with backoff when temporary, then handed to **Fallback Model** automatically.
 - **Forge: Edit Selection** (`Cmd+Option+F` on Mac): select code, provide an instruction, send the selection and its location.
 - Authenticated loopback MCP tools: `list_files`, bounded `read_file`, `search_code`, and `propose_edit`.

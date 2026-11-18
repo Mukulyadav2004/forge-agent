@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { agentSpec, classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
 import { readFileSync } from 'node:fs';
 import { evaluateSession } from '../scripts/eval-session.mjs';
-import { buildProjectContext, isArchitectureRequest } from '../out/context/projectContext.js';
+import { buildProjectContext, buildProjectOverview, isArchitectureRequest, OVERVIEW_LIMITS } from '../out/context/projectContext.js';
 import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
 import './observability/events.mjs';
@@ -339,4 +339,32 @@ test('SDK approvals resume a paused turn with a cursor, retry rejected decisions
   await pending;
   assert.equal(requests.filter(request => request.method === 'GET').length, 2, 'Cancellation must prevent a late decision from reopening the stream');
   assert.equal(rows.filter(row => row.event === 'turn.end' && row.turnId === 'approval-turn-3').length, 1);
+});
+
+test('a new chat gets a bounded project overview: a depth-2 tree and the test setup the project declares', async () => {
+  const paths = ['pyproject.toml', 'README.md', 'src/flask/app.py', 'src/flask/cli.py', 'src/flask/json/provider.py', 'tests/conftest.py', 'tests/test_cli.py', 'tests/test_apps/cliapp/app.py', 'docs/cli.rst', 'docs/api.rst',
+    ...Array.from({ length: 60 }, (_, index) => `docs/patterns/page${index}.rst`)];
+  const pyproject = ['[project]', 'name = "Flask"', 'dependencies = ["click>=8.1.3"]', '', '[dependency-groups]', 'tests = ["pytest", "python-dotenv"]', '', '[tool.pytest.ini_options]', 'testpaths = ["tests"]', '', '[tool.mypy]', 'strict = true'].join('\n');
+  const read = [];
+  const overview = await buildProjectOverview({ paths, environments: [], readFile: async path => { read.push(path); return pyproject; } });
+  assert.deepEqual(read, ['pyproject.toml'], 'Only root test manifests are read, never source files.');
+  assert.match(overview.text, /^\.\/ \(70 files\): README\.md, pyproject\.toml, docs\/ \(62\), src\/ \(3\), tests\/ \(3\)$/mu);
+  assert.match(overview.text, /^src\/flask\/ \(3 files\): app\.py, cli\.py, json\/ \(1\)$/mu, 'A folder holding only one folder is merged with it.');
+  assert.match(overview.text, /^tests\/ \(3 files\): conftest\.py, test_cli\.py, test_apps\/ \(1\)$/mu);
+  assert.match(overview.text, /^docs\/ \(62 files\): api\.rst, cli\.rst, patterns\/ \(60\)$/mu);
+  assert.match(overview.text, /\[dependency-groups\]\ntests = \["pytest", "python-dotenv"\]/u, 'Test dependencies are supplied.');
+  assert.match(overview.text, /\[tool\.pytest\.ini_options\]\ntestpaths/u);
+  assert.doesNotMatch(overview.text, /\[project\]|\[tool\.mypy\]/u, 'Sections unrelated to tests are left out.');
+  assert.match(overview.text, /No Python virtual environment was found inside the workspace\./u);
+  assert.deepEqual(overview.files, [{ path: 'pyproject.toml', startLine: 5, endLine: 10, origin: 'context' }]);
+  assert.ok(overview.text.length < OVERVIEW_LIMITS.tree_characters + OVERVIEW_LIMITS.setup_characters + 1000);
+
+  const wide = await buildProjectOverview({ paths: Array.from({ length: 3000 }, (_, index) => `pkg${index % 40}/module${index}.ts`), environments: [], readFile: async () => '' });
+  assert.ok(wide.text.length < OVERVIEW_LIMITS.tree_characters + 1000, 'A large workspace is cut to the tree limit.');
+  assert.match(wide.text, /\+\d+ more/u);
+  const js = await buildProjectOverview({ paths: ['package.json', 'src/index.ts'], environments: [], readFile: async () => JSON.stringify({ scripts: { test: 'vitest run' }, devDependencies: { vitest: '1' }, dependencies: { secret: 'x' } }) });
+  assert.match(js.text, /"test": "vitest run"/u);
+  assert.doesNotMatch(js.text, /Python environment/u, 'A project without Python gets no Python line.');
+  assert.match((await buildProjectOverview({ paths: ['app.py'], environments: ['.venv/bin/python'], readFile: async () => '' })).text, /Python environments in the workspace: \.venv\/bin\/python/u);
+  assert.equal((await buildProjectOverview({ paths: [], environments: [], readFile: async () => '' })).text, '');
 });
