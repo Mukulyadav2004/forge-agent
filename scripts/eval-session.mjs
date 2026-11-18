@@ -92,11 +92,27 @@ async function main() {
   let id = args[0];
   if (!id || id === '--last') id = (await get('/api/v1/sessions?limit=1')).data[0]?.id;
   if (!id) throw new Error('No sessions found. Pass a session id from the sidebar status badge.');
-  const page = await get(`/api/v1/sessions/${encodeURIComponent(id)}/events?limit=500`);
-  const events = page.data.map(item => item.event).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
-  const turns = (await get(`/api/v1/sessions/${encodeURIComponent(id)}/turns?limit=25`)).data.reverse();
+  // Every turn, including failed attempts that a retry branched away from: the session-level event list shows only the latest branch.
+  const session = `/api/v1/sessions/${encodeURIComponent(id)}`;
+  const turns = [];
+  for (let token = '', pages = 0; pages < 20; pages++) {
+    const page = await get(`${session}/turns?limit=25${token ? `&page_token=${encodeURIComponent(token)}` : ''}`);
+    turns.push(...page.data);
+    token = page.pagination?.next_page_token ?? '';
+    if (!token) break;
+  }
+  turns.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  const byId = new Map();
+  let truncated = false;
+  for (const turn of turns) {
+    const page = await get(`${session}/turns/${encodeURIComponent(turn.id)}/events?limit=500`);
+    if (page.data.length >= 500) truncated = true;
+    // The per-turn endpoint returns events directly; the session endpoint wraps them as { turn_id, event }.
+    for (const item of page.data) { const event = item.event ?? item; byId.set(event.id ?? JSON.stringify(event), event); }
+  }
+  const events = [...byId.values()].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
   const report = evaluateSession({ events, turns });
-  if (page.data.length >= 500) report.flags.push('only the newest 500 events were read (TrueForge page limit)');
+  if (truncated) report.flags.push('a turn had more than 500 events; only its newest 500 were read (TrueForge page limit)');
   if (json) console.log(JSON.stringify({ session: id, ...report }, null, 2)); else print(id, report);
 }
 
