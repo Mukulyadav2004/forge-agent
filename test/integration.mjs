@@ -120,6 +120,10 @@ test('model errors are classified for retry and summarised without the provider 
   assert.equal(classifyModelError('[Model Error] Cannot connect to API: connect ECONNREFUSED 127.0.0.1:59999').transient, true);
   assert.equal(classifyModelError('[Model Error] Cannot connect to API: bad port').transient, true);
   assert.equal(classifyModelError('[Model Error] Request failed (400): Bad Request').transient, false);
+  // Captured from Google's free tier through TrueForge 0.185.1 (per-minute request limit).
+  const limited = classifyModelError('[Model Error] Request failed (429): You exceeded your current quota, please check your plan and billing details.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 15, model: gemini-3.5-flash-lite\nPlease retry in 42.092876232s.');
+  assert.deepEqual([limited.transient, limited.retryAfterSeconds], [true, 43]);
+  assert.equal(classifyModelError('[Model Error] Request failed (503): overloaded').retryAfterSeconds, undefined);
   assert.equal(classifyModelError('[Model Error] Request failed (401): API key not valid').transient, false);
   assert.equal(classifyModelError('[Model Error] Request failed (404): model not found').transient, false);
   assert.equal(classifyModelError('').summary, 'The model request failed.');

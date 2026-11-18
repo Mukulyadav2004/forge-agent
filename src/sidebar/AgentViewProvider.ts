@@ -214,13 +214,15 @@ ${selectedText}`;
     const delays = [2, 4];
     let attempt = 0, switched = false;
     while (this.turnError && this.session && this.lastInput && !this.cancellationRequested && !this.session.awaitingApproval) {
-      const { transient, summary, stepLimit } = classifyModelError(this.turnError);
+      const { transient, summary, stepLimit, retryAfterSeconds } = classifyModelError(this.turnError);
       const say = (text: string) => { this.messages.push({ id: randomUUID(), role: 'assistant', text }); this.status = text.replace(/\*\*/gu, ''); this.publish(); };
       if (stepLimit) { say(`**The agent used all its steps** before finishing (${summary}). Anything it staged is still in Review changes and no files were written. Send \"continue\" to let it carry on, or narrow the request.`); return; }
-      const seconds = transient ? delays[attempt] : undefined;
+      // Wait as long as the provider asked (up to a minute); a longer wait goes straight to the fallback model.
+      const asked = retryAfterSeconds !== undefined ? (retryAfterSeconds <= 60 ? retryAfterSeconds + 1 : undefined) : delays[attempt];
+      const seconds = transient && attempt < delays.length ? asked : undefined;
       if (seconds !== undefined) {
         attempt++;
-        say(`**Model error** on \`${this.session.model}\`: ${summary}\n\nRetrying in ${seconds} s (attempt ${attempt} of ${delays.length}). No files were changed.`);
+        say(`**Model error** on \`${this.session.model}\`: ${summary}\n\nRetrying in ${seconds} s${retryAfterSeconds !== undefined ? ', as the provider asked' : ''} (attempt ${attempt} of ${delays.length}). No files were changed.`);
         for (let waited = 0; waited < seconds * 1000 && !this.cancellationRequested; waited += 100) await new Promise(resolve => setTimeout(resolve, 100));
         if (this.cancellationRequested) return;
       } else if (fallback && fallback !== this.session.model) {

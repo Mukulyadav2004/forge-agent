@@ -6,13 +6,15 @@ import { SessionTrace } from '../observability/events';
 import type { SessionEvent } from '../observability/events';
 
 /** Model failures arrive as turn.done with status "error" and a message such as "[Model Error] Request failed (429): …". */
-export function classifyModelError(message: string): { transient: boolean; summary: string; stepLimit: boolean } {
+export function classifyModelError(message: string): { transient: boolean; summary: string; stepLimit: boolean; retryAfterSeconds?: number } {
   const summary = message.replace(/^\[Model Error\]\s*/u, '').split('\n')[0]?.trim().slice(0, 240) || 'The model request failed.';
   // Rate limits, timeouts, server errors and network failures can pass; bad keys, missing models and bad requests will not.
   const transient = /\((?:408|409|425|429|5\d\d)\)/u.test(message) || /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed|cannot connect|timed? ?out|unreachable|overloaded|temporarily/iu.test(message);
   // TrueForge ends a turn this way when the agent used every allowed step; another model would not help.
   const stepLimit = /iteration limit/iu.test(message);
-  return { transient: transient && !stepLimit, summary, stepLimit };
+  // Providers often say how long to wait, e.g. Google's "Please retry in 42.09s" for a per-minute limit.
+  const hint = /retry (?:in|after) (\d+(?:\.\d+)?) ?s/iu.exec(message);
+  return { transient: transient && !stepLimit, summary, stepLimit, ...(hint ? { retryAfterSeconds: Math.ceil(Number(hint[1])) } : {}) };
 }
 
 /** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
