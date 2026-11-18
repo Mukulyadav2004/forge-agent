@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { agentSpec, classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
 import { readFileSync } from 'node:fs';
+import { evaluateSession } from '../scripts/eval-session.mjs';
 import { buildProjectContext, isArchitectureRequest } from '../out/context/projectContext.js';
 import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
@@ -73,6 +74,29 @@ test('streamed tool call deltas are rebuilt for the approval that names them', (
   assert.equal(calls.find('msg-2', 'call_1'), undefined, 'A call id must match the message that produced it.');
   calls.clear();
   assert.equal(calls.find('msg-1', 'call_1'), undefined);
+});
+
+test('session evaluation flags refused approvals, failed commands, repeats and turn errors', () => {
+  // Event shapes as stored by TrueForge 0.185.1 (snake_case, tool results as JSON strings).
+  const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+  const events = [
+    { type: 'model.message', created_at: '2026-11-18T01:00:00Z', model: { name: 'p/a' }, usage: { input_tokens: 4000 }, tool_calls: [call('c1', 'propose_edit', { path: 'a.py', new_text: 'x' })] },
+    { type: 'tool.approval_required', created_at: '2026-11-18T01:00:01Z', tool_calls: [{ id: 'c1' }] },
+    { type: 'user.tool_approval', created_at: '2026-11-18T01:00:02Z', tool_call_id: 'c1', approval: { status: 'allow' } },
+    { type: 'tool.response', created_at: '2026-11-18T01:00:03Z', tool_call_id: 'c1', content: JSON.stringify({ error: [{ type: 'text', text: 'The proposed content is identical to the current file.' }] }) },
+    { type: 'model.message', created_at: '2026-11-18T01:00:04Z', model: { name: 'p/b' }, usage: { input_tokens: 6000 }, tool_calls: [call('c2', 'run_command', { command: 'pytest' }), call('c3', 'run_command', { command: 'pytest' })] },
+    { type: 'tool.response', created_at: '2026-11-18T01:00:05Z', tool_call_id: 'c2', content: JSON.stringify({ exit_code: 127, timed_out: false }) },
+    { type: 'tool.response', created_at: '2026-11-18T01:00:06Z', tool_call_id: 'c3', content: JSON.stringify({ exit_code: 0, timed_out: false }) },
+    { type: 'thread.context_compaction_finished', created_at: '2026-11-18T01:00:07Z', trigger: { context_tokens: 31616.4 }, duration_ms: 37572 },
+  ];
+  const report = evaluateSession({ events, turns: [{ state: { status: 'error', message: 'You have reached iteration limit of 64, please request again' } }, { state: { status: 'done' } }] });
+  assert.deepEqual([report.approvalsAsked, report.approvalsAllowed, report.approvedThenRefused], [1, 1, 1]);
+  assert.deepEqual(report.filesStaged, []);
+  assert.deepEqual(report.commands, [{ command: 'pytest', exitCode: 127, timedOut: false }, { command: 'pytest', exitCode: 0, timedOut: false }]);
+  assert.deepEqual([report.peakInputTokens, report.compactions[0].fromTokens, report.models.join(',')], [6000, 31616, 'p/a,p/b']);
+  const flags = report.flags.join('\n');
+  for (const expected of [/1 approved call\(s\) were then refused/u, /identical to the current file/u, /1 of 2 command\(s\) failed: pytest → exit 127/u, /identical calls repeated: 2× run_command/u, /hit its step limit/u, /model changed during the session: p\/a → p\/b/u]) assert.match(flags, expected);
+  assert.deepEqual(evaluateSession({ events: [] }).flags, [], 'An empty session has nothing to flag.');
 });
 
 test('the agent definition file is what TrueForge receives', () => {
