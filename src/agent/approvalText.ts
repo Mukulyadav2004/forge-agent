@@ -1,3 +1,5 @@
+import { diffLines } from 'diff';
+
 /** A tool call as the model sent it, remembered so its approval prompt can say exactly what it will do. */
 export interface PendingToolCall { name: string; arguments: string }
 
@@ -21,10 +23,28 @@ export class StreamedToolCalls {
 }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit)}…` : text;
+const signed = (text: string, sign: string) => text === '' ? [] : text.replace(/\n$/u, '').split('\n').map(line => `${sign} ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`);
+const CONTEXT_LINES = 3;
+/** Old and new text compared line by line: only changed lines get "-" or "+"; unchanged lines keep a space and long unchanged runs shrink to nearby context. */
+function comparedLines(removed: string, added: string): string[] {
+  const withEnd = (text: string) => text === '' || text.endsWith('\n') ? text : `${text}\n`;
+  const changes = diffLines(withEnd(removed), withEnd(added), { timeout: 150, maxEditLength: 2000 });
+  // Too complex to compare within the time limit: show every old line removed and every new line added, as before.
+  if (!changes) return [...signed(removed, '-'), ...signed(added, '+')];
+  return changes.flatMap((change, index) => {
+    if (change.added) return signed(change.value, '+');
+    if (change.removed) return signed(change.value, '-');
+    const same = signed(change.value, ' ');
+    const first = index === 0, last = index === changes.length - 1;
+    const keep = (first ? 0 : CONTEXT_LINES) + (last ? 0 : CONTEXT_LINES);
+    if (same.length <= keep + 1) return same;
+    const head = first ? [] : same.slice(0, CONTEXT_LINES), tail = last ? [] : same.slice(-CONTEXT_LINES);
+    return [...head, `  … ${same.length - head.length - tail.length} unchanged line(s)`, ...tail];
+  });
+}
 /** A bounded diff block of the proposed text, so the user sees the edit before approving it. */
 function previewBlock(options: { removed?: string; added: string; label: string }): string {
-  const lines = (text: string, sign: string) => text === '' ? [] : text.replace(/\n$/u, '').split('\n').map(line => `${sign} ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`);
-  const all = [...(options.removed === undefined ? [] : lines(options.removed, '-')), ...lines(options.added, '+')];
+  const all = options.removed === undefined ? signed(options.added, '+') : comparedLines(options.removed, options.added);
   const shown = all.slice(0, 40);
   const body = [...shown, ...(all.length > shown.length ? [`… ${all.length - shown.length} more line(s) not shown`] : [])].join('\n');
   const fence = '`'.repeat(Math.max(3, ...(body.match(/`+/gu) ?? []).map(run => run.length + 1)));

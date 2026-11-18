@@ -35,9 +35,11 @@ header { display: flex; align-items: center; flex-wrap: wrap; gap: 0.375rem; min
 header h1 { flex: 1 0 100%; }
 header .description { display: none; }
 header > button { font-size: 0.6875rem; padding: 0.25rem 0.375rem; }
-header > div { display: flex; flex-wrap: wrap; gap: 0.375rem; }
-header > div button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
-header #cancel-button:disabled { display: none; }
+/* Request buttons sit under the conversation, next to the approval preview; the bar disappears when none is showing. */
+#run-actions { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+#run-actions button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+#run-actions #cancel-button:disabled { display: none; }
+#run-actions:not(:has(> button:not([hidden]):not(#cancel-button:disabled))) { display: none; }
 [hidden] { display: none !important; }
 
 #task-content {
