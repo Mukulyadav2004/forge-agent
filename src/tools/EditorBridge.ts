@@ -20,6 +20,8 @@ import { COMMAND_LIMITS, runCommand } from './runCommand';
 
 /** Characters of workspace text one user request may bring into the model's context: reads, searches, listings and supplied context. */
 export const CONTEXT_BUDGET = 200_000;
+/** One read_file call: big enough to read a typical source file whole (Flask's cli.py is about 1,100 lines and 46,000 characters). */
+const READ_LIMITS = { lines_per_call: 2000, characters_per_call: 60000 };
 const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 8388608, output_characters: 20000, line_characters: 1000, matches_per_file: 3, timeout_ms: 5000 };
 const SEARCH_EXCLUDE = '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage}/**';
 const SearchInputSchema = z.object({ query: z.string().min(1).max(500), glob: z.string().min(1).max(200).default('**/*').describe('Workspace-relative path filter. Narrow to a folder or extension when results are incomplete.'), regex: z.boolean().default(false), case_sensitive: z.boolean().default(false), max_results: z.number().int().min(1).max(100).default(40), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') });
@@ -173,12 +175,12 @@ export class EditorBridge implements vscode.Disposable {
       } }));
     };
     register('search_code', { description: 'Search saved workspace text. Returns hits grouped by file with line numbers, up to three excerpts per file, observed folder counts and a next-step hint. Run one focused search per fact you need (for example where a name is defined, then where it is registered, imported or called); a distinctive identifier finds far fewer, better hits than a common word. Literal and case-insensitive by default; set regex to true for patterns such as alternatives (name_a|name_b). Use glob to filter paths and narrow incomplete searches. Then open each relevant hit with read_file around its line number.', inputSchema: SearchInputSchema.shape, annotations: { readOnlyHint: true } }, async (input, extra) => this.searchCode({ ...input, signal: extra.signal }));
-    register('read_file', { description: 'Read numbered lines from a workspace file: 200 lines from start_line by default, at most 500 per call. Returns the actual range, total_lines, whether more lines follow, and the base_revision that propose_edit needs. When a search hit or other evidence gives a line number, start a few lines before it and read to the end of the enclosing block instead of starting at line 1; continue with a later start_line if the block is cut off.', inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
+    register('read_file', { description: `Read numbered lines from a workspace file. Without end_line it reads from start_line to the end of the file, up to ${READ_LIMITS.lines_per_call} lines or ${READ_LIMITS.characters_per_call} characters per call. Read a file you will edit whole, in one call, so you do not need to search it again. For a question about one block of a large file, start a few lines before a known line number and read to the end of that block. Returns the actual range, total_lines, whether more lines follow, and the base_revision that propose_edit needs.`, inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
       const { revision, file } = await this.options.edits.read(path);
       const lines = file.text.split('\n');
       if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
-      const end = Math.min(end_line ?? start_line + 199, start_line + 499, lines.length);
-      const allowance = Math.min(30000, this.remaining());
+      const end = Math.min(end_line ?? lines.length, start_line + READ_LIMITS.lines_per_call - 1, lines.length);
+      const allowance = Math.min(READ_LIMITS.characters_per_call, this.remaining());
       if (allowance < 1000) throw this.budgetError();
       const output: string[] = [];
       let length = 0;
