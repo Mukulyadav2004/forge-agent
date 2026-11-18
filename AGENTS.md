@@ -126,8 +126,11 @@ src/extension.ts               commands and startup
 src/shared/messages.ts         sidebar <-> extension message contracts
 src/sidebar/, src/webview/     sidebar and webview UI
 src/agent/ForgeSession.ts      TrueForge SDK boundary, agent definition
-src/agent/instructions.ts      the agent's system prompt (our own words;
-                               never copy Cline's prompt text)
+src/agent/instructions.ts      the agent's system prompt: our own words plus
+                               small, attributed parts adapted from Cline's
+                               act-mode prompt (Apache-2.0; header and
+                               THIRD_PARTY_NOTICES.md). Never paste Cline's
+                               whole prompt or its loop/permission rules
 src/tools/EditorBridge.ts      MCP tools: list_files, read_file,
                                propose_edit
 src/edits/review.ts            review schemas

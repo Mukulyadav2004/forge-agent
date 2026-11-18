@@ -211,7 +211,7 @@ test('SDK session, stream, approval resume, cancellation and error handling', as
     assert.equal(session.id, 'test-session');
     const createdSpec = requests.find(request => request.url === '/api/v1/sessions').body.agent.spec;
     assert.equal(createdSpec.config.generative_ui.enabled, false);
-    assert.equal(createdSpec.config.ask_user_questions.enabled, false);
+    assert.equal(createdSpec.config.ask_user_questions.enabled, true, 'ask_user_question is on (16c7610): the model can pause the turn with multiple-choice options.');
     assert.equal(createdSpec.model.params.reasoning_effort, 'medium');
     assert.ok(createdSpec.mcp_servers[0].enable_tools.includes('search_code'));
     assert.equal(events.filter(event => event.type === 'model.message.delta').map(event => event.content).join(''), 'Hello Forge');

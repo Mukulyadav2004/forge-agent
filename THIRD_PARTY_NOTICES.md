@@ -45,6 +45,14 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - Adapted in: `src/edits/EditService.ts` (exactly-once `old_text` match with a literal replacer; insert-before-line boundary) and the `propose_edit` schema in `src/tools/EditorBridge.ts`.
 - Changes: edits apply to the in-memory pending proposal, never to disk; line numbers refer to the file as read and are shifted past earlier pending changes; overlaps are refused; Forge's revision, conflict, review and undo checks are unchanged. Omitted: file creation, Cline path resolution, `node:fs` writes, line-ending helpers, `@cline/shared` and executor types.
 
+## Cline act-mode prompt guidance
+
+- Upstream: https://github.com/cline/cline; exact source commit `7a7878cb52fc33967d8b464b3e3d899beac42d4d`; copyright 2026 Cline Bot Inc.; Apache-2.0 licence preserved in `licenses/Cline-Apache-2.0.txt`.
+- Source: `sdk/packages/shared/src/prompt/system/act.ts` (`CLINE_SYSTEM_PROMPT_ACT_MODE`).
+- Adapted in: `src/agent/instructions.ts` (coding-task order and tool-use guidance), with a header naming the adapted parts.
+- Taken, reworded for Forge's tools: gather context including how tests run; plan with the first tool calls; batch independent calls; use only libraries confirmed in use; complete code without placeholders; state assumptions and limitations; validate by running; verify edits before finishing; do not announce a tool without calling it; answer simple questions directly.
+- Not taken: "don't ask for permission" (Forge proposes each command for user approval and forbids system-wide installs), absolute paths (Forge tools are workspace-relative), plan/act modes and Cline's loop rules (TrueForge runs the loop).
+
 ## jsdiff dependency
 
 - Package: `diff@8.0.2`, https://github.com/kpdecker/jsdiff.
