@@ -18,7 +18,8 @@ export async function checkSidebarLayout(options: { frame: Frame; extensionUri: 
         document.body.style.height = `${Math.min(size.height, window.innerHeight)}px`;
         document.documentElement.style.fontSize = `${size.font.root * size.scale}px`;
         document.body.style.setProperty('--vscode-font-size', `${size.font.body * size.scale}px`);
-        document.querySelector('#task-content')?.scrollTo(0, 0);
+        // The review panel is part of the one conversation scroll, so bring it into view as a reader would.
+        document.querySelector('#review-panel')?.scrollIntoView({ block: 'start' });
         document.querySelector('.proposal-list')?.scrollTo(0, 0);
       }, { ...fixture, font });
       const metrics = await frame.evaluate(() => {

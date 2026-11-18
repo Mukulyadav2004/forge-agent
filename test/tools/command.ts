@@ -32,10 +32,10 @@ export async function checkCommand(options: { client: Client; frame: Frame }): P
   const fourth = await run({ command: 'echo one too many' });
   assert.equal(fourth.result.isError, true, 'A request runs at most three commands.');
   assert.match(JSON.stringify(fourth.result.content), /already ran 3 commands, the limit per request/u);
-  const row = options.frame.locator('#activity-list .activity-command').filter({ hasText: 'echo checked' });
+  const row = options.frame.locator('#messages .activity-command').filter({ hasText: 'echo checked' });
   await row.waitFor();
-  assert.match(await row.innerText(), /Ran echo checked; echo warn >&2; exit 3: exit 3 after [\d.]+ s \(\+\d+ chars\)[\s\S]*Check the exit code/u);
-  assert.ok((await options.frame.locator('#activity-list .activity-command').filter({ hasText: 'sleep 30' }).innerText()).includes('timed out'));
-  assert.match(await options.frame.locator('#activity-count').innerText(), /\d+ commands? ·/u);
-  await options.frame.locator('#activity-list .activity-refused').filter({ hasText: 'run_command: cwd must stay inside the workspace.' }).waitFor();
+  assert.match(await row.innerText(), /^Ran\s+echo checked; echo warn >&2; exit 3\s+exit 3 after [\d.]+ s \(\+\d+ chars\)[\s\S]*Check the exit code/u);
+  assert.ok((await options.frame.locator('#messages .activity-command').filter({ hasText: 'sleep 30' }).innerText()).includes('timed out'));
+  assert.ok(await options.frame.locator('#messages .activity-card.activity-command').count() >= 3, 'Each command that ran is its own row in the conversation.');
+  await options.frame.locator('#messages .activity-refused').filter({ hasText: 'run_command: cwd must stay inside the workspace.' }).waitFor();
 }

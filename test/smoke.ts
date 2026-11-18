@@ -147,8 +147,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   assert.ok(JSON.stringify(read).includes("original text"));
   const structuredRead: unknown = read.structuredContent;
   assert.ok(typeof structuredRead === 'object' && structuredRead !== null && 'text' in structuredRead && typeof structuredRead.text === 'string' && structuredRead.text.includes('original text'), 'TrueForge must receive the file text even when it selects only structuredContent.');
-  await restoredFrame.locator('#file-evidence summary').click();
-  await restoredFrame.locator('#file-evidence-list').getByRole('button', { name: 'example.txt:1-2', exact: true }).waitFor();
+  await restoredFrame.locator('#messages .activity-group .activity-open').getByRole('button', { name: 'example.txt:1-2', exact: true }).last().waitFor();
   const escape = await client.callTool({ name: "read_file", arguments: { path: "../outside.txt" } });
   assert.equal(escape.isError, true);
   const readData: unknown = read.structuredContent;
@@ -357,7 +356,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await input.fill('Make an architecture map of the project');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.locator('#message-input:not([disabled])').waitFor();
-    const contextSources = frame.locator('#file-evidence-list button').filter({ hasText: 'supplied context' });
+    const contextSources = frame.locator('#messages .activity-context').last().locator('xpath=..').locator('.activity-context');
     await contextSources.first().waitFor();
     assert.equal(await contextSources.count(), 3);
     assert.equal(receivedArchitectureContext, true);
@@ -373,8 +372,8 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await input.fill('Fallback check');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.getByRole('log').getByText(/Switching to the fallback model/).waitFor();
-    assert.equal(await frame.locator('#activity-list .activity-request').count(), 1, 'A new request starts a fresh context budget in the feed.');
-    assert.match(await frame.locator('#activity-count').innerText(), /· context 0 of 200k chars\)$/u);
+    assert.equal(await frame.locator('#messages .activity-request').count(), 1, 'A new request starts a fresh context budget in the feed.');
+    assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request · context 0 of 200k chars$/u);
     await frame.getByRole('log').getByText('Recovered with the corrected model.', { exact: true }).waitFor();
     await frame.locator('#message-input:not([disabled])').waitFor();
     assert.ok((await frame.getByRole('log').innerText()).includes('API key not valid'), 'The error must be shown in plain words.');
@@ -384,10 +383,10 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await input.fill('Compaction check');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.getByText('Continued after compaction.', { exact: true }).waitFor();
-    const compacted = frame.locator('#activity-list .activity-compaction');
+    const compacted = frame.locator('#messages .activity-compaction');
     await compacted.filter({ hasText: 'summarised it to' }).waitFor();
     assert.match(await compacted.innerText(), /Compacted context 41k tokens reached the 32k-token threshold; TrueForge summarised it to 5.1k tokens in 2\.1 s[\s\S]*re-reads what it still needs/u);
-    await frame.locator('#activity-feed').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'compaction-feed.png').fsPath });
+    await frame.locator('#messages').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'compaction-feed.png').fsPath });
     await input.fill('Diff render check');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     const removed = frame.locator('.markdown-body .diff-line-removed');

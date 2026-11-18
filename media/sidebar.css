@@ -35,7 +35,7 @@ header { display: flex; align-items: center; flex-wrap: wrap; gap: 0.375rem; min
 header h1 { flex: 1 0 100%; }
 header .description { display: none; }
 header > button { font-size: 0.6875rem; padding: 0.25rem 0.375rem; }
-/* Request buttons sit under the conversation, next to the approval preview; the bar disappears when none is showing. */
+/* Request buttons stay pinned above the composer, under the approval at the end of the conversation; the bar disappears when none is showing. */
 #run-actions { display: flex; flex-wrap: wrap; gap: 0.375rem; }
 #run-actions button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
 #run-actions #cancel-button:disabled { display: none; }
@@ -70,17 +70,11 @@ header > button { font-size: 0.6875rem; padding: 0.25rem 0.375rem; }
   font-size: 0.75rem;
 }
 
-#messages {
-  flex: 2 0 5rem;
-  min-height: 5rem;
-  min-width: 0;
-  overflow-y: auto;
-}
+/* One scroll for the whole task: messages, tool activity and the review panel, in order. */
+#messages { flex: none; min-width: 0; display: flex; flex-direction: column; gap: 0.5rem; }
 
-.message {
-  padding: 0.75rem 0;
-  border-bottom: 0.0625rem solid var(--vscode-panel-border);
-}
+.message { padding: 0.25rem 0; }
+.message-user { padding: 0.5rem 0.625rem; border-radius: 0.375rem; background: var(--vscode-input-background); border: 0.0625rem solid var(--vscode-panel-border); }
 
 .message > .message-author {
   margin-bottom: 0.375rem;
@@ -112,15 +106,18 @@ header > button { font-size: 0.6875rem; padding: 0.25rem 0.375rem; }
 .architecture-diagram svg { display: block; width: 100%; min-width: 18rem; height: auto; }
 .architecture-diagram details { margin-top: 0.5rem; }
 summary { cursor: pointer; color: var(--vscode-descriptionForeground); }
-#file-evidence { flex: 0 0 auto; max-height: 3rem; overflow: auto; }
-#file-evidence-list { margin: 0.375rem 0; padding-left: 1rem; }
 .source-reference { background: transparent; color: var(--vscode-textLink-foreground); padding: 0.125rem; text-align: left; overflow-wrap: anywhere; font-size: 0.75rem; }
-#activity-feed { flex: 0 0 auto; }
-#activity-list { max-height: 7.5rem; overflow: auto; overscroll-behavior: contain; margin: 0.25rem 0; padding: 0; list-style: none; font-size: 0.75rem; }
+.activity-request { color: var(--vscode-descriptionForeground); font-size: 0.6875rem; }
+.activity-group > summary { font-size: 0.75rem; font-weight: 600; color: var(--vscode-foreground); }
+.activity-list { margin: 0.25rem 0 0 0.25rem; padding-left: 0.5rem; border-left: 0.125rem solid var(--vscode-panel-border); font-size: 0.75rem; }
 .activity-row { padding: 0.125rem 0; overflow-wrap: anywhere; }
 .activity-kind { margin-right: 0.375rem; color: var(--vscode-descriptionForeground); font-weight: 600; }
 .activity-note { display: block; padding-left: 0.75rem; color: var(--vscode-descriptionForeground); }
-.activity-row > ul { margin: 0.125rem 0 0; padding-left: 0.75rem; list-style: none; border-left: 0.0625rem solid var(--vscode-panel-border); }
+.activity-nested { margin-top: 0.125rem; padding-left: 0.75rem; border-left: 0.0625rem solid var(--vscode-panel-border); }
+.activity-card { padding: 0.375rem 0.5rem; font-size: 0.75rem; border-radius: 0.25rem; border-left: 0.1875rem solid var(--vscode-panel-border); background: var(--vscode-textCodeBlock-background); }
+.activity-card.activity-propose { border-left-color: var(--vscode-gitDecoration-addedResourceForeground, currentColor); }
+.activity-card.activity-failed { border-left-color: var(--vscode-errorForeground); }
+.activity-card.activity-command code { display: block; margin: 0.25rem 0; white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); }
 
 form {
   display: flex;
@@ -190,7 +187,7 @@ button:focus-visible, textarea:focus-visible {
   outline-offset: 0.125rem;
 }
 
-#review-panel { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); flex: 3 0 12rem; min-height: 12rem; min-width: 0; overflow: hidden; border: 0.0625rem solid var(--vscode-panel-border); border-radius: 0.375rem; padding: 0.5rem; }
+#review-panel { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); flex: none; height: clamp(12rem, 60vh, 32rem); min-width: 0; overflow: hidden; border: 0.0625rem solid var(--vscode-panel-border); border-radius: 0.375rem; padding: 0.5rem; }
 #review-panel > [role="status"] { max-height: 3rem; overflow: auto; }
 .proposal-list { min-height: 0; overflow: auto; overscroll-behavior: contain; }
 #review-panel h2 { font-size: 0.875rem; margin: 0 0 0.375rem; }

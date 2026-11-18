@@ -159,7 +159,7 @@ ${selectedText}`;
       const search = [...this.activity].reverse().find(item => item.kind === 'search' && item.files.includes(path));
       if (search?.kind === 'search') entry.foundBy = search.query;
     }
-    this.activity.push(entry);
+    this.activity.push({ ...entry, at: this.messages.length });
     if (this.activity.length > 200) this.activity.shift();
     if (entry.kind === 'open' || entry.kind === 'context') this.recordInspection({ path: entry.path, startLine: entry.startLine, endLine: entry.endLine, origin: entry.kind === 'open' ? 'tool' : 'context' });
     else this.publish();
@@ -342,12 +342,10 @@ ${selectedText}`;
     <span class="badge" id="status" role="status">Ready</span>
   </header>
   <main id="task-content" aria-label="Task workspace">
-  <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>
-  <details id="file-evidence" hidden><summary>Files inspected</summary><ul id="file-evidence-list"></ul></details>
-  <details id="activity-feed" open hidden><summary>Activity <span id="activity-count"></span></summary><ol id="activity-list" aria-live="polite"></ol></details>
   <div id="messages" role="log" aria-label="Conversation" aria-live="polite" aria-relevant="additions text">
     <p class="empty-state">Your messages will appear here.</p>
   </div>
+  <section id="review-panel" role="region" aria-label="Proposed changes" hidden></section>
   </main>
   <div id="run-actions" role="group" aria-label="Current request"><button id="cancel-button" type="button" disabled>Cancel</button> <button id="approve-button" type="button" hidden>Approve</button> <button id="deny-button" type="button" hidden>Deny</button></div>
   <form id="message-form">

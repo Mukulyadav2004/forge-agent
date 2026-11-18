@@ -61,153 +61,195 @@ function updateComposer(): void {
 
 const renderedMessages = new Map<string, { text: string; article: HTMLElement; body: HTMLElement }>();
 
-function renderMessages(options: { messages: ChatMessage[]; complete: boolean }): void {
-  if (!(conversation instanceof HTMLDivElement)) {
-    return;
+/** A chat message element, reused while its text is unchanged so Markdown and diagrams are not rebuilt on every update. */
+function messageElement(message: ChatMessage, complete: boolean): HTMLElement {
+  let cached = renderedMessages.get(message.id);
+  if (!cached) {
+    const article = document.createElement("article");
+    article.className = `message message-${message.role}`;
+    const author = document.createElement("h2");
+    author.className = 'message-author';
+    author.textContent = message.role === "user" ? "You" : "Forge";
+    const body = document.createElement("div");
+    body.className = message.role === 'assistant' ? 'markdown-body' : 'user-text';
+    article.append(author, body);
+    cached = { text: '', article, body };
+    renderedMessages.set(message.id, cached);
   }
+  if (cached.text !== message.text) {
+    if (message.role === 'assistant') renderMarkdown({ container: cached.body, text: message.text });
+    else cached.body.textContent = message.text;
+    cached.text = message.text;
+  }
+  if (complete && message.role === 'assistant') void renderDiagrams(cached.body);
+  return cached.article;
+}
 
+const plural = (count: number, word: string, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
+const where = (glob: string) => !glob || glob === '**/*' ? 'codebase' : glob;
+const size = (characters: number) => characters < 1000 ? `${characters}` : characters < 10000 ? `${(characters / 1000).toFixed(1)}k` : `${Math.round(characters / 1000)}k`;
+const sourceLink = (path: string, line: number, label: string) => {
+  const button = document.createElement('button');
+  button.className = 'source-reference';
+  button.textContent = label;
+  button.addEventListener('click', () => vscode.postMessage({ type: 'open_file', path, line }));
+  return button;
+};
+
+/** One line for one completed tool call. Paths open the file; reasons are the agent's own words; `added` is the context it cost. */
+function activityRow(entry: Exclude<ActivityEntry, { kind: 'request' }>, added: number, nested: boolean): HTMLElement {
+  const row = document.createElement('div');
+  row.className = `activity-row activity-${entry.kind}`;
+  const kind = document.createElement('span');
+  kind.className = 'activity-kind';
+  const notes: string[] = [];
+  let main: (string | HTMLElement)[];
+  switch (entry.kind) {
+    case 'search':
+      kind.textContent = 'Searched';
+      main = [`"${entry.query}" in ${where(entry.glob)}: ${plural(entry.matches, 'match', 'matches')} in ${plural(entry.fileCount, 'file')}${entry.truncated ? ' (limited)' : ''}`];
+      if (entry.files.length) row.title = entry.files.join('\n');
+      break;
+    case 'open':
+      kind.textContent = 'Opened';
+      main = [sourceLink(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`)];
+      if (entry.foundBy !== undefined && !nested) notes.push(`found by search "${entry.foundBy}"`);
+      break;
+    case 'propose':
+      kind.textContent = 'Staged edit';
+      main = [sourceLink(entry.path, 1, entry.path), ` ${entry.detail}`];
+      break;
+    case 'list':
+      kind.textContent = 'Listed';
+      main = [`${where(entry.glob)}: ${plural(entry.count, 'file')}`];
+      break;
+    case 'command': {
+      kind.textContent = 'Ran';
+      const code = document.createElement('code');
+      code.textContent = entry.command.length > 200 ? `${entry.command.slice(0, 200)}…` : entry.command;
+      code.title = entry.command;
+      const ended = entry.cancelled ? 'cancelled' : entry.timedOut ? 'timed out' : `exit ${entry.exitCode ?? 'signal'}`;
+      main = [code, `${entry.cwd === '.' ? '' : `in ${entry.cwd} · `}${ended} after ${(entry.durationMs / 1000).toFixed(1)} s`];
+      if (entry.cancelled || entry.timedOut || entry.exitCode !== 0) row.classList.add('activity-failed');
+      break;
+    }
+    case 'refused':
+      kind.textContent = 'Refused';
+      main = [`${entry.tool}: ${entry.message}`];
+      row.classList.add('activity-failed');
+      break;
+    case 'compaction':
+      kind.textContent = entry.done ? 'Compacted' : 'Compacting';
+      main = [`context ${size(entry.contextTokens)} tokens reached the ${size(entry.thresholdTokens)}-token threshold${entry.afterTokens !== undefined ? `; TrueForge summarised it to ${size(entry.afterTokens)} tokens` : entry.done ? '; TrueForge summarised it' : '…'}${entry.durationMs !== undefined ? ` in ${(entry.durationMs / 1000).toFixed(1)} s` : ''}`];
+      notes.push('Earlier messages and file contents were replaced by a summary; the agent re-reads what it still needs.');
+      break;
+    case 'context':
+      kind.textContent = 'Given';
+      main = [sourceLink(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];
+      break;
+  }
+  if ('reason' in entry && entry.reason) notes.push(entry.reason);
+  if (added > 0) main.push(` (+${size(added)} chars)`);
+  row.append(kind, ' ', ...main);
+  for (const text of notes) {
+    const note = document.createElement('span');
+    note.className = 'activity-note';
+    note.textContent = text;
+    row.append(note);
+  }
+  return row;
+}
+
+/** Collapsed or expanded by the user, by group; groups start open. */
+const openGroups = new Map<string, boolean>();
+const EXPLORING = new Set<ActivityEntry['kind']>(['search', 'open', 'list', 'context']);
+
+/**
+ * The whole task as one scroll, oldest first: each message, then what happened after it.
+ * Consecutive searches and reads collapse into one "Forge read … searched …" block; commands, staged edits,
+ * refusals and compaction stand alone. A request line shows that request's context budget.
+ */
+function renderTimeline(options: { messages: ChatMessage[]; activity: ActivityEntry[]; complete: boolean }): void {
+  if (!(conversation instanceof HTMLDivElement)) return;
+  const liveIds = new Set(options.messages.map(message => message.id));
+  for (const id of renderedMessages.keys()) if (!liveIds.has(id)) renderedMessages.delete(id);
+  const after = new Map<number, HTMLElement[]>(); // elements shown after that many messages
+  const place = (at: number, element: HTMLElement) => after.set(at, [...(after.get(at) ?? []), element]);
+  const spent = new Map<number, number>();
+  let request = -1;
+  options.activity.forEach((entry, index) => {
+    if (entry.kind === 'request') request = index;
+    else if ('used' in entry && entry.used !== undefined) spent.set(request, entry.used);
+  });
+  interface Group { at: number; list: HTMLElement; summary: HTMLElement; searches: Map<string, HTMLElement>; paths: Set<string>; counts: Record<string, number>; added: number }
+  const groups: Group[] = [];
+  let group: Group | undefined;
+  let previousUsed = 0;
+  options.activity.forEach((entry, index) => {
+    const at = Math.min(entry.at ?? options.messages.length, options.messages.length);
+    if (entry.kind === 'request') {
+      group = undefined; previousUsed = 0;
+      const line = document.createElement('div');
+      line.className = 'activity-request';
+      line.textContent = `New request · context ${size(spent.get(index) ?? 0)} of ${size(entry.limit)} chars`;
+      place(at, line);
+      return;
+    }
+    const added = 'used' in entry && entry.used !== undefined ? Math.max(0, entry.used - previousUsed) : 0;
+    if ('used' in entry && entry.used !== undefined) previousUsed = entry.used;
+    if (!EXPLORING.has(entry.kind)) {
+      group = undefined;
+      const card = activityRow(entry, added, false);
+      card.classList.add('activity-card');
+      place(at, card);
+      return;
+    }
+    if (!group || group.at !== at) {
+      const details = document.createElement('details');
+      details.className = 'activity-group';
+      const key = `${at}:${JSON.stringify(entry)}`;
+      details.open = openGroups.get(key) ?? true;
+      details.addEventListener('toggle', () => openGroups.set(key, details.open));
+      const summary = document.createElement('summary');
+      const list = document.createElement('div');
+      list.className = 'activity-list';
+      details.append(summary, list);
+      group = { at, list, summary, searches: new Map(), paths: new Set(), counts: {}, added: 0 };
+      groups.push(group);
+      place(at, details);
+    }
+    const parent = entry.kind === 'open' && entry.foundBy !== undefined ? group.searches.get(entry.foundBy) : undefined;
+    const row = activityRow(entry, added, parent !== undefined);
+    if (parent) {
+      let nested = parent.querySelector<HTMLElement>(':scope > .activity-nested');
+      if (!nested) { nested = document.createElement('div'); nested.className = 'activity-nested'; parent.append(nested); }
+      nested.append(row);
+    } else group.list.append(row);
+    if (entry.kind === 'search') group.searches.set(entry.query, row);
+    if (entry.kind === 'open' || entry.kind === 'context') group.paths.add(entry.path);
+    group.counts[entry.kind] = (group.counts[entry.kind] ?? 0) + 1;
+    group.added += added;
+  });
+  for (const item of groups) {
+    const count = (kind: string) => item.counts[kind] ?? 0;
+    const parts = [
+      ...(count('context') ? [`was given ${plural(count('context'), 'range')}`] : []),
+      ...(count('open') ? [`read ${plural(item.paths.size, 'file')}`] : []),
+      ...(count('search') ? [`searched ${plural(count('search'), 'time')}`] : []),
+      ...(count('list') ? [`listed files ${plural(count('list'), 'time')}`] : []),
+    ];
+    item.summary.textContent = `Forge ${parts.join(', ')}${item.added ? ` · +${size(item.added)} chars` : ''}`;
+  }
   const fragment = document.createDocumentFragment();
-  if (options.messages.length === 0) {
+  if (options.messages.length === 0 && options.activity.length === 0) {
     const emptyState = document.createElement("p");
     emptyState.className = "empty-state";
     emptyState.textContent = "Your messages will appear here.";
     fragment.append(emptyState);
   }
-
-  const liveIds = new Set(options.messages.map(message => message.id));
-  for (const id of renderedMessages.keys()) if (!liveIds.has(id)) renderedMessages.delete(id);
-  for (const message of options.messages) {
-    let cached = renderedMessages.get(message.id);
-    if (!cached) {
-      const article = document.createElement("article");
-      article.className = `message message-${message.role}`;
-      const author = document.createElement("h2");
-      author.className = 'message-author';
-      author.textContent = message.role === "user" ? "You" : "Forge";
-      const body = document.createElement("div");
-      body.className = message.role === 'assistant' ? 'markdown-body' : 'user-text';
-      article.append(author, body);
-      cached = { text: '', article, body };
-      renderedMessages.set(message.id, cached);
-    }
-    if (cached.text !== message.text) {
-      if (message.role === 'assistant') renderMarkdown({ container: cached.body, text: message.text });
-      else cached.body.textContent = message.text;
-      cached.text = message.text;
-    }
-    if (options.complete && message.role === 'assistant') void renderDiagrams(cached.body);
-    fragment.append(cached.article);
-  }
-
+  fragment.append(...(after.get(0) ?? []));
+  options.messages.forEach((message, index) => fragment.append(messageElement(message, options.complete), ...(after.get(index + 1) ?? [])));
   conversation.replaceChildren(fragment);
-  conversation.scrollTop = conversation.scrollHeight;
-}
-
-let renderedActivity = '';
-const plural = (count: number, word: string, many = `${word}s`) => `${count} ${count === 1 ? word : many}`;
-const where = (glob: string) => !glob || glob === '**/*' ? 'codebase' : glob;
-const size = (characters: number) => characters < 1000 ? `${characters}` : characters < 10000 ? `${(characters / 1000).toFixed(1)}k` : `${Math.round(characters / 1000)}k`;
-
-/** One row per completed editor tool call, oldest first; a file opened from a search is nested under it. Paths open the file; reasons are the agent's own words.
- * Each read, search or listing shows the characters it added; the header shows the current request's context budget. */
-function renderActivity(entries: ActivityEntry[]): void {
-  const feed = document.getElementById('activity-feed');
-  const list = document.getElementById('activity-list');
-  const count = document.getElementById('activity-count');
-  const key = JSON.stringify(entries);
-  if (!feed || !list || key === renderedActivity) return;
-  renderedActivity = key;
-  feed.hidden = entries.length === 0;
-  const tally = (kind: ActivityEntry['kind']) => entries.filter(entry => entry.kind === kind).length;
-  const lastRequest = entries.map(entry => entry.kind).lastIndexOf('request');
-  const request = entries[lastRequest];
-  const spent = entries.slice(lastRequest + 1).reduce((used, entry) => 'used' in entry && entry.used !== undefined ? entry.used : used, 0);
-  const budget = request?.kind === 'request' ? `context ${size(spent)} of ${size(request.limit)} chars` : `context ${size(spent)} chars`;
-  if (count) count.textContent = `(${[plural(tally('search'), 'search', 'searches'), plural(tally('open'), 'read'), plural(tally('propose'), 'proposal'), ...(tally('command') ? [plural(tally('command'), 'command')] : [])].join(', ')} · ${budget})`;
-  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
-  const link = (path: string, line: number, label: string) => {
-    const button = document.createElement('button');
-    button.className = 'source-reference';
-    button.textContent = label;
-    button.addEventListener('click', () => vscode.postMessage({ type: 'open_file', path, line }));
-    return button;
-  };
-  const searches = new Map<string, HTMLElement>();
-  const rows: HTMLElement[] = [];
-  let previousUsed = 0;
-  for (const entry of entries) {
-    const row = document.createElement('li');
-    row.className = `activity-row activity-${entry.kind}`;
-    const kind = document.createElement('span');
-    kind.className = 'activity-kind';
-    const notes: string[] = [];
-    let main: (string | HTMLElement)[];
-    switch (entry.kind) {
-      case 'request':
-        kind.textContent = 'New request';
-        main = [`context budget ${size(entry.limit)} characters`];
-        searches.clear(); previousUsed = 0;
-        break;
-      case 'search':
-        kind.textContent = 'Searched';
-        main = [`"${entry.query}" in ${where(entry.glob)}: ${plural(entry.matches, 'match', 'matches')} in ${plural(entry.fileCount, 'file')}${entry.truncated ? ' (limited)' : ''}`];
-        if (entry.files.length) row.title = entry.files.join('\n');
-        break;
-      case 'open':
-        kind.textContent = 'Opened';
-        main = [link(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`)];
-        if (entry.foundBy !== undefined && !searches.has(entry.foundBy)) notes.push(`found by search "${entry.foundBy}"`);
-        break;
-      case 'propose':
-        kind.textContent = 'Proposed';
-        main = [link(entry.path, 1, entry.path), ` ${entry.detail}`];
-        break;
-      case 'list':
-        kind.textContent = 'Listed';
-        main = [`${where(entry.glob)}: ${plural(entry.count, 'file')}`];
-        break;
-      case 'command': {
-        kind.textContent = 'Ran';
-        const code = document.createElement('code');
-        code.textContent = entry.command.length > 200 ? `${entry.command.slice(0, 200)}…` : entry.command;
-        code.title = entry.command;
-        const ended = entry.cancelled ? 'cancelled' : entry.timedOut ? 'timed out' : `exit ${entry.exitCode ?? 'signal'}`;
-        main = [code, `${entry.cwd === '.' ? '' : ` in ${entry.cwd}`}: ${ended} after ${(entry.durationMs / 1000).toFixed(1)} s`];
-        break;
-      }
-      case 'refused':
-        kind.textContent = 'Refused';
-        main = [`${entry.tool}: ${entry.message}`];
-        break;
-      case 'compaction':
-        kind.textContent = entry.done ? 'Compacted' : 'Compacting';
-        main = [`context ${size(entry.contextTokens)} tokens reached the ${size(entry.thresholdTokens)}-token threshold${entry.afterTokens !== undefined ? `; TrueForge summarised it to ${size(entry.afterTokens)} tokens` : entry.done ? '; TrueForge summarised it' : '…'}${entry.durationMs !== undefined ? ` in ${(entry.durationMs / 1000).toFixed(1)} s` : ''}`];
-        notes.push('Earlier messages and file contents were replaced by a summary; the agent re-reads what it still needs.');
-        break;
-      case 'context':
-        kind.textContent = 'Given';
-        main = [link(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];
-        break;
-    }
-    if ('reason' in entry && entry.reason) notes.push(entry.reason);
-    if ('used' in entry && entry.used !== undefined) { if (entry.used > previousUsed) main.push(` (+${size(entry.used - previousUsed)} chars)`); previousUsed = entry.used; }
-    row.append(kind, ' ', ...main);
-    for (const text of notes) {
-      const note = document.createElement('span');
-      note.className = 'activity-note';
-      note.textContent = text;
-      row.append(note);
-    }
-    const parent = entry.kind === 'open' && entry.foundBy !== undefined ? searches.get(entry.foundBy) : undefined;
-    if (parent) {
-      let nested = parent.querySelector('ul');
-      if (!nested) parent.append(nested = document.createElement('ul'));
-      nested.append(row);
-    } else rows.push(row);
-    if (entry.kind === 'search') searches.set(entry.query, row);
-  }
-  list.replaceChildren(...rows);
-  if (atBottom) list.scrollTop = list.scrollHeight;
 }
 
 form.addEventListener("submit", (event) => {
@@ -259,31 +301,21 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
 
-  renderMessages({ messages: event.data.messages, complete: !event.data.busy });
+  // Follow new output only when the reader is already at the bottom, so scrolling back to read is not interrupted.
+  const scroller = document.getElementById('task-content');
+  const following = !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+  renderTimeline({ messages: event.data.messages, activity: event.data.activity, complete: !event.data.busy });
   const reviewPanel = document.getElementById('review-panel');
+  const reviewWasHidden = reviewPanel?.hidden ?? true;
   const reviewDisabled = event.data.busy || event.data.approval;
-  const lockNote = event.data.approval ? 'Paused until you approve or deny the request above.' : event.data.busy ? 'Paused while the agent works, so files stay put. Preview still works.' : undefined;
+  const lockNote = event.data.approval ? 'Paused until you approve or deny the request.' : event.data.busy ? 'Paused while the agent works, so files stay put. Preview still works.' : undefined;
   const reviewKey = JSON.stringify({ state: event.data.review, disabled: reviewDisabled, lockNote });
   if (reviewPanel instanceof HTMLElement && reviewKey !== renderedReview) {
     renderReviewPanel({ container: reviewPanel, state: event.data.review, disabled: reviewDisabled, lockNote, onCommand: command => vscode.postMessage({ type: 'review', command }) });
     renderedReview = reviewKey;
   }
-  const evidence = document.getElementById('file-evidence');
-  const evidenceList = document.getElementById('file-evidence-list');
-  if (evidence && evidenceList) {
-    evidence.hidden = event.data.inspectedFiles.length === 0;
-    const items = event.data.inspectedFiles.map(file => {
-      const item = document.createElement('li');
-      const button = document.createElement('button');
-      button.className = 'source-reference';
-      button.textContent = `${file.path}:${file.startLine}-${file.endLine}${file.origin === 'context' ? ' · supplied context' : ''}`;
-      button.addEventListener('click', () => vscode.postMessage({ type: 'open_file', path: file.path, line: file.startLine }));
-      item.append(button);
-      return item;
-    });
-    evidenceList.replaceChildren(...items);
-  }
-  renderActivity(event.data.activity);
+  if (scroller && following) scroller.scrollTop = scroller.scrollHeight;
+  else if (reviewPanel && reviewWasHidden && !reviewPanel.hidden) reviewPanel.scrollIntoView({ block: 'nearest' });
   if (awaitingAck && input instanceof HTMLTextAreaElement) {
     input.value = "";
     vscode.setState({ draft: "" });

@@ -15,8 +15,9 @@ export interface FileEvidence {
 }
 
 /** One completed editor tool call, as shown in the sidebar's activity feed. Reasons are the agent's optional words.
- * `used` is the request's context budget spent after this call; a `request` entry marks a new user request and its budget. */
-export type ActivityEntry =
+ * `used` is the request's context budget spent after this call; a `request` entry marks a new user request and its budget.
+ * `at` is how many chat messages existed when it happened, so the sidebar can place it in the conversation. */
+export type ActivityEntry = { at?: number } & (
   | { kind: 'request'; limit: number }
   | { kind: 'search'; query: string; glob: string; matches: number; fileCount: number; files: string[]; truncated: boolean; reason?: string; used?: number }
   | { kind: 'open'; path: string; startLine: number; endLine: number; reason?: string; foundBy?: string; used?: number }
@@ -27,11 +28,12 @@ export type ActivityEntry =
   /** An editor tool refused or failed; `message` is what the agent was told. */
   | { kind: 'refused'; tool: string; message: string }
   /** TrueForge summarised the conversation: size that triggered it, the threshold, and the size of the next model call afterwards. */
-  | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number };
+  | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number });
 
 function isActivityEntry(value: unknown): value is ActivityEntry {
   if (!isRecord(value) || (value.reason !== undefined && typeof value.reason !== 'string')) return false;
   if (value.used !== undefined && !(typeof value.used === 'number' && Number.isSafeInteger(value.used) && value.used >= 0)) return false;
+  if (value.at !== undefined && !(typeof value.at === 'number' && Number.isSafeInteger(value.at) && value.at >= 0)) return false;
   const text = (key: string) => typeof value[key] === 'string';
   const count = (key: string) => typeof value[key] === 'number' && Number.isSafeInteger(value[key]);
   switch (value.kind) {
