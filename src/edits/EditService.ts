@@ -158,7 +158,7 @@ export class EditService {
       const endExclusive = options.range ? options.range.endLine + 1 : start;
       if (!Number.isSafeInteger(start) || !Number.isSafeInteger(endExclusive) || start < 1 || endExclusive < start
         || (options.range ? endExclusive - 1 > readLines || endExclusive === start : start > readLines + 1)) {
-        throw new Error(options.range ? 'Choose complete lines inside this file for a ranged proposal.' : `insert_line must be between 1 and ${readLines + 1}; use ${readLines + 1} to append at the end of the file.`);
+        throw new Error(options.range ? `Choose complete lines inside this file for a ranged proposal; ${options.path} has ${readLines} line(s) as read.` : `insert_line must be between 1 and ${readLines + 1}; use ${readLines + 1} to append at the end of the file.`);
       }
       let shift = 0;
       for (const hunk of pending?.view.hunks ?? []) {

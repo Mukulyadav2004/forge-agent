@@ -87,6 +87,22 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.equal(await panel.locator('.proposal-row').first().getAttribute('data-proposal-id'), combined.proposal_id, 'The open proposal must be listed first.');
   assert.ok(await panel.locator('.proposal-row.superseded').count() >= 2);
   assert.equal(await panel.locator('.proposal-row.superseded .hunk-row, .proposal-row.superseded button').count(), 0);
+  // A whole-file replacement needs every line read at the file's current content; partial reads are refused, not silently truncated.
+  const coverageUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0]!.uri, 'coverage-probe.txt');
+  await vscode.workspace.fs.writeFile(coverageUri, new TextEncoder().encode(Array.from({ length: 299 }, (_, index) => `line ${index + 1}`).join('\n') + '\n'));
+  const firstPart = await client.callTool({ name: 'read_file', arguments: { path: 'coverage-probe.txt', start_line: 1, end_line: 200 } });
+  const partRevision = (firstPart.structuredContent as { base_revision: string }).base_revision;
+  const truncating = await client.callTool({ name: 'propose_edit', arguments: { path: 'coverage-probe.txt', base_revision: partRevision, new_text: 'only this\n', explanation: 'Truncation probe' } });
+  assert.equal(truncating.isError, true, 'A whole-file replacement after a partial read must be refused.');
+  assert.match(JSON.stringify(truncating.content), /100 line\(s\) of coverage-probe\.txt have not been read/u);
+  const badRange = await client.callTool({ name: 'propose_edit', arguments: { path: 'coverage-probe.txt', base_revision: partRevision, new_text: 'x', start_line: 400, end_line: 401, explanation: 'Range probe' } });
+  assert.match(JSON.stringify(badRange.content), /coverage-probe\.txt has 299 line\(s\) as read/u, 'A bad range says how long the file is.');
+  const secondPart = await client.callTool({ name: 'read_file', arguments: { path: 'coverage-probe.txt', start_line: 201 } });
+  const fullRevision = (secondPart.structuredContent as { base_revision: string }).base_revision;
+  const whole = await client.callTool({ name: 'propose_edit', arguments: { path: 'coverage-probe.txt', base_revision: fullRevision, new_text: 'replaced\n', explanation: 'Whole-file after a full read' } });
+  assert.equal(whole.isError, undefined, `After reading every line, a whole-file replacement is allowed: ${JSON.stringify(whole.content)}`);
+  await vscode.commands.executeCommand('forgeAgent.rejectAll');
+  await vscode.workspace.fs.delete(coverageUri);
   const proposals = (await feed()).activity.filter(entry => entry.kind === 'propose' && entry.reason === 'MCP combine check').map(entry => entry.detail);
   assert.deepEqual(proposals, ['lines 2–2', 'insert at line 4, combined with earlier changes', 'replace matched text, combined with earlier changes']);
   const activityRows = frame.locator('#activity-list .activity-row');

@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { open, realpath, stat } from 'node:fs/promises';
@@ -40,6 +40,18 @@ export class EditorBridge implements vscode.Disposable {
   private editScope: string | undefined;
   /** Commands run in this request; each needs its own approval, so a request gets a few and then must hand over to the user. */
   private commandsRun = 0;
+  /** Line ranges the agent has read of each file at its current content; a whole-file replacement needs every line read. */
+  private readonly readCoverage = new Map<string, [number, number][]>();
+  private coverageKey(path: string, text: string): string { return `${normalize(path).replace(/^\.\//u, '')}\0${createHash('sha256').update(text).digest('hex')}`; }
+  private unreadLines(path: string, text: string): number {
+    const total = text.split('\n').length;
+    let next = 1, unread = 0;
+    for (const [start, end] of [...(this.readCoverage.get(this.coverageKey(path, text)) ?? [])].sort((a, b) => a[0] - b[0])) {
+      if (start > next) unread += start - next;
+      next = Math.max(next, end + 1);
+    }
+    return unread + Math.max(0, total - next + 1);
+  }
   /** Called once per user request (not for approvals or retries of it). */
   beginRequest(scope?: string): void { this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
   private remaining(): number { return Math.max(0, CONTEXT_BUDGET - this.budgetUsed); }
@@ -180,6 +192,8 @@ export class EditorBridge implements vscode.Disposable {
       const actualEnd = start_line + output.length - 1;
       const text = output.join('\n');
       this.budgetUsed += text.length;
+      const key = this.coverageKey(path, file.text);
+      this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), [start_line, actualEnd]]);
       this.activityEvents.fire({ kind: 'open', used: this.budgetUsed, path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       // TrueForge prefers structured MCP results, so the source must be present there too.
       return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${this.budgetNote()}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length, context_budget: this.budget } };
@@ -216,6 +230,11 @@ export class EditorBridge implements vscode.Disposable {
     });
     register('propose_edit', { description: 'Stage an edit for the user to review; nothing is written until they accept it. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the exact current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line }) => {
       if (this.editScope !== undefined && normalize(path).replace(/^\.\//u, '') !== this.editScope) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not stage changes to other files; mention any other change you think is needed in your reply instead.`);
+      if (old_text === undefined && start_line === undefined && end_line === undefined && insert_line === undefined) {
+        // Replacing a whole file the agent has not fully read silently drops the parts it never saw.
+        const unread = this.unreadLines(path, (await this.options.files.open(path)).getText());
+        if (unread > 0) throw new Error(`A whole-file replacement needs the whole file read first, and ${unread} line(s) of ${path} have not been read at its current content. Read the rest first, or change only part of it with old_text or start_line/end_line.`);
+      }
       // old_text must match exactly once, so it locates the change unambiguously; line numbers sent with it are only hints and are ignored.
       const ignored = old_text === undefined ? [] : Object.entries({ start_line, end_line, insert_line }).filter(([, value]) => value !== undefined).map(([name]) => name);
       if (old_text === undefined && (start_line === undefined) !== (end_line === undefined)) throw new Error('Provide both start_line and end_line to replace lines, or use old_text or insert_line.');
