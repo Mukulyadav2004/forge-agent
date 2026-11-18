@@ -58,6 +58,11 @@
         "category": "Forge"
       },
       {
+        "command": "forgeAgent.addSelection",
+        "title": "Add Selection to Agent",
+        "category": "Forge"
+      },
+      {
         "command": "forgeAgent.selectModel",
         "title": "Select Model",
         "category": "Forge"
@@ -121,6 +126,12 @@
         "key": "ctrl+alt+f",
         "mac": "cmd+alt+f",
         "when": "editorHasSelection"
+      },
+      {
+        "command": "forgeAgent.addSelection",
+        "key": "ctrl+l",
+        "mac": "cmd+l",
+        "when": "editorTextFocus"
       }
     ]
   },
