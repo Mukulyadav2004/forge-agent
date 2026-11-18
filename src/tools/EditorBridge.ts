@@ -38,8 +38,10 @@ export class EditorBridge implements vscode.Disposable {
   get budget(): { used: number; limit: number } { return { used: this.budgetUsed, limit: CONTEXT_BUDGET }; }
   /** The one file an Edit Selection request may change; other files are refused until the next request. */
   private editScope: string | undefined;
+  /** Commands run in this request; each needs its own approval, so a request gets a few and then must hand over to the user. */
+  private commandsRun = 0;
   /** Called once per user request (not for approvals or retries of it). */
-  beginRequest(scope?: string): void { this.budgetUsed = 0; this.editScope = scope; this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
+  beginRequest(scope?: string): void { this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
   private remaining(): number { return Math.max(0, CONTEXT_BUDGET - this.budgetUsed); }
   private budgetNote(): string { return `Context budget: ${this.budgetUsed.toLocaleString('en-US')} of ${CONTEXT_BUDGET.toLocaleString('en-US')} characters used for this request.`; }
   private budgetError(): Error { return new Error(`${this.budgetNote()} Too little remains for this call. Answer from the evidence you already have and label anything unverified, or ask the user to continue in a new message.`); }
@@ -184,6 +186,7 @@ export class EditorBridge implements vscode.Disposable {
     });
     register('run_command', { description: 'Run one non-interactive shell command in the workspace, such as a test, lint or type check, after the user approves its exact text. Prefer the narrowest command that checks your change (for example one test file). Returns the exit code, duration and combined output; long output keeps the start and the end. There is no input, so prompts, servers and watch modes run until the timeout. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit rather than editing through commands.', inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).default(COMMAND_LIMITS.timeout_seconds_default), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: false } }, async ({ command, cwd, timeout_seconds, reason }, extra) => {
       if (this.editScope !== undefined) throw new Error(`This is an inline edit of ${this.editScope}; commands are not part of it. Stage the edit, then tell the user which check to run.`);
+      if (this.commandsRun >= COMMAND_LIMITS.per_request) throw new Error(`This request already ran ${COMMAND_LIMITS.per_request} commands, the limit per request. Stop running commands; tell the user what to run or what is missing, and they can ask you to continue.`);
       const root = vscode.workspace.workspaceFolders?.[0];
       if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');
       const rootPath = await realpath(root.uri.fsPath);
@@ -192,6 +195,7 @@ export class EditorBridge implements vscode.Disposable {
       if (!(await stat(folder)).isDirectory()) throw new Error('cwd must be a folder.');
       const outputCharacters = Math.min(COMMAND_LIMITS.output_characters, this.remaining());
       if (outputCharacters < 1000) throw this.budgetError();
+      this.commandsRun++; // counted only once it actually runs; refused calls do not use the budget
       const result = await runCommand({ command, cwd: folder, timeoutSeconds: timeout_seconds, outputCharacters, signal: extra.signal });
       this.budgetUsed += result.output.length;
       const where = relative(rootPath, folder) || '.';
