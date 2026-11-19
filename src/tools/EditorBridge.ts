@@ -16,6 +16,8 @@ import { loadWorkspaceInstructions } from '../context/environment';
 import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import { savedExcerpt } from '../edits/lineChanges';
+import { describeProblems, newProblems } from '../edits/diagnostics';
+import type { Problem } from '../edits/diagnostics';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
 import type { ToolLog, ToolName } from '../observability/events';
 import { COMMAND_LIMITS, runCommand } from './runCommand';
@@ -32,6 +34,12 @@ function fileLines(text: string): string[] {
   const lines = text.split('\n');
   if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
   return lines;
+}
+/** Errors VS Code currently reports for a file (from its language servers); warnings and hints are left out. */
+function errorsOf(uri: vscode.Uri | undefined): Problem[] {
+  if (!uri) return [];
+  return vscode.languages.getDiagnostics(uri).filter(diagnostic => diagnostic.severity === vscode.DiagnosticSeverity.Error)
+    .map(diagnostic => ({ line: diagnostic.range.start.line + 1, message: diagnostic.message, ...(diagnostic.source ? { source: diagnostic.source } : {}) }));
 }
 /** propose_edit arguments; the approval card and the later tool call carry the same ones. */
 const PROPOSE_SHAPE = { path: z.string(), base_revision: z.string().optional().describe('From read_file. Required for start_line/end_line, insert_line and whole-file edits; optional with old_text, whose exact match proves the text is current.'), new_text: z.string({ error: 'new_text is required: the text that replaces the located lines. To delete them, pass an empty string.' }).max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') };
@@ -157,7 +165,9 @@ export class EditorBridge implements vscode.Disposable {
   }
   /** Edits staged while TrueForge waits for the user's approval, by call; and the results the following tool calls return. */
   private readonly awaitingReview = new Map<string, { path: string }>();
-  private readonly reviewed = new Map<string, { message: string; saved: number; rejected: number; revision?: string; error?: string }>();
+  private readonly reviewed = new Map<string, { message: string; saved: number; rejected: number; revision?: string; error?: string; problems?: number }>();
+  /** How long a save waits for VS Code to re-check the file; a language server usually answers within a second. */
+  private static readonly DIAGNOSTICS_WAIT_MS = 2500;
   /**
    * Save-on-approve, step 1: when TrueForge pauses on a propose_edit approval, stage the edit and open its diff so the
    * user reviews it hunk by hunk before deciding. Edit Selection keeps the staged review ('stage'); a call that cannot
@@ -202,19 +212,26 @@ export class EditorBridge implements vscode.Disposable {
     this.awaitingReview.clear();
     const latest = (path: string) => [...this.options.edits.state.proposals].reverse().find(proposal => proposal.path === path && proposal.status !== 'superseded');
     const textBefore = new Map<string, string>();
+    const problemsBefore = new Map<string, Problem[]>();
+    const root = vscode.workspace.workspaceFolders?.[0];
+    const uriOf = (path: string) => root ? vscode.Uri.joinPath(root.uri, path) : undefined;
+    // Listen before saving, so a fast language server's re-check is not missed.
+    const rechecked = allow ? this.waitForDiagnostics([...new Set(waiting.map(([, item]) => item.path))].flatMap(path => uriOf(path) ?? []), EditorBridge.DIAGNOSTICS_WAIT_MS) : Promise.resolve();
     for (const path of new Set(waiting.map(([, item]) => item.path))) {
       const proposal = latest(path);
       if (!proposal || (proposal.status !== 'pending' && proposal.status !== 'conflict')) continue;
       if (!allow) { await this.options.edits.reject(proposal.id).catch(() => undefined); continue; }
       // A new file has no text yet; the saved excerpt then shows all of it.
       textBefore.set(path, await this.options.edits.read(path).then(read => read.file.text, () => ''));
+      problemsBefore.set(path, errorsOf(uriOf(path)));
       try { if (proposal.hunks.some(hunk => hunk.status === 'pending')) await this.options.edits.apply(proposal.id); }
       catch (error) {
         for (const [key, item] of waiting) if (item.path === path) this.reviewed.set(key, { message: '', saved: 0, rejected: 0, error: `Nothing was saved to ${path}: ${error instanceof Error ? error.message : 'the apply failed'} Read the file again and propose the edit again.` });
       }
     }
     if (!allow) return;
-    const afterSave = new Map<string, { revision?: string; excerpt: string; firstLine?: number }>();
+    await rechecked;
+    const afterSave = new Map<string, { revision?: string; excerpt: string; firstLine?: number; problems: Problem[] }>();
     let shown: { path: string; line: number } | undefined;
     for (const [key, { path }] of waiting) {
       if (this.reviewed.has(key)) continue;
@@ -223,11 +240,12 @@ export class EditorBridge implements vscode.Disposable {
       const rejected = hunks.filter(hunk => hunk.status === 'rejected');
       let state = afterSave.get(path);
       if (!state) {
-        state = { excerpt: '' };
+        state = { excerpt: '', problems: [] };
         try {
           const read = await this.options.edits.read(path);
           const excerpt = saved ? savedExcerpt(textBefore.get(path) ?? '', read.file.text) : { text: '' };
-          state = { revision: read.revision, excerpt: excerpt.text, ...(excerpt.firstLine ? { firstLine: excerpt.firstLine } : {}) };
+          const problems = saved ? newProblems(problemsBefore.get(path) ?? [], errorsOf(uriOf(path))) : [];
+          state = { revision: read.revision, excerpt: excerpt.text, problems, ...(excerpt.firstLine ? { firstLine: excerpt.firstLine } : {}) };
         } catch { /* reported without a revision or excerpt */ }
         afterSave.set(path, state);
         if (saved && state.firstLine) shown = { path, line: state.firstLine };
@@ -236,11 +254,25 @@ export class EditorBridge implements vscode.Disposable {
         saved ? `Saved ${path} after the user reviewed the diff: ${saved} of ${hunks.length} hunk(s) are on disk, so commands now see them.` : `The user rejected every hunk of this edit to ${path}; nothing was saved.`,
         rejected.length ? `The user rejected the hunk(s) at original line(s) ${rejected.map(hunk => hunk.oldStart).join(', ')}; they were not saved. Do not propose them again unless the user asks.` : '',
         state.revision ? `Use base_revision ${state.revision} for further edits to ${path}.` : '',
-      ].filter(Boolean).join(' ') + (saved && state.excerpt ? `\nSaved lines of ${path}, numbered as the file is now:\n${state.excerpt}` : '');
-      this.reviewed.set(key, { message, saved, rejected: rejected.length, ...(state.revision ? { revision: state.revision } : {}) });
+      ].filter(Boolean).join(' ') + (saved && state.excerpt ? `\nSaved lines of ${path}, numbered as the file is now:\n${state.excerpt}` : '')
+        + (state.problems.length ? `\n${describeProblems(path, state.problems)}` : '');
+      this.reviewed.set(key, { message, saved, rejected: rejected.length, problems: state.problems.length, ...(state.revision ? { revision: state.revision } : {}) });
     }
     // Like Cline, the saved file opens in the editor at the change; focus stays in the sidebar so review continues there.
     if (shown) await this.showFile({ ...shown, preserveFocus: true }).catch(() => undefined);
+  }
+  /** Resolves once VS Code has re-published diagnostics for every given file, or after the wait; never rejects. */
+  private waitForDiagnostics(uris: vscode.Uri[], waitMs: number): Promise<void> {
+    if (!uris.length) return Promise.resolve();
+    return new Promise(resolvePromise => {
+      const pending = new Set(uris.map(uri => uri.toString()));
+      const done = () => { clearTimeout(timer); subscription.dispose(); resolvePromise(); };
+      const timer = setTimeout(done, waitMs);
+      const subscription = vscode.languages.onDidChangeDiagnostics(event => {
+        for (const uri of event.uris) pending.delete(uri.toString());
+        if (!pending.size) done();
+      });
+    });
   }
   /** Python interpreters of virtual environments at the workspace root (existence only; nothing is run or read). */
   private async workspaceEnvironments(): Promise<string[]> {
@@ -413,7 +445,7 @@ export class EditorBridge implements vscode.Disposable {
       if (reviewed) {
         this.reviewed.delete(key);
         if (reviewed.error) throw new Error(reviewed.error);
-        this.activityEvents.fire({ kind: 'propose', path: input.path, detail: reviewed.saved ? 'new file saved after your review' : 'new file rejected in review, nothing saved', reason: input.explanation.slice(0, 300) });
+        this.activityEvents.fire({ kind: 'propose', path: input.path, detail: reviewed.saved ? `new file saved after your review${reviewed.problems ? ` · ${reviewed.problems} new problem(s) reported to the agent` : ''}` : 'new file rejected in review, nothing saved', reason: input.explanation.slice(0, 300) });
         return { content: [{ type: 'text', text: reviewed.message }], structuredContent: { status: reviewed.saved ? 'saved' : 'rejected', path: input.path, ...(reviewed.revision ? { base_revision: reviewed.revision } : {}), message: reviewed.message } };
       }
       const { id } = await this.stageWrite(input);
@@ -430,7 +462,7 @@ export class EditorBridge implements vscode.Disposable {
       if (reviewed) {
         this.reviewed.delete(key);
         if (reviewed.error) throw new Error(reviewed.error);
-        this.activityEvents.fire({ kind: 'propose', path: input.path, detail: reviewed.saved ? `saved ${reviewed.saved} hunk(s) after your review${reviewed.rejected ? `, ${reviewed.rejected} rejected` : ''}` : 'rejected in review, nothing saved', reason: input.explanation.slice(0, 300) });
+        this.activityEvents.fire({ kind: 'propose', path: input.path, detail: reviewed.saved ? `saved ${reviewed.saved} hunk(s) after your review${reviewed.rejected ? `, ${reviewed.rejected} rejected` : ''}${reviewed.problems ? ` · ${reviewed.problems} new problem(s) reported to the agent` : ''}` : 'rejected in review, nothing saved', reason: input.explanation.slice(0, 300) });
         return { content: [{ type: 'text', text: reviewed.message }], structuredContent: { status: reviewed.saved ? 'saved' : 'rejected', path: input.path, saved_hunks: reviewed.saved, rejected_hunks: reviewed.rejected, ...(reviewed.revision ? { base_revision: reviewed.revision } : {}), message: reviewed.message } };
       }
       const { path, explanation } = input;

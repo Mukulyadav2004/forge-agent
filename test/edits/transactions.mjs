@@ -513,3 +513,22 @@ test('a saved edit reports the saved lines with context, numbered as the file is
   const big = savedExcerpt('', Array.from({ length: 500 }, (_, index) => `x${index}`).join('\n'));
   assert.ok(big.text.split('\n').length <= 61 && /… \d+ more changed or context line\(s\); read_file shows them$/u.test(big.text), 'A large change is cut to the limit and says so.');
 });
+
+test('after a save, only errors that are new are reported, even when lines moved', async () => {
+  const { newProblems, describeProblems } = await import('../../out/edits/EditService.js');
+  const before = [{ line: 10, message: '"itemgetter" is not defined', source: 'Pylance' }, { line: 40, message: 'Import "yaml" could not be resolved', source: 'Pylance' }];
+  const after = [
+    { line: 12, message: '"itemgetter" is not defined', source: 'Pylance' }, // existed before; the edit moved it down
+    { line: 42, message: 'Import "yaml" could not be resolved', source: 'Pylance' },
+    { line: 1118, message: 'Expected expression', source: 'Pylance' },
+    { line: 30, message: '"itemgetter" is not defined', source: 'Pylance' }, // a second copy is new
+  ];
+  assert.deepEqual(newProblems(before, after).map(problem => problem.line), [1118, 30]);
+  assert.equal(describeProblems('src/flask/cli.py', newProblems(before, after)),
+    'New problems in src/flask/cli.py after saving (VS Code diagnostics):\n30: [Pylance] "itemgetter" is not defined\n1118: [Pylance] Expected expression\nFix these first; a test run would fail on them too.');
+  assert.equal(describeProblems('a.py', []), '', 'No new errors, nothing added.');
+  const many = Array.from({ length: 14 }, (_, index) => ({ line: index + 1, message: `problem ${index}\n  detail` }));
+  const text = describeProblems('a.py', newProblems([], many));
+  assert.match(text, /^1: problem 0 detail$/mu, 'Multi-line messages become one line.');
+  assert.match(text, /\n… 4 more\n/u, 'At most ten problems are listed.');
+});
