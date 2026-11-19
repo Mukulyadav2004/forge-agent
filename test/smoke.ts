@@ -108,7 +108,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const restoredFrame = await findSidebarFrame(browser);
   await restoredFrame.locator("#message-input:not([disabled])").waitFor();
   assert.equal(await restoredFrame.getByRole("textbox", { name: "Message", exact: true }).inputValue(), draft);
-  assert.equal(await restoredFrame.getByText("Hello Forge!", { exact: true }).count(), 1);
+  assert.equal(await restoredFrame.getByRole("log").getByText("Hello Forge!", { exact: true }).count(), 1);
   await restoredFrame.locator("body").screenshot({
     path: vscode.Uri.joinPath(extension.extensionUri, "out-test", "sidebar.png").fsPath,
   });
