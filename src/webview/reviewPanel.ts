@@ -28,6 +28,8 @@ export function renderReviewPanel(options: { container: HTMLElement; state: Revi
     button({ text: 'Apply all', command: { action: 'apply_all' }, disabled: locked || !active.length || active.some(proposal => proposal.status === 'conflict') }),
     button({ text: 'Reject all', command: { action: 'reject_all' }, disabled: locked || !active.length }),
     button({ text: 'Undo last apply', command: { action: 'undo' }, disabled: locked || !state.canUndo }),
+    // After save on approve, one click restores everything this request saved (for example after Cancel).
+    ...(state.requestSaved?.length ? [button({ text: `Undo this request (${state.requestSaved.length} file${state.requestSaved.length === 1 ? '' : 's'})`, command: { action: 'undo_request' }, disabled: locked })] : []),
   );
   const list = document.createElement('div');
   list.className = 'proposal-list';

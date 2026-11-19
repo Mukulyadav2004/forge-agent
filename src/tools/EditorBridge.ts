@@ -22,9 +22,17 @@ import { COMMAND_LIMITS, runCommand } from './runCommand';
 /** Characters one request may read, about 90k tokens; TrueForge compacts the conversation at 100k tokens (forge-agent.json). */
 export const CONTEXT_BUDGET = 350_000;
 /** One read_file call: big enough to read a typical source file whole (Flask's cli.py is about 1,100 lines and 46,000 characters). */
-/** Without end_line a read returns a window plus an outline of the file; an explicit range may be up to lines_per_call long. */
-const READ_LIMITS = { default_window_lines: 300, lines_per_call: 2000, characters_per_call: 60000, outline_characters: 4000 };
+/** Cline's per-read limits (2,000 lines, 48k characters); a file longer than one read also gets an outline so the next read can target a block. */
+const READ_LIMITS = { default_window_lines: 2000, lines_per_call: 2000, characters_per_call: 48000, outline_characters: 4000 };
 const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 8388608, output_characters: 20000, line_characters: 1000, matches_per_file: 3, timeout_ms: 5000 };
+/** propose_edit arguments; the approval card and the later tool call carry the same ones. */
+const PROPOSE_SHAPE = { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') };
+const ProposeInputSchema = z.object(PROPOSE_SHAPE);
+type ProposeInput = z.infer<typeof ProposeInputSchema>;
+/** Identifies one propose_edit call by its arguments, so the tool call after an approval finds the result the user already decided. */
+function editKey(input: ProposeInput): string {
+  return JSON.stringify([input.path, input.base_revision, input.new_text, input.explanation, input.old_text ?? null, input.start_line ?? null, input.end_line ?? null, input.insert_line ?? null]);
+}
 const SEARCH_EXCLUDE = '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage}/**';
 const SearchInputSchema = z.object({ query: z.string().min(1).max(500), glob: z.string().min(1).max(200).default('**/*').describe('Workspace-relative path filter. Narrow to a folder or extension when results are incomplete.'), regex: z.boolean().default(false), case_sensitive: z.boolean().default(false), max_results: z.number().int().min(1).max(100).default(40), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') });
 type SearchInput = z.infer<typeof SearchInputSchema>;
@@ -57,7 +65,7 @@ export class EditorBridge implements vscode.Disposable {
     return unread + Math.max(0, total - next + 1);
   }
   /** Called once per user request (not for approvals or retries of it). */
-  beginRequest(scope?: string): void { this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
+  beginRequest(scope?: string): void { this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest(); this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
   private remaining(): number { return Math.max(0, CONTEXT_BUDGET - this.budgetUsed); }
   private budgetNote(): string { return `Context budget: ${this.budgetUsed.toLocaleString('en-US')} of ${CONTEXT_BUDGET.toLocaleString('en-US')} characters used for this request.`; }
   private budgetError(): Error { return new Error(`${this.budgetNote()} Too little remains for this call. Answer from the evidence you already have and label anything unverified, or ask the user to continue in a new message.`); }
@@ -110,6 +118,82 @@ export class EditorBridge implements vscode.Disposable {
     this.budgetUsed += context.text.length;
     for (const file of context.files) this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: file.path, startLine: file.startLine, endLine: file.endLine });
     return context.text;
+  }
+  /** Checks and stages one propose_edit call; nothing is written. Used by the tool and when an edit waits for approval. */
+  private async stageProposal(input: ProposeInput): Promise<{ id: string; combined: boolean; replaced: string[]; detail: string; ignored: string[] }> {
+    const { path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line } = input;
+    if (this.editScope !== undefined && normalize(path).replace(/^\.\//u, '') !== this.editScope) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not stage changes to other files; mention any other change you think is needed in your reply instead.`);
+    if (old_text === undefined && start_line === undefined && end_line === undefined && insert_line === undefined) {
+      // Replacing a whole file the agent has not fully read silently drops the parts it never saw.
+      const unread = this.unreadLines(path, (await this.options.files.open(path)).getText());
+      if (unread > 0) throw new Error(`A whole-file replacement needs the whole file read first, and ${unread} line(s) of ${path} have not been read at its current content. Read the rest first, or change only part of it with old_text or start_line/end_line.`);
+    }
+    // old_text must match exactly once, so it locates the change unambiguously; line numbers sent with it are only hints and are ignored.
+    const ignored = old_text === undefined ? [] : Object.entries({ start_line, end_line, insert_line }).filter(([, value]) => value !== undefined).map(([name]) => name);
+    if (old_text === undefined && (start_line === undefined) !== (end_line === undefined)) throw new Error('Provide both start_line and end_line to replace lines, or use old_text or insert_line.');
+    if (old_text === undefined && start_line !== undefined && insert_line !== undefined) throw new Error('Use either start_line/end_line (replace lines) or insert_line (insert before a line), not both.');
+    const range = old_text === undefined && start_line !== undefined && end_line !== undefined ? { startLine: start_line, endLine: end_line } : undefined;
+    const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision: base_revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined });
+    const detail = old_text !== undefined ? 'replace matched text' : range ? `lines ${range.startLine}–${range.endLine}` : insert_line !== undefined ? `insert at line ${insert_line}` : 'whole file';
+    return { id, combined, replaced, detail, ignored };
+  }
+  /** Edits staged while TrueForge waits for the user's approval, by call; and the results the following tool calls return. */
+  private readonly awaitingReview = new Map<string, { path: string }>();
+  private readonly reviewed = new Map<string, { message: string; saved: number; rejected: number; revision?: string; error?: string }>();
+  /**
+   * Save-on-approve, step 1: when TrueForge pauses on a propose_edit approval, stage the edit and open its diff so the
+   * user reviews it hunk by hunk before deciding. Edit Selection keeps the staged review ('stage'); a call that cannot
+   * be staged is returned with its error ('invalid') so the agent can correct it without asking the user.
+   */
+  async prepareEdit(argumentsJson: string): Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }> {
+    if (this.editScope !== undefined) return { status: 'stage' };
+    let input: ProposeInput;
+    try { input = ProposeInputSchema.parse(JSON.parse(argumentsJson)); }
+    catch { return { status: 'invalid', message: 'The propose_edit arguments could not be read. Send the call again with valid arguments.' }; }
+    try {
+      const staged = await this.stageProposal(input);
+      this.awaitingReview.set(editKey(input), { path: input.path });
+      this.activityEvents.fire({ kind: 'propose', path: input.path, detail: `${staged.detail} · waiting for your review`, reason: input.explanation.slice(0, 300) });
+      await this.options.edits.preview(staged.id).catch(() => undefined);
+      return { status: 'review' };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The edit could not be prepared.';
+      this.activityEvents.fire({ kind: 'refused', tool: 'propose_edit', message });
+      return { status: 'invalid', message };
+    }
+  }
+  /**
+   * Save-on-approve, step 2: Approve saves every hunk the user did not reject (guarded apply, undoable); Deny rejects them.
+   * The result for each call is kept for the tool call TrueForge makes after an approval.
+   */
+  async settleEdits(allow: boolean): Promise<void> {
+    const waiting = [...this.awaitingReview];
+    this.awaitingReview.clear();
+    const latest = (path: string) => [...this.options.edits.state.proposals].reverse().find(proposal => proposal.path === path && proposal.status !== 'superseded');
+    for (const path of new Set(waiting.map(([, item]) => item.path))) {
+      const proposal = latest(path);
+      if (!proposal || (proposal.status !== 'pending' && proposal.status !== 'conflict')) continue;
+      if (!allow) { await this.options.edits.reject(proposal.id).catch(() => undefined); continue; }
+      try { if (proposal.hunks.some(hunk => hunk.status === 'pending')) await this.options.edits.apply(proposal.id); }
+      catch (error) {
+        for (const [key, item] of waiting) if (item.path === path) this.reviewed.set(key, { message: '', saved: 0, rejected: 0, error: `Nothing was saved to ${path}: ${error instanceof Error ? error.message : 'the apply failed'} Read the file again and propose the edit again.` });
+      }
+    }
+    if (!allow) return;
+    for (const [key, { path }] of waiting) {
+      if (this.reviewed.has(key)) continue;
+      const hunks = latest(path)?.hunks ?? [];
+      const saved = hunks.filter(hunk => hunk.status === 'applied').length;
+      const rejected = hunks.filter(hunk => hunk.status === 'rejected');
+      let revision: string | undefined;
+      try { revision = (await this.options.edits.read(path)).revision; } catch { /* reported without a revision */ }
+      const message = [
+        saved ? `Saved ${path} after the user reviewed the diff: ${saved} of ${hunks.length} hunk(s) are on disk, so commands now see them.` : `The user rejected every hunk of this edit to ${path}; nothing was saved.`,
+        rejected.length ? `The user rejected the hunk(s) at original line(s) ${rejected.map(hunk => hunk.oldStart).join(', ')}; they were not saved. Do not propose them again unless the user asks.` : '',
+        revision ? `Use base_revision ${revision} for further edits to ${path}.` : '',
+      ].filter(Boolean).join(' ');
+      this.reviewed.set(key, { message, saved, rejected: rejected.length, ...(revision ? { revision } : {}) });
+    }
   }
   /** Python interpreters of virtual environments at the workspace root (existence only; nothing is run or read). */
   private async workspaceEnvironments(): Promise<string[]> {
@@ -267,22 +351,22 @@ export class EditorBridge implements vscode.Disposable {
       this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob, count: files.length });
       return { content: [{ type: 'text', text: `${listed}${found.length > 100 ? '\nMore files match; narrow the glob to see them.' : ''}\n${this.budgetNote()}` }] };
     });
-    register('propose_edit', { description: 'Stage an edit for the user to review; nothing is written until they accept it. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the exact current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') }, annotations: { readOnlyHint: true } }, async ({ path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line }) => {
-      if (this.editScope !== undefined && normalize(path).replace(/^\.\//u, '') !== this.editScope) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not stage changes to other files; mention any other change you think is needed in your reply instead.`);
-      if (old_text === undefined && start_line === undefined && end_line === undefined && insert_line === undefined) {
-        // Replacing a whole file the agent has not fully read silently drops the parts it never saw.
-        const unread = this.unreadLines(path, (await this.options.files.open(path)).getText());
-        if (unread > 0) throw new Error(`A whole-file replacement needs the whole file read first, and ${unread} line(s) of ${path} have not been read at its current content. Read the rest first, or change only part of it with old_text or start_line/end_line.`);
+    register('propose_edit', { description: 'Propose an edit for the user to review. Depending on a setting, the user approves the diff and the accepted hunks are saved before this call returns, or the edit is staged for them to apply later; the result says which. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the exact current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: PROPOSE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
+      // An edit the user already reviewed in the approval card was settled before TrueForge called the tool: report that result.
+      // Matched by the exact arguments; if TrueForge re-encoded them, by path and base_revision when that is unambiguous.
+      const sameRead = [...this.reviewed.keys()].filter(candidate => { const [path, revision] = JSON.parse(candidate) as [string, string]; return path === input.path && revision === input.base_revision; });
+      const key = this.reviewed.has(editKey(input)) ? editKey(input) : sameRead.length === 1 ? sameRead[0] ?? '' : editKey(input);
+      const reviewed = this.reviewed.get(key);
+      if (reviewed) {
+        this.reviewed.delete(key);
+        if (reviewed.error) throw new Error(reviewed.error);
+        this.activityEvents.fire({ kind: 'propose', path: input.path, detail: reviewed.saved ? `saved ${reviewed.saved} hunk(s) after your review${reviewed.rejected ? `, ${reviewed.rejected} rejected` : ''}` : 'rejected in review, nothing saved', reason: input.explanation.slice(0, 300) });
+        return { content: [{ type: 'text', text: reviewed.message }], structuredContent: { status: reviewed.saved ? 'saved' : 'rejected', path: input.path, saved_hunks: reviewed.saved, rejected_hunks: reviewed.rejected, ...(reviewed.revision ? { base_revision: reviewed.revision } : {}), message: reviewed.message } };
       }
-      // old_text must match exactly once, so it locates the change unambiguously; line numbers sent with it are only hints and are ignored.
-      const ignored = old_text === undefined ? [] : Object.entries({ start_line, end_line, insert_line }).filter(([, value]) => value !== undefined).map(([name]) => name);
-      if (old_text === undefined && (start_line === undefined) !== (end_line === undefined)) throw new Error('Provide both start_line and end_line to replace lines, or use old_text or insert_line.');
-      if (old_text === undefined && start_line !== undefined && insert_line !== undefined) throw new Error('Use either start_line/end_line (replace lines) or insert_line (insert before a line), not both.');
-      const range = old_text === undefined && start_line !== undefined && end_line !== undefined ? { startLine: start_line, endLine: end_line } : undefined;
-      const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision: base_revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined });
+      const { path, explanation } = input;
+      const { id, combined, replaced, detail, ignored } = await this.stageProposal(input);
       const note = combined ? ` It includes your earlier pending changes to ${path}; all of them are reviewed together.`
         : replaced.length ? ` It replaced an earlier pending proposal for ${path} that could not be combined; include every change this file still needs.` : '';
-      const detail = old_text !== undefined ? 'replace matched text' : range ? `lines ${range.startLine}–${range.endLine}` : insert_line !== undefined ? `insert at line ${insert_line}` : 'whole file';
       this.activityEvents.fire({ kind: 'propose', path, detail: `${detail}${combined ? ', combined with earlier changes' : replaced.length ? ', replaced an earlier proposal' : ''}`, reason: explanation.slice(0, 300) });
       const hint = ignored.length ? ` Ignored ${ignored.join(', ')} because old_text already locates the change.` : '';
       const message = `Proposal ${id} is staged for ${path}.${note}${hint} No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.`;

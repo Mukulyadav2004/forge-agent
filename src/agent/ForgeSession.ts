@@ -18,13 +18,16 @@ export function classifyModelError(message: string): { transient: boolean; summa
 }
 
 /** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
-export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string }): TrueForgeApi.AgentSpec {
+export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean }): TrueForgeApi.AgentSpec {
+  // forgeAgent.saveOnApprove (default on): TrueForge pauses on every propose_edit so the user reviews the diff before it is saved.
+  // Off: propose_edit only stages a diff, and the user applies it later in Review changes.
+  const editorServer = { ...definition.editorServer, requireApprovalForTools: definition.editorServer.requireApprovalForTools.filter(tool => options.approveEdits !== false || tool !== 'propose_edit') };
   return {
     model: { name: options.model, ...(options.reasoningEffort ? { params: { reasoningEffort: options.reasoningEffort } } : {}) },
     instructions: agentInstructions,
     // JSON imports widen literals such as "input_tokens" to string; TrueForge validates the spec when the session is created.
     config: definition.config as TrueForgeApi.RuntimeConfig,
-    mcpServers: options.connector ? [{ name: options.connector, ...definition.editorServer }] : [],
+    mcpServers: options.connector ? [{ name: options.connector, ...editorServer }] : [],
   };
 }
 
@@ -48,7 +51,7 @@ export class ForgeSession {
   private lastEventId: string | undefined;
   private paused = false;
   private cancelled = false;
-  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
+  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
     this.trace = new SessionTrace({ model: options.model, sink: event => ForgeSession.observe(event) });
     this.client = createClient(options.baseUrl);
     if (!/^[^/\s]+\/\S+$/u.test(options.model)) {
@@ -109,7 +112,7 @@ export class ForgeSession {
     this.options.model = model;
   }
   private spec(model: string): TrueForgeApi.AgentSpec {
-    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort });
+    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits });
   }
   private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], previousTurnId?: string): Promise<void> {
     this.cancelled = false;

@@ -251,7 +251,7 @@ function activityRow(entry: Exclude<ActivityEntry, { kind: 'request' }>, added: 
       if (entry.foundBy !== undefined && !nested) notes.push(`found by search "${entry.foundBy}"`);
       break;
     case 'propose':
-      kind.textContent = 'Staged edit';
+      kind.textContent = 'Edit';
       main = [sourceLink(entry.path, 1, entry.path), ` ${entry.detail}`];
       break;
     case 'list':
@@ -455,8 +455,9 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   renderTimeline({ messages: event.data.messages, activity: event.data.activity, complete: !event.data.busy });
   const reviewPanel = document.getElementById('review-panel');
   const reviewWasHidden = reviewPanel?.hidden ?? true;
-  const reviewDisabled = event.data.busy || event.data.approval;
-  const lockNote = event.data.approval ? 'Paused until you approve or deny the request.' : event.data.busy ? 'Paused while the agent works, so files stay put. Preview still works.' : undefined;
+  // A paused turn waits on the user, so review stays open: an edit's approval is decided here, hunk by hunk.
+  const reviewDisabled = event.data.busy;
+  const lockNote = event.data.approval ? 'The agent is waiting: keep or reject hunks here, then Approve or Deny below.' : event.data.busy ? 'Paused while the agent works, so files stay put. Preview still works.' : undefined;
   const reviewKey = JSON.stringify({ state: event.data.review, disabled: reviewDisabled, lockNote });
   if (reviewPanel instanceof HTMLElement && reviewKey !== renderedReview) {
     renderReviewPanel({ container: reviewPanel, state: event.data.review, disabled: reviewDisabled, lockNote, onCommand: command => vscode.postMessage({ type: 'review', command }) });

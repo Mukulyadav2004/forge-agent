@@ -115,7 +115,7 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.ok((await nestedOpen.first().innerText()).includes('Check the lines around it'));
   assert.match(await searchGroup.locator('summary').innerText(), /^Forge (read \d+ files?, )?searched \d+ times?(, listed files \d+ times?)? · \+[\d.]+k? chars$/u, 'A group of searches and reads is summarised in one line.');
   assert.match(await nestedOpen.first().innerText(), /example\.txt:2-3 \(\+\d+ chars\)/u, 'Each read shows the characters it added to the context budget.');
-  assert.ok(rendered.some(text => text.includes('Staged edit') && text.includes('insert at line 4, combined with earlier changes') && text.includes('MCP combine check')));
+  assert.ok(rendered.some(text => text.includes('Edit') && text.includes('insert at line 4, combined with earlier changes') && text.includes('MCP combine check')));
   assert.equal(await searchGroup.getAttribute('open'), '', 'Activity groups start expanded.');
   await nestedOpen.first().scrollIntoViewIfNeeded();
   await searchGroup.screenshot({ path: vscode.Uri.joinPath(options.extensionUri, 'out-test', 'activity-feed.png').fsPath });

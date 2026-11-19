@@ -17,6 +17,8 @@ export type ProposalView = z.infer<typeof ProposalViewSchema>;
 export const ReviewStateSchema = z.object({
   proposals: z.array(ProposalViewSchema), busy: z.boolean(), canUndo: z.boolean(),
   message: z.string(), recoveryPath: z.string().optional(),
+  /** Files saved during the current agent request that Undo can still restore, so a cancelled run can be rolled back in one click. */
+  requestSaved: z.array(z.string()).optional(),
 });
 export type ReviewState = z.infer<typeof ReviewStateSchema>;
 
@@ -29,5 +31,6 @@ export const ReviewCommandSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('apply_all') }),
   z.object({ action: z.literal('reject_all') }),
   z.object({ action: z.literal('undo') }),
+  z.object({ action: z.literal('undo_request') }),
 ]);
 export type ReviewCommand = z.infer<typeof ReviewCommandSchema>;

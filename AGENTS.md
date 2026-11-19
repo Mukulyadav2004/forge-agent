@@ -50,7 +50,11 @@ the brief. Our implementation guards are project rules, not extra official gates
 - A model-facing tool that writes or runs commands must show its exact
   arguments, working directory and relevant effects for approval. Configure
   TrueForge approval explicitly; annotations alone are not enforcement.
-  Approval to stage a preview is not acceptance to save the file.
+  Save on approve (forgeAgent.saveOnApprove, default on, agent mode only):
+  approving a propose_edit saves only after its diff was staged and shown
+  hunk by hunk, through the guarded apply with Undo; nothing is written
+  before that approval. Edit Selection and the setting off keep staged
+  review, where approval to stage is not acceptance to save.
 - Runtime behavior must not depend on one provider. Never commit a real
   key or generated MCP token; clearly labelled dummy test credentials and
   example placeholders are not live secrets. Preserve upstream licences,

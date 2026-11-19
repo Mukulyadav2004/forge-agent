@@ -10,6 +10,7 @@ import type { EditService } from '../edits/EditService';
 import type { ReviewCommand } from '../edits/review';
 import { ReviewFeedback } from './ReviewFeedback';
 import { describeApproval, StreamedToolCalls } from '../agent/approvalText';
+import type { PendingToolCall } from '../agent/approvalText';
 
 /** One sidebar chat. The live fields on the provider always point at the active chat. */
 interface HeldChat {
@@ -61,6 +62,9 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private owner: HeldChat | undefined;
   /** Agents waiting for the editor. One turn uses the shared files and context budget at a time. */
   private readonly jobs: Array<() => Promise<void>> = [];
+  /** The call behind each approval, and decisions made without the user: Edit Selection staging (allow) or an edit the editor could not build (deny with its error). */
+  private readonly approvalCalls = new Map<string, PendingToolCall>();
+  private readonly presetDecisions = new Map<string, TrueForgeApi.UserToolApprovalInputEvent['approval'] | null>(); // null: the user decides
   private pumping = false;
   private composerReady = false;
   private queuedComposer: Extract<HostMessage, { type: 'attach_selection' | 'focus_composer' }> | undefined;
@@ -73,6 +77,8 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
       projectOverview: () => Promise<string>;
+      prepareEdit: (argumentsJson: string) => Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }>;
+      settleEdits: (allow: boolean) => Promise<void>;
       /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
       beginRequest: (scope?: string) => void;
       edits: EditService;
@@ -144,12 +150,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
           void this.cancel();
         } else if (value.type === "approve" && !this.busy && this.approvals.length) {
           const chat = this.activeChat();
-          if (chat) {
-            const input: TrueForgeApi.UserToolApprovalInputEvent[] = chat.approvals.map(item => ({ ...item, approval: value.allow ? { status: "allow" } : { status: "deny", reason: "Declined in VS Code" } }));
-            chat.approvals.splice(0, chat.approvals.length);
-            this.jobs.unshift(() => this.run(chat, [], input));
-            this.kick();
-          }
+          if (chat) void this.decide(chat, value.allow);
         }
         this.publish();
       }),
@@ -333,7 +334,7 @@ ${selectedText}`;
   }
   refreshReview(): void { this.publish(); }
   async review(command: ReviewCommand): Promise<void> {
-    if (command.action !== 'preview' && this.chats.some(chat => chat.busy || chat.approvals.length > 0 || chat.questions.length > 0)) { this.status = 'Finish or cancel the running agents before applying, rejecting or undoing changes.'; this.publish(); return; }
+    if (command.action !== 'preview' && this.chats.some(chat => chat.busy || chat.questions.length > 0)) { this.status = 'Finish or cancel the running agents before applying, rejecting or undoing changes.'; this.publish(); return; }
     const before = this.actions.edits.state;
     let succeeded = false;
     try {
@@ -346,6 +347,7 @@ ${selectedText}`;
         case 'apply_all': await this.actions.edits.apply(); break;
         case 'reject_all': await this.actions.edits.reject(); break;
         case 'undo': await this.actions.edits.undo(); break;
+        case 'undo_request': await this.actions.edits.undoRequest(); break;
       }
       this.status = this.actions.edits.state.message;
       succeeded = true;
@@ -404,6 +406,50 @@ ${selectedText}`;
     const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, activity: this.activity, review: this.actions.edits.state, chats: this.chats.map(chat => ({ id: chat.id, title: chat.title, active: chat.id === this.activeId, busy: chat.busy })), questions: this.questions.map(({ toolCallId, question, options }) => ({ toolCallId, question, options })) };
     void this.view?.webview.postMessage(response);
   }
+  /**
+   * A turn paused on propose_edit approvals: stage each edit so its hunks are reviewed before the user decides.
+   * When every waiting approval was decided without the user (Edit Selection or an invalid call), the turn resumes at once.
+   */
+  private async prepareApprovals(chat: HeldChat): Promise<void> {
+    for (const item of chat.approvals) {
+      const call = this.approvalCalls.get(item.toolCallId);
+      if (call?.name !== 'propose_edit' || this.presetDecisions.has(item.toolCallId)) continue;
+      const prepared = await this.actions.prepareEdit(call.arguments);
+      if (prepared.status === 'stage') this.presetDecisions.set(item.toolCallId, { status: 'allow' });
+      else if (prepared.status === 'invalid') this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: `The editor could not build this edit, so it was not shown to the user: ${prepared.message}` });
+      else {
+        this.presetDecisions.set(item.toolCallId, null);
+        chat.messages.push({ id: randomUUID(), role: 'assistant', text: describeApproval(call, { saveOnApprove: true }) });
+      }
+    }
+    if (chat.approvals.length && chat.approvals.every(item => this.presetDecisions.get(item.toolCallId))) this.queueDecision(chat, true);
+  }
+  /** Approve or Deny: settle the reviewed edits first (save the hunks the user kept, or discard them), then resume the turn. */
+  private async decide(chat: HeldChat, allow: boolean): Promise<void> {
+    // Taken at once, so a second click cannot send the same decision twice; busy keeps review and the buttons still while saving.
+    const items = chat.approvals.splice(0, chat.approvals.length);
+    const reviewing = items.some(item => this.approvalCalls.get(item.toolCallId)?.name === 'propose_edit' && !this.presetDecisions.get(item.toolCallId));
+    if (reviewing) {
+      chat.busy = true;
+      chat.status = allow ? 'Saving the hunks you kept…' : 'Discarding the reviewed edits…';
+      this.show(chat);
+      try { await this.actions.settleEdits(allow); } catch (error) { chat.status = error instanceof Error ? error.message : 'Saving failed.'; }
+      chat.busy = false;
+    }
+    this.queueDecision(chat, allow, items);
+  }
+  private queueDecision(chat: HeldChat, allow: boolean, items = chat.approvals.splice(0, chat.approvals.length)): void {
+    const input: TrueForgeApi.UserToolApprovalInputEvent[] = items.map(item => {
+      const preset = this.presetDecisions.get(item.toolCallId);
+      const edit = this.approvalCalls.get(item.toolCallId)?.name === 'propose_edit';
+      this.presetDecisions.delete(item.toolCallId);
+      this.approvalCalls.delete(item.toolCallId);
+      return { ...item, approval: preset ?? (allow ? { status: 'allow' } : { status: 'deny', reason: edit ? 'The user reviewed the diff and declined this edit. Nothing was saved. Ask what they want instead, or propose a different change.' : 'Declined in VS Code' }) };
+    });
+    this.jobs.unshift(() => this.run(chat, [], input));
+    this.kick();
+    this.show(chat);
+  }
   /** Sends the picked options back to the paused TrueForge turn. */
   private async submitAnswers(chat: HeldChat, answers: { toolCallId: string; choice: string }[]): Promise<void> {
     if (!chat.session || chat.questions.length === 0 || answers.length !== chat.questions.length) return;
@@ -440,7 +486,12 @@ ${selectedText}`;
       const discarded = this.actions.edits.cancel();
       const cancelled = chat.session?.cancel();
       await discarded; await cancelled;
-      chat.status = "Cancellation requested. Pending proposals were discarded; applied batches remain available in Undo.";
+      // With save on approve, edits approved before Cancel are already on disk: name them and offer one-click Undo.
+      const saved = this.actions.edits.state.requestSaved ?? [];
+      chat.status = saved.length
+        ? `Cancelled. Pending edits were discarded. ${saved.length} file(s) you approved earlier in this request stay saved: ${saved.join(', ')}. Use Undo this request in Review changes to restore them.`
+        : "Cancellation requested. Pending proposals were discarded; applied batches remain available in Undo.";
+      if (saved.length) chat.messages.push({ id: randomUUID(), role: 'assistant', text: `**Cancelled.** Files you approved earlier in this request stay saved: ${saved.map(path => `\`${path}\``).join(', ')}. Click **Undo this request** in Review changes to restore them; nothing else was written.` });
     }
     catch { chat.status = "Could not confirm cancellation. Check the local TrueForge server."; }
     this.show(chat);
@@ -507,7 +558,7 @@ ${selectedText}`;
         if (!model) throw new Error("Model not configured. Set forgeAgent.model after adding a model in local TrueForge.");
         const connector = config.get<string>("connector", "forge-editor");
         const editorManifest = connector ? await this.actions.getEditorManifest(connector) : undefined;
-        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), onEvent: event => this.event(chat, event) });
+        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), onEvent: event => this.event(chat, event) });
       }
       chat.turnError = undefined;
       if (!approvals) chat.lastInput = preparedInput;
@@ -515,6 +566,7 @@ ${selectedText}`;
       else await chat.session.send(preparedInput);
       await this.recover(chat);
       if (feedback && !chat.cancellationRequested) this.reviewFeedback.clear();
+      await this.prepareApprovals(chat);
     } catch (error: unknown) {
       if (approvals && chat.session?.awaitingApproval && !chat.cancellationRequested) chat.approvals = approvals;
       // A failed create must not retain settings that the user has corrected.
@@ -569,8 +621,11 @@ ${selectedText}`;
     if (event.type === "tool.approval_required") {
       for (const tool of event.toolCalls) {
         if (!chat.approvals.some(item => item.threadId === event.threadId && item.toolCallId === tool.id)) {
+          const call = chat.toolCalls.find(tool.sourceEventId, tool.id);
+          if (call) this.approvalCalls.set(tool.id, call);
           chat.approvals.push({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } });
-          chat.messages.push({ id: randomUUID(), role: "assistant", text: describeApproval(chat.toolCalls.find(tool.sourceEventId, tool.id)) });
+          // An edit's card waits until its diff is staged for review (prepareApprovals); Edit Selection never shows one.
+          if (call?.name !== 'propose_edit') chat.messages.push({ id: randomUUID(), role: "assistant", text: describeApproval(call) });
         }
       }
     }

@@ -63,7 +63,7 @@ function previewBlock(options: { removed?: string; added: string; label: string 
 const lineCount = (text: string) => text === '' ? 0 : text.replace(/\n$/u, '').split('\n').length;
 
 /** Markdown shown in the chat when TrueForge pauses for approval. Built only from the call's own arguments. */
-export function describeApproval(call: PendingToolCall | undefined): string {
+export function describeApproval(call: PendingToolCall | undefined, options: { saveOnApprove?: boolean } = {}): string {
   if (!call) return '**Approve this tool call?** Its details were not received, so deny it unless you expected it.';
   let args: Record<string, unknown> = {};
   try {
@@ -97,5 +97,9 @@ export function describeApproval(call: PendingToolCall | undefined): string {
     : insert !== undefined ? previewBlock({ added: newText, label: `Lines inserted at line ${insert}:` })
     : start !== undefined ? previewBlock({ added: newText, label: `Lines ${start}–${end ?? start} become:` })
     : previewBlock({ added: newText, label: 'New file content:' });
+  if (options.saveOnApprove) {
+    // The edit is already staged: Review changes holds its hunks and the editor shows the diff.
+    return `**Review this edit, then approve to save it**\n\n- File: \`${text('path')}\`\n- Change: ${change}\n- Agent's reason: ${reason}${preview}\n\nIn **Review changes** below, keep or drop each hunk (Reject hunk drops it). **Approve** saves every hunk you did not reject, so the agent can test it; **Deny** discards the edit. Nothing is written before you approve, and **Undo last apply** restores the saved files.`;
+  }
   return `**Approve staging an edit?**\n\n- File: \`${text('path')}\`\n- Change: ${change}\n- Agent's reason: ${reason}${note}${preview}\n\nApproving only stages a diff for review. Nothing is written until you accept it.`;
 }

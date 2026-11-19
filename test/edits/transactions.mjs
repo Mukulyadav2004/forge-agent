@@ -384,3 +384,22 @@ test('review messages count pending hunks across every open file', async () => {
   await service.apply();
   assert.match(service.state.message, /^Applied and saved 1 file\(s\)\. Undo is available\. No pending hunks remain\.$/);
 });
+
+test('save on approve: each approved edit is its own guarded batch, other reads stay valid, and Undo this request restores only this request', async () => {
+  const { backend, service } = setup();
+  service.beginRequest();
+  const earlier = await stage({ service, path: 'c.txt', text: 'earlier c\n' });
+  await service.apply(earlier);
+  service.beginRequest(); // a new user request: only its own saves are offered for one-click undo
+  const readB = await service.read('b.txt'); // read before a.txt is saved, used after
+  const first = await stage({ service, path: 'a.txt', text: 'approved a\n' });
+  await service.apply(first);
+  const second = await service.stage({ path: 'b.txt', revision: readB.revision, text: 'approved b\n', explanation: 'Uses a read made before a.txt was saved' });
+  await service.apply(second);
+  assert.deepEqual([backend.get('a.txt').text, backend.get('b.txt').text], ['approved a\n', 'approved b\n']);
+  assert.deepEqual(service.state.requestSaved, ['a.txt', 'b.txt'], 'Both files saved in this request are listed; c.txt from the earlier request is not.');
+  await service.undoRequest();
+  assert.deepEqual([backend.get('a.txt').text, backend.get('b.txt').text, backend.get('c.txt').text], ['old a\n', 'old b\n', 'earlier c\n'], 'Undo this request restores its files and keeps the earlier request.');
+  assert.equal(service.state.requestSaved, undefined);
+  await assert.rejects(service.undoRequest(), /Nothing saved in this request/u);
+});

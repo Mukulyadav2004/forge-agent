@@ -96,6 +96,11 @@
           "default": "",
           "description": "Fully qualified provider/model name. Use Forge: Select Model to choose from your local TrueForge server."
         },
+        "forgeAgent.saveOnApprove": {
+          "type": "boolean",
+          "default": true,
+          "description": "In agent mode, each proposed edit pauses for your review: accept or reject its hunks, then Approve saves the accepted hunks so the agent can run tests on them in the same request. Off: edits are only staged and you apply them in Review changes after the request. Edit Selection always uses the staged review. Applies to new chats."
+        },
         "forgeAgent.fallbackModel": {
           "type": "string",
           "default": "",

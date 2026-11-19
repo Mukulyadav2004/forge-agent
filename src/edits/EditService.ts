@@ -65,6 +65,8 @@ export class EditService {
   private readonly receipts = new Map<string, ReadReceipt>();
   private readonly proposals = new Map<string, Proposal>();
   private readonly history: UndoBatch[] = [];
+  /** Apply batches made during the current agent request (save on approve), newest last. */
+  private requestBatches = new Set<string>();
 
   constructor(private readonly options: { backend: EditBackend; onChange: () => void }) {}
 
@@ -73,6 +75,7 @@ export class EditService {
       proposals: [...this.proposals.values()].map(proposal => ({ ...proposal.view, hunks: proposal.view.hunks.map(hunk => ({ ...hunk })) })),
       busy: this.busy, canUndo: !this.blocked && this.history.length > 0,
       message: this.message, ...(this.recoveryPath ? { recoveryPath: this.recoveryPath } : {}),
+      ...(this.requestSaved().length ? { requestSaved: this.requestSaved() } : {}),
     };
   }
   private changed(message?: string): void {
@@ -112,6 +115,18 @@ export class EditService {
     }
     this.changed('Pending proposals discarded. Applied changes can be restored with Undo.');
     await this.closePreviews(ids);
+  }
+  /** A new user request starts a new group for Undo this request. */
+  beginRequest(): void { this.requestBatches = new Set(); }
+  private requestSaved(): string[] {
+    return [...new Set(this.history.filter(batch => this.requestBatches.has(batch.id)).flatMap(batch => batch.before.map(file => file.path)))];
+  }
+  /** Undoes, newest first, every batch this request saved that is still on top of Undo; stops at the first refusal so newer edits are kept. */
+  async undoRequest(): Promise<void> {
+    const before = this.requestSaved();
+    if (!before.length) throw new Error('Nothing saved in this request is left to undo.');
+    while (this.history.length && this.requestBatches.has(this.history.at(-1)?.id ?? '')) await this.undo();
+    this.changed(`Restored ${before.length} file(s) saved in this request: ${before.join(', ')}.`);
   }
   beginTurn(): void {
     this.assertAvailable();
@@ -304,6 +319,7 @@ export class EditService {
         hunk.status === 'pending' && (!options.hunkId || hunk.id === options.hunkId)).map(hunk => hunk.id) }));
       const after = await this.commit({ id: batchId, before, texts: selected.map(proposal => this.candidate({ proposal, hunkId: options.hunkId })) });
       this.history.push({ id: batchId, selections, before, after });
+      this.requestBatches.add(batchId);
       if (this.history.length > 10) this.history.shift();
       for (const [index, proposal] of selected.entries()) {
         const current = after[index];
@@ -313,7 +329,9 @@ export class EditService {
         for (const hunk of proposal.view.hunks) if (selection.hunkIds.includes(hunk.id)) hunk.status = 'applied';
         this.updateStatus(proposal);
       }
-      this.receipts.clear();
+      // Only the saved files' read receipts are stale; other files keep their revisions (staging re-checks content anyway).
+      const savedPaths = new Set(selected.map(proposal => proposal.before.realPath));
+      for (const [revision, receipt] of this.receipts) if (savedPaths.has(receipt.file.realPath)) this.receipts.delete(revision);
       this.changed(`${options.hunkId ? 'Accepted and saved this hunk.' : `Applied and saved ${selected.length} file(s).`} Undo is available. ${this.remaining()}`);
       for (const proposal of selected) await this.refreshPreview(proposal);
     } catch (error) {
