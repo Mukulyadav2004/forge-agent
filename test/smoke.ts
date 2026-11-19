@@ -326,7 +326,9 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     if (holdNextTurn) { holdNextTurn = false; await new Promise<void>(resolve => { releaseTurn = resolve; }); }
     response.setHeader("Content-Type", "text/event-stream");
     const content = 'Recovered with the corrected model.\n\n## Architecture\n\n```mermaid\nflowchart LR\nA["Read files"] --> B["Review changes"]\n```\n\n| Component | Source |\n| --- | --- |\n| Reader | [example.txt:1](example.txt#L1) |\n\n<img src=x onerror="window.forgeInjected=true">';
-    response.end(`data: ${JSON.stringify({ type: "model.message.delta", id: `text-${++turnNumber}`, thread_id: "main", content })}\n\ndata: ${JSON.stringify({ type: "turn.done", id: `done-${turnNumber}`, created_at: new Date().toISOString(), thread_id: null, state: { status: "done", completed_at: new Date().toISOString(), output: null, required_actions: [] } })}\n\n`);
+    const replyId = `text-${++turnNumber}`;
+    // Reasoning streams first under the same id; it must render collapsed and as plain text.
+    response.end(`data: ${JSON.stringify({ type: "model.message.delta", id: replyId, thread_id: "main", reasoning_content: "Checking the <b>model</b> settings first." })}\n\ndata: ${JSON.stringify({ type: "model.message.delta", id: replyId, thread_id: "main", content })}\n\ndata: ${JSON.stringify({ type: "turn.done", id: `done-${turnNumber}`, created_at: new Date().toISOString(), thread_id: null, state: { status: "done", completed_at: new Date().toISOString(), output: null, required_actions: [] } })}\n\n`);
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -348,6 +350,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     const review = frame.getByRole('region', { name: 'Proposed changes', exact: true });
     await review.locator('.review-lock').filter({ hasText: 'paused while the agent works' }).waitFor();
     assert.equal(await review.getByRole('button', { name: 'Undo last apply', exact: true }).isDisabled(), true);
+    await frame.locator('#messages .thinking-indicator').filter({ hasText: 'Thinking' }).waitFor();
     const preview = review.locator('.proposal-row').filter({ hasText: 'Pending during a held turn' }).getByRole('button', { name: 'Preview', exact: true });
     assert.equal(await preview.isEnabled(), true, 'Preview must stay usable while the agent works.');
     await preview.click();
@@ -356,6 +359,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     releaseTurn?.();
     await frame.getByText("Recovered with the corrected model.", { exact: true }).waitFor();
     await frame.locator("#message-input:not([disabled])").waitFor();
+    assert.equal(await frame.locator('#messages .thinking-indicator').count(), 0, 'The working line goes away when the turn ends.');
     await frame.locator('.architecture-diagram svg').waitFor();
     assert.ok((await frame.locator('.architecture-diagram svg').textContent())?.includes('Read files'));
     assert.equal(await frame.getByRole('heading', { name: 'Architecture', exact: true }).count(), 1);
@@ -395,6 +399,10 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     assert.equal(await frame.locator('#messages .activity-request').count(), 1, 'A new request starts a fresh context budget in the feed.');
     assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request · context [\d.]+k? of 350k chars$/u, 'The first request of a chat counts the project overview in its budget.');
     await frame.getByRole('log').getByText('Recovered with the corrected model.', { exact: true }).waitFor();
+    const thought = frame.locator('#messages .message-assistant details.thinking').last();
+    assert.equal(await thought.locator('summary').innerText(), 'Thinking');
+    assert.equal(await thought.locator('.thinking-text').textContent(), 'Checking the <b>model</b> settings first.', 'Reasoning is shown as plain text, never as HTML.');
+    assert.equal(await thought.getAttribute('open'), null, 'Reasoning starts collapsed.');
     await frame.locator('#message-input:not([disabled])').waitFor();
     assert.ok((await frame.getByRole('log').innerText()).includes('API key not valid'), 'The error must be shown in plain words.');
     assert.deepEqual(patchedModels, ['test/current'], 'A non-transient error goes straight to the fallback, without retries.');

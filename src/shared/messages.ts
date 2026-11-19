@@ -5,6 +5,8 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   text: string;
+  /** The model's streamed reasoning for this reply (TrueForge reasoningContent), shown collapsed; plain text, bounded. */
+  thinking?: string;
 }
 
 /** One multiple-choice question from TrueForge's ask_user_question tool. */
@@ -127,7 +129,8 @@ function isChatMessage(value: unknown): value is ChatMessage {
     isRecord(value) &&
     typeof value.id === "string" &&
     (value.role === "user" || value.role === "assistant") &&
-    typeof value.text === "string"
+    typeof value.text === "string" &&
+    (value.thinking === undefined || (typeof value.thinking === "string" && value.thinking.length <= 20000))
   );
 }
 

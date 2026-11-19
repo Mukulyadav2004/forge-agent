@@ -604,6 +604,12 @@ ${selectedText}`;
       if (existing) existing.text = event.content;
       else chat.messages.push({ id: event.id, role: "assistant", text: event.content });
     }
+    // Streamed reasoning goes with its reply as "thinking"; the newest 20,000 characters are kept.
+    if (event.type === "model.message.delta" && event.threadId === "main" && event.reasoningContent) {
+      const existing = chat.messages.find(message => message.id === event.id && message.role === "assistant");
+      if (existing) existing.thinking = `${existing.thinking ?? ''}${event.reasoningContent}`.slice(-20000);
+      else chat.messages.push({ id: event.id, role: "assistant", text: '', thinking: event.reasoningContent.slice(-20000) });
+    }
     if (event.type === "model.message.delta" && event.threadId === "main" && event.content) {
       const existing = chat.messages.find(message => message.id === event.id && message.role === "assistant");
       if (existing) existing.text += event.content;

@@ -194,7 +194,7 @@ function updateComposer(): void {
   }
 }
 
-const renderedMessages = new Map<string, { text: string; article: HTMLElement; body: HTMLElement }>();
+const renderedMessages = new Map<string, { text: string; thinking: string; article: HTMLElement; body: HTMLElement; thought?: HTMLDetailsElement }>();
 
 /** A chat message element, reused while its text is unchanged so Markdown and diagrams are not rebuilt on every update. */
 function messageElement(message: ChatMessage, complete: boolean): HTMLElement {
@@ -208,8 +208,24 @@ function messageElement(message: ChatMessage, complete: boolean): HTMLElement {
     const body = document.createElement("div");
     body.className = message.role === 'assistant' ? 'markdown-body' : 'user-text';
     article.append(author, body);
-    cached = { text: '', article, body };
+    cached = { text: '', thinking: '', article, body };
     renderedMessages.set(message.id, cached);
+  }
+  // The model's reasoning, collapsed above the reply, as plain text (never Markdown or HTML).
+  if (message.role === 'assistant' && message.thinking && cached.thinking !== message.thinking) {
+    if (!cached.thought) {
+      cached.thought = document.createElement('details');
+      cached.thought.className = 'thinking';
+      const summary = document.createElement('summary');
+      summary.textContent = 'Thinking';
+      const text = document.createElement('div');
+      text.className = 'thinking-text';
+      cached.thought.append(summary, text);
+      cached.body.before(cached.thought);
+    }
+    const text = cached.thought.querySelector('.thinking-text');
+    if (text) text.textContent = message.thinking;
+    cached.thinking = message.thinking;
   }
   if (cached.text !== message.text) {
     if (message.role === 'assistant') renderMarkdown({ container: cached.body, text: message.text });
@@ -304,7 +320,7 @@ const EXPLORING = new Set<ActivityEntry['kind']>(['search', 'open', 'list', 'con
  * Consecutive searches and reads collapse into one "Forge read … searched …" block; commands, staged edits,
  * refusals and compaction stand alone. A request line shows that request's context budget.
  */
-function renderTimeline(options: { messages: ChatMessage[]; activity: ActivityEntry[]; complete: boolean }): void {
+function renderTimeline(options: { messages: ChatMessage[]; activity: ActivityEntry[]; complete: boolean; working?: boolean }): void {
   if (!(conversation instanceof HTMLDivElement)) return;
   const liveIds = new Set(options.messages.map(message => message.id));
   for (const id of renderedMessages.keys()) if (!liveIds.has(id)) renderedMessages.delete(id);
@@ -384,6 +400,14 @@ function renderTimeline(options: { messages: ChatMessage[]; activity: ActivityEn
   }
   fragment.append(...(after.get(0) ?? []));
   options.messages.forEach((message, index) => fragment.append(messageElement(message, options.complete), ...(after.get(index + 1) ?? [])));
+  // While the agent works (not while it waits for the user), the end of the conversation says so, as Cline does.
+  if (options.working) {
+    const working = document.createElement('p');
+    working.className = 'thinking-indicator';
+    working.setAttribute('role', 'status');
+    working.textContent = 'Thinking';
+    fragment.append(working);
+  }
   conversation.replaceChildren(fragment);
 }
 
@@ -452,7 +476,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   renderChats(event.data.chats);
   renderQuestions(event.data.questions);
   renderContextMeter(event.data.activity);
-  renderTimeline({ messages: event.data.messages, activity: event.data.activity, complete: !event.data.busy });
+  renderTimeline({ messages: event.data.messages, activity: event.data.activity, complete: !event.data.busy, working: event.data.busy && !event.data.approval && event.data.questions.length === 0 });
   const reviewPanel = document.getElementById('review-panel');
   const reviewWasHidden = reviewPanel?.hidden ?? true;
   // A paused turn waits on the user, so review stays open: an edit's approval is decided here, hunk by hunk.
