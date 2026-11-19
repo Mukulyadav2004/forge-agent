@@ -26,8 +26,14 @@ export const CONTEXT_BUDGET = 350_000;
 /** Cline's per-read limits (2,000 lines, 48k characters); a file longer than one read also gets an outline so the next read can target a block. */
 const READ_LIMITS = { default_window_lines: 2000, lines_per_call: 2000, characters_per_call: 48000, outline_characters: 4000 };
 const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 8388608, output_characters: 20000, line_characters: 1000, matches_per_file: 3, timeout_ms: 5000 };
+/** Lines as staging counts them: a final newline ends the last line instead of starting an empty one (an empty file is one empty line). */
+function fileLines(text: string): string[] {
+  const lines = text.split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
 /** propose_edit arguments; the approval card and the later tool call carry the same ones. */
-const PROPOSE_SHAPE = { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') };
+const PROPOSE_SHAPE = { path: z.string(), base_revision: z.string().optional().describe('From read_file. Required for start_line/end_line, insert_line and whole-file edits; optional with old_text, whose exact match proves the text is current.'), new_text: z.string({ error: 'new_text is required: the text that replaces the located lines. To delete them, pass an empty string.' }).max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') };
 const ProposeInputSchema = z.object(PROPOSE_SHAPE);
 type ProposeInput = z.infer<typeof ProposeInputSchema>;
 /** write_file arguments: a new file and its whole content. */
@@ -66,7 +72,7 @@ export class EditorBridge implements vscode.Disposable {
   private readonly readCoverage = new Map<string, [number, number][]>();
   private coverageKey(path: string, text: string): string { return `${normalize(path).replace(/^\.\//u, '')}\0${createHash('sha256').update(text).digest('hex')}`; }
   private unreadLines(path: string, text: string): number {
-    const total = text.split('\n').length;
+    const total = fileLines(text).length;
     let next = 1, unread = 0;
     for (const [start, end] of [...(this.readCoverage.get(this.coverageKey(path, text)) ?? [])].sort((a, b) => a[0] - b[0])) {
       if (start > next) unread += start - next;
@@ -175,7 +181,7 @@ export class EditorBridge implements vscode.Disposable {
       await this.options.edits.preview(id).catch(() => undefined);
       return { status: 'review' };
     } catch (error) {
-      const message = error instanceof z.ZodError ? `The ${name} arguments are invalid: ${error.issues.map(issue => `${issue.path.join('.')} ${issue.message}`).join('; ')}` : error instanceof Error ? error.message : 'The edit could not be prepared.';
+      const message = error instanceof z.ZodError ? `The ${name} arguments are invalid: ${error.issues.map(issue => issue.message.startsWith(String(issue.path[0] ?? '')) ? issue.message : `${issue.path.join('.')} ${issue.message}`).join('; ')}` : error instanceof Error ? error.message : 'The edit could not be prepared.';
       this.activityEvents.fire({ kind: 'refused', tool: name, message });
       return { status: 'invalid', message };
     }
@@ -326,7 +332,7 @@ export class EditorBridge implements vscode.Disposable {
     register('search_code', { description: 'Search saved workspace text. Returns hits grouped by file with line numbers, up to three excerpts per file, observed folder counts and a next-step hint. Run one focused search per fact you need (for example where a name is defined, then where it is registered, imported or called); a distinctive identifier finds far fewer, better hits than a common word. Literal and case-insensitive by default; set regex to true for patterns such as alternatives (name_a|name_b). Use glob to filter paths and narrow incomplete searches. Then open each relevant hit with read_file around its line number.', inputSchema: SearchInputSchema.shape, annotations: { readOnlyHint: true } }, async (input, extra) => this.searchCode({ ...input, signal: extra.signal }));
     register('read_file', { description: `Read numbered lines from a workspace file. Without end_line it returns up to ${READ_LIMITS.default_window_lines} lines from start_line; if the file is longer, it also returns an outline of the whole file (definitions or headings with line numbers). Use the outline or a search hit to read just the block you need with start_line and end_line (up to ${READ_LIMITS.lines_per_call} lines or ${READ_LIMITS.characters_per_call} characters per call). Returns the actual range, total_lines, whether more lines follow, and the base_revision that propose_edit needs.`, inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
       const { revision, file } = await this.options.edits.read(path);
-      const lines = file.text.split('\n');
+      const lines = fileLines(file.text);
       if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
       const end = Math.min(end_line ?? start_line + READ_LIMITS.default_window_lines - 1, start_line + READ_LIMITS.lines_per_call - 1, lines.length);
       const allowance = Math.min(READ_LIMITS.characters_per_call, this.remaining());
@@ -397,7 +403,7 @@ export class EditorBridge implements vscode.Disposable {
       const message = `Proposal ${id} stages the new file ${input.path}. No files changed. To create it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all.`;
       return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path: input.path, message } };
     });
-    register('propose_edit', { description: 'Propose an edit for the user to review. Depending on a setting, the user approves the diff and the accepted hunks are saved before this call returns, or the edit is staged for them to apply later; the result says which. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored; differences only in typographic quotes, dashes or trailing spaces still match, and when nothing matches the error shows the closest numbered lines to copy from); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: PROPOSE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
+    register('propose_edit', { description: 'Propose an edit for the user to review. Depending on a setting, the user approves the diff and the accepted hunks are saved before this call returns, or the edit is staged for them to apply later; the result says which. Pass base_revision from read_file (it may be omitted with old_text). Locate the change in exactly one way: (1) old_text, the current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored; differences only in typographic quotes, dashes or trailing spaces still match, and when nothing matches the error shows the closest numbered lines to copy from); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: PROPOSE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
       // An edit the user already reviewed in the approval card was settled before TrueForge called the tool: report that result.
       // Matched by the exact arguments; if TrueForge re-encoded them, by path and base_revision when that is unambiguous.
       const sameRead = [...this.reviewed.keys()].filter(candidate => { const [path, revision] = JSON.parse(candidate) as [string, string]; return path === input.path && revision === input.base_revision; });

@@ -39,7 +39,7 @@ type Change = 'edit' | 'create';
 interface Proposal { view: ProposalView; before: FileSnapshot; original: string; after: string; parts: ReviewPart[]; task: string; change: Change }
 interface UndoBatch { id: string; selections: { proposalId: string; hunkIds: string[] }[]; before: FileSnapshot[]; after: FileSnapshot[] }
 interface ReadReceipt { task: string; file: FileSnapshot }
-export interface StageOptions { path: string; revision: string; text: string; explanation: string; range?: { startLine: number; endLine: number }; oldText?: string; insertLine?: number }
+export interface StageOptions { path: string; revision?: string; text: string; explanation: string; range?: { startLine: number; endLine: number }; oldText?: string; insertLine?: number }
 
 function replaceLines(options: { text: string; eol: string; start: number; endExclusive: number; insert: string }): string {
   const lines = options.text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
@@ -167,12 +167,16 @@ export class EditService {
   /** Line-based and old_text edits build on an untouched pending proposal for the same unchanged file; whole-file text replaces it. */
   async stageEdit(options: StageOptions): Promise<{ id: string; combined: boolean; replaced: string[] }> {
     this.assertAvailable();
-    const receipt = this.receipts.get(options.revision);
-    if (!receipt || receipt.task !== this.task || this.cancelled || receipt.file.path !== options.path) throw new Error('Read this file again and pass its current base_revision to propose_edit.');
+    // Like Cline's editor, an old_text edit may omit the revision: its exact match against the current file proves the
+    // text is current. Line numbers and whole-file text depend on the version read, so those still need its revision.
+    if (options.revision === undefined && options.oldText === undefined) throw new Error('Pass base_revision from read_file: line-based and whole-file edits need the version of the file you read. Only old_text edits can omit it.');
+    const receipt = options.revision === undefined ? undefined : this.receipts.get(options.revision);
+    if (options.revision !== undefined && (!receipt || receipt.task !== this.task || this.cancelled || receipt.file.path !== options.path)) throw new Error('Read this file again and pass its current base_revision to propose_edit, or locate the change with old_text alone.');
+    const task = this.task;
     const actual = await this.options.backend.capture(options.path);
-    if (receipt.task !== this.task || this.cancelled) throw new Error('The proposal belongs to a cancelled task.');
+    if (task !== this.task || this.cancelled) throw new Error('The proposal belongs to a cancelled task.');
     if (actual.dirty) throw new Error(`Save your unsaved changes in ${options.path}, then read it again before proposing edits.`);
-    if (!matches({ actual, expected: receipt.file })) throw new Error(`${options.path} changed after it was read. Read it again before proposing edits.`);
+    if (receipt && !matches({ actual, expected: receipt.file })) throw new Error(`${options.path} changed after it was read. Read it again before proposing edits.`);
     let text = options.text.replace(/\r\n|\r|\n/g, actual.eol);
     const partial = options.range !== undefined || options.oldText !== undefined || options.insertLine !== undefined;
     const pending = partial ? [...this.proposals.values()].find(previous => previous.task === this.task && previous.view.status === 'pending' && previous.change === 'edit'

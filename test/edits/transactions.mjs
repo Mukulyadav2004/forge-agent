@@ -490,3 +490,13 @@ test('Undo this request removes a file created in it and restores edited files',
   assert.equal(backend.get('cli.py').text, 'old\n');
   assert.equal(backend.files.has('tests/test_new.py'), false);
 });
+
+test('an old_text edit may omit base_revision; line-based and whole-file edits still need it', async () => {
+  const { backend, service } = setup({ 'a.txt': 'alpha\nbeta\n' });
+  const { id } = await service.stageEdit({ path: 'a.txt', oldText: 'beta', text: 'BETA', explanation: 'No revision: the exact match proves the text is current' });
+  await service.apply(id);
+  assert.equal(backend.get('a.txt').text, 'alpha\nBETA\n');
+  await assert.rejects(service.stageEdit({ path: 'a.txt', range: { startLine: 1, endLine: 1 }, text: 'x', explanation: 'Range without revision' }), /Pass base_revision from read_file/u);
+  await assert.rejects(service.stageEdit({ path: 'a.txt', text: 'whole', explanation: 'Whole file without revision' }), /Only old_text edits can omit it/u);
+  await assert.rejects(service.stageEdit({ path: 'a.txt', oldText: 'gone', text: 'x', explanation: 'Stale text' }), /old_text was not found/u, 'Without a revision, a stale old_text is still refused.');
+});

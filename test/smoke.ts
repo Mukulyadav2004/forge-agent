@@ -163,7 +163,11 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   assert.ok(JSON.stringify(read).includes("original text"));
   const structuredRead: unknown = read.structuredContent;
   assert.ok(typeof structuredRead === 'object' && structuredRead !== null && 'text' in structuredRead && typeof structuredRead.text === 'string' && structuredRead.text.includes('original text'), 'TrueForge must receive the file text even when it selects only structuredContent.');
-  await restoredFrame.locator('#messages .activity-group .activity-open').getByRole('button', { name: 'example.txt:1-2', exact: true }).last().waitFor();
+  assert.ok('total_lines' in structuredRead && structuredRead.total_lines === 1, 'A final newline ends the last line: read_file counts lines the way propose_edit does.');
+  const noText = await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', old_text: 'original text', explanation: 'Missing new_text' } });
+  assert.equal(noText.isError, true);
+  assert.match(JSON.stringify(noText.content), /new_text is required[^"]*To delete them, pass an empty string/u, 'A missing new_text says what to send.');
+  await restoredFrame.locator('#messages .activity-group .activity-open').getByRole('button', { name: 'example.txt:1-1', exact: true }).last().waitFor();
   const escape = await client.callTool({ name: "read_file", arguments: { path: "../outside.txt" } });
   assert.equal(escape.isError, true);
   const readData: unknown = read.structuredContent;

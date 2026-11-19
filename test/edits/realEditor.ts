@@ -94,7 +94,7 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   const partRevision = (firstPart.structuredContent as { base_revision: string }).base_revision;
   const truncating = await client.callTool({ name: 'propose_edit', arguments: { path: 'coverage-probe.txt', base_revision: partRevision, new_text: 'only this\n', explanation: 'Truncation probe' } });
   assert.equal(truncating.isError, true, 'A whole-file replacement after a partial read must be refused.');
-  assert.match(JSON.stringify(truncating.content), /100 line\(s\) of coverage-probe\.txt have not been read/u);
+  assert.match(JSON.stringify(truncating.content), /99 line\(s\) of coverage-probe\.txt have not been read/u);
   const badRange = await client.callTool({ name: 'propose_edit', arguments: { path: 'coverage-probe.txt', base_revision: partRevision, new_text: 'x', start_line: 400, end_line: 401, explanation: 'Range probe' } });
   assert.match(JSON.stringify(badRange.content), /coverage-probe\.txt has 299 line\(s\) as read/u, 'A bad range says how long the file is.');
   const secondPart = await client.callTool({ name: 'read_file', arguments: { path: 'coverage-probe.txt', start_line: 201 } });
