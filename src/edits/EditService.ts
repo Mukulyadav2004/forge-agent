@@ -17,6 +17,8 @@ export interface FileSnapshot {
   version: number;
   dirty: boolean;
   eol: '\n' | '\r\n';
+  /** Stands for a file that does not exist: text and bytes are empty and realPath is where it would be created. */
+  missing?: boolean;
 }
 export interface Replacement { before: FileSnapshot; text: string }
 export interface EditBackend {
@@ -26,8 +28,15 @@ export interface EditBackend {
   backup(options: { id: string; files: FileSnapshot[] }): Promise<string>;
   preview(options: { id: string; path: string; before: string; after: string }): Promise<void>;
   closePreview(id: string): Promise<void>;
+  /** A missing-file snapshot for a creatable path, or undefined when the file exists. Without it, files can only be edited. */
+  missing?(path: string): Promise<FileSnapshot | undefined>;
+  /** Creates a new file with exactly these bytes; false when it already exists or cannot be written. */
+  create?(options: { path: string; bytes: Uint8Array }): Promise<boolean>;
+  /** Deletes the file if it still matches the snapshot (undo or rollback of a created file). */
+  remove?(snapshot: FileSnapshot): Promise<boolean>;
 }
-interface Proposal { view: ProposalView; before: FileSnapshot; original: string; after: string; parts: ReviewPart[]; task: string }
+type Change = 'edit' | 'create';
+interface Proposal { view: ProposalView; before: FileSnapshot; original: string; after: string; parts: ReviewPart[]; task: string; change: Change }
 interface UndoBatch { id: string; selections: { proposalId: string; hunkIds: string[] }[]; before: FileSnapshot[]; after: FileSnapshot[] }
 interface ReadReceipt { task: string; file: FileSnapshot }
 export interface StageOptions { path: string; revision: string; text: string; explanation: string; range?: { startLine: number; endLine: number }; oldText?: string; insertLine?: number }
@@ -46,6 +55,7 @@ export function contentHash(bytes: Uint8Array): string {
 }
 function matches(options: { actual: FileSnapshot; expected: FileSnapshot }): boolean {
   const { actual, expected } = options;
+  if (actual.missing || expected.missing) return actual.missing === true && expected.missing === true && actual.realPath === expected.realPath;
   return actual.realPath === expected.realPath && actual.documentUri === expected.documentUri && actual.identity === expected.identity
     && actual.version === expected.version && actual.text === expected.text
     && actual.dirty === expected.dirty && contentHash(actual.bytes) === contentHash(expected.bytes);
@@ -165,7 +175,7 @@ export class EditService {
     if (!matches({ actual, expected: receipt.file })) throw new Error(`${options.path} changed after it was read. Read it again before proposing edits.`);
     let text = options.text.replace(/\r\n|\r|\n/g, actual.eol);
     const partial = options.range !== undefined || options.oldText !== undefined || options.insertLine !== undefined;
-    const pending = partial ? [...this.proposals.values()].find(previous => previous.task === this.task && previous.view.status === 'pending'
+    const pending = partial ? [...this.proposals.values()].find(previous => previous.task === this.task && previous.view.status === 'pending' && previous.change === 'edit'
       && previous.view.hunks.every(hunk => hunk.status === 'pending') && matches({ actual, expected: previous.before })) : undefined;
     const base = pending?.after ?? actual.text;
     const readLines = (actual.text.match(/[^\n]*\n|[^\n]+$/g) ?? []).length;
@@ -198,16 +208,38 @@ export class EditService {
       }
       text = matched.text;
     }
-    if (text.length > MAX_EDIT_CHARACTERS || text.includes('\0') || options.text.startsWith('\uFEFF') || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'utf8')) !== text) {
+    return this.addProposal({ path: options.path, actual, text, rawText: options.text, explanation: options.explanation, pending, change: 'edit' });
+  }
+  /** Stages a new file. The path must not exist yet; the review shows every line as added. Nothing is written. */
+  async stageCreate(options: { path: string; text: string; explanation: string }): Promise<{ id: string; combined: boolean; replaced: string[] }> {
+    this.assertAvailable();
+    const task = this.task;
+    if (!this.options.backend.missing || !this.options.backend.create || !this.options.backend.remove) throw new Error('This editor cannot create files through proposals.');
+    const actual = await this.options.backend.missing(options.path);
+    if (task !== this.task || this.cancelled) throw new Error('The proposal belongs to a cancelled task.');
+    if (!actual) throw new Error(`${options.path} already exists. Read it, then change it with propose_edit.`);
+    const eol = options.text.includes('\r\n') ? '\r\n' : actual.eol;
+    const text = options.text.replace(/\r\n|\r|\n/g, eol);
+    return this.addProposal({ path: options.path, actual: { ...actual, eol }, text, rawText: options.text, explanation: options.explanation, pending: undefined, change: 'create' });
+  }
+  private async addProposal(options: { path: string; actual: FileSnapshot; text: string; rawText: string; explanation: string; pending: Proposal | undefined; change: Change }): Promise<{ id: string; combined: boolean; replaced: string[] }> {
+    const { actual, text, pending } = options;
+    if (text.length > MAX_EDIT_CHARACTERS || text.includes('\0') || options.rawText.startsWith('\uFEFF') || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'utf8')) !== text) {
       throw new Error('Proposals must contain valid UTF-8 text within the file limit, without NUL characters or a leading BOM. Encoding metadata is preserved automatically.');
     }
-    if (text === actual.text) throw new Error('The proposed content is identical to the current file.');
+    if (options.change === 'edit' && text === actual.text) throw new Error('The proposed content is identical to the current file.');
     const { parts, hunks } = buildLineChanges({ before: actual.text, after: text });
+    // Creating an empty file changes no lines; one empty hunk stands for the new file so it can be reviewed.
+    if (!hunks.length && options.change === 'create') {
+      const hunkId = randomUUID();
+      parts.push({ kind: 'change', id: hunkId, before: '', after: '' });
+      hunks.push({ id: hunkId, oldStart: 1, newStart: 1, oldLines: 0, newLines: 0, removed: '', added: '', truncated: false, status: 'pending' });
+    }
     const id = randomUUID();
     // A combined proposal lists each distinct explanation once; agents often repeat one explanation for every edit to a file.
     const repeated = !options.explanation.trim() || `\n${pending?.view.explanation}\n`.includes(`\n${options.explanation}\n`);
     const explanation = pending ? (repeated ? pending.view.explanation : `${pending.view.explanation}\n${options.explanation}`.slice(-4000)) : options.explanation;
-    const proposal: Proposal = { view: { id, path: options.path, explanation, status: 'pending', hunks }, before: actual, original: actual.text, after: text, parts, task: this.task };
+    const proposal: Proposal = { view: { id, path: options.path, explanation, status: 'pending', hunks, ...(options.change === 'create' ? { change: 'create' as const } : {}) }, before: actual, original: actual.text, after: text, parts, task: this.task, change: options.change };
     this.proposals.set(id, proposal);
     try {
       if (!this.agentTurn) await this.options.backend.preview({ id, path: options.path, before: actual.text, after: text });
@@ -308,7 +340,7 @@ export class EditService {
     this.busy = true; this.changed();
     try {
       for (const proposal of selected) {
-        const actual = await this.options.backend.capture(proposal.view.path);
+        const actual = await this.snapshot(proposal.view.path);
         if (actual.dirty || !matches({ actual, expected: proposal.before })) {
           proposal.view.status = 'conflict';
           throw new Error(`${proposal.view.path} changed since the proposal. Nothing was applied; reject it and request a fresh proposal.`);
@@ -347,15 +379,16 @@ export class EditService {
     this.busy = true; this.changed();
     try {
       for (const after of batch.after) {
-        const actual = await this.options.backend.capture(after.path);
+        const actual = await this.snapshot(after.path);
         if (actual.dirty || !matches({ actual, expected: after })) throw new Error(`${after.path} changed after applying. Undo was refused to preserve your edits.`);
       }
-      const restored = await this.commit({ id: `undo-${batch.id}`, before: batch.after, texts: batch.before.map(file => file.text), expectedBytes: batch.before.map(file => file.bytes) });
+      // A file this batch created is deleted again (null); others get their earlier bytes back.
+      const restored = await this.commit({ id: `undo-${batch.id}`, before: batch.after, texts: batch.before.map(file => file.missing ? null : file.text), expectedBytes: batch.before.map(file => file.missing ? undefined : file.bytes) });
       this.history.pop();
       for (const previous of this.history) {
         for (const [index, expected] of previous.after.entries()) {
           const current = restored.find(file => file.path === expected.path);
-          if (current && current.text === expected.text && contentHash(current.bytes) === contentHash(expected.bytes)) previous.after[index] = current;
+          if (current && !current.missing === !expected.missing && current.text === expected.text && contentHash(current.bytes) === contentHash(expected.bytes)) previous.after[index] = current;
         }
       }
       for (const selection of batch.selections) {
@@ -376,40 +409,70 @@ export class EditService {
       throw error;
     } finally { this.busy = false; this.changed(); }
   }
-  private async commit(options: { id: string; before: FileSnapshot[]; texts: string[]; expectedBytes?: Uint8Array[] }): Promise<FileSnapshot[]> {
-    const backup = await this.options.backend.backup({ id: options.id, files: options.before });
-    const changes: Replacement[] = [];
+  /** The current state of a path: a missing-file snapshot when it does not exist (and the backend can tell), otherwise a capture. */
+  private async snapshot(path: string): Promise<FileSnapshot> {
+    return (await this.options.backend.missing?.(path)) ?? this.options.backend.capture(path);
+  }
+  /**
+   * One transaction: text replaces existing files, text for a missing snapshot creates the file, and null deletes a file
+   * (only Undo and rollback of a created file pass null). Ported with the team's create support from opencode-aligned branch.
+   */
+  private async commit(options: { id: string; before: FileSnapshot[]; texts: (string | null)[]; expectedBytes?: (Uint8Array | undefined)[] }): Promise<FileSnapshot[]> {
+    const edits: { index: number; change: Replacement }[] = [], creates: { index: number; before: FileSnapshot; text: string }[] = [], deletes: { index: number; before: FileSnapshot }[] = [];
     for (const [index, before] of options.before.entries()) {
       const text = options.texts[index];
       if (text === undefined) throw new Error('Missing transaction content.');
-      changes.push({ before, text });
+      if (before.missing) { if (text !== null) creates.push({ index, before, text }); }
+      else if (text === null) deletes.push({ index, before });
+      else edits.push({ index, change: { before, text } });
     }
+    if ((creates.length && !this.options.backend.create) || (deletes.length && !this.options.backend.remove)) throw new Error('This editor cannot create or delete files.');
+    const backup = await this.options.backend.backup({ id: options.id, files: options.before });
     const owned = new Map<string, FileSnapshot>();
-    let applied = false;
+    const touched = new Set<string>();
+    const after: FileSnapshot[] = [...options.before];
+    const expectedBytes = (index: number, before: FileSnapshot, text: string) => options.expectedBytes?.[index] ?? bytesForText({ original: before.bytes, text });
     try {
-      if (!await this.options.backend.replace(changes)) throw new Error('The editor rejected the batch. No edits were applied.');
-      applied = true;
-      for (const change of changes) {
-        const current = await this.options.backend.capture(change.before.path);
-        if (current.text !== change.text) throw new Error(`${change.before.path} changed during apply.`);
-        owned.set(current.path, current);
+      if (edits.length) {
+        if (!await this.options.backend.replace(edits.map(edit => edit.change))) throw new Error('The editor rejected the batch. No edits were applied.');
+        for (const { change } of edits) touched.add(change.before.path);
+        for (const { change } of edits) {
+          const current = await this.options.backend.capture(change.before.path);
+          if (current.text !== change.text) throw new Error(`${change.before.path} changed during apply.`);
+          owned.set(current.path, current);
+        }
+        for (const { index, change } of edits) {
+          if (!await this.options.backend.save(change.before.path)) throw new Error(`Saving ${change.before.path} failed.`);
+          const current = await this.options.backend.capture(change.before.path);
+          // A save participant or another writer must not silently change the accepted diff.
+          if (current.text !== change.text) throw new Error(`${change.before.path} was changed by a save participant or another writer.`);
+          owned.set(current.path, current);
+          if (current.dirty || contentHash(current.bytes) !== contentHash(expectedBytes(index, change.before, change.text))) throw new Error(`Could not verify the saved bytes of ${current.path}.`);
+          after[index] = current;
+        }
       }
-      const after: FileSnapshot[] = [];
-      for (const [index, change] of changes.entries()) {
-        if (!await this.options.backend.save(change.before.path)) throw new Error(`Saving ${change.before.path} failed.`);
-        const current = await this.options.backend.capture(change.before.path);
-        // A save participant or another writer must not silently change the accepted diff.
-        if (current.text !== change.text) throw new Error(`${change.before.path} was changed by a save participant or another writer.`);
+      for (const { index, before, text } of creates) {
+        touched.add(before.path);
+        const bytes = expectedBytes(index, before, text);
+        if (!await this.options.backend.create?.({ path: before.path, bytes })) throw new Error(`Creating ${before.path} failed; it may already exist.`);
+        const current = await this.options.backend.capture(before.path);
+        if (current.text !== text || current.dirty || contentHash(current.bytes) !== contentHash(bytes)) throw new Error(`Could not verify the new file ${before.path}.`);
         owned.set(current.path, current);
-        const expected = options.expectedBytes?.[index] ?? bytesForText({ original: change.before.bytes, text: change.text });
-        if (current.dirty || contentHash(current.bytes) !== contentHash(expected)) throw new Error(`Could not verify the saved bytes of ${current.path}.`);
-        after.push(current);
+        after[index] = current;
       }
-      for (const file of after) if (!matches({ actual: await this.options.backend.capture(file.path), expected: file })) throw new Error(`${file.path} changed before commit completed.`);
+      for (const { index, before } of deletes) {
+        touched.add(before.path);
+        if (!await this.options.backend.remove?.(before)) throw new Error(`Deleting ${before.path} failed.`);
+        const current = await this.snapshot(before.path);
+        if (!current.missing) throw new Error(`${before.path} still exists after deleting it.`);
+        owned.set(current.path, current);
+        after[index] = current;
+      }
+      for (const file of after) if (!matches({ actual: await this.snapshot(file.path), expected: file })) throw new Error(`${file.path} changed before commit completed.`);
       return after;
     } catch (error) {
-      if (!applied) throw error;
-      const restored = await this.rollback({ before: options.before, owned });
+      if (!touched.size) throw error;
+      const restored = await this.rollback({ before: options.before, owned, touched });
       if (!restored) {
         this.blocked = true; this.recoveryPath = backup;
         throw new Error(`The transaction failed and rollback could not be completed without risking newer edits. Further writes are blocked. Recovery snapshots: ${backup}`, { cause: error });
@@ -417,15 +480,28 @@ export class EditService {
       throw new Error(`The transaction failed; all affected files were restored. ${error instanceof Error ? error.message : ''}`, { cause: error });
     }
   }
-  private async rollback(options: { before: FileSnapshot[]; owned: Map<string, FileSnapshot> }): Promise<boolean> {
+  /** Restores only files this transaction changed and that nobody changed since; anything else leaves recovery to the backups. */
+  private async rollback(options: { before: FileSnapshot[]; owned: Map<string, FileSnapshot>; touched: Set<string> }): Promise<boolean> {
     try {
-      const changes: Replacement[] = [];
+      const changes: Replacement[] = [], created: FileSnapshot[] = [], deleted: FileSnapshot[] = [];
       let complete = true;
       for (const before of options.before) {
-        const current = await this.options.backend.capture(before.path);
+        if (!options.touched.has(before.path)) continue;
+        const current = await this.snapshot(before.path);
         const expected = options.owned.get(before.path);
-        if (!expected || !matches({ actual: current, expected })) { complete = false; continue; }
-        changes.push({ before: current, text: before.text });
+        if (!expected) { if (!matches({ actual: current, expected: before })) complete = false; continue; }
+        if (!matches({ actual: current, expected })) { complete = false; continue; }
+        if (before.missing) created.push(current);
+        else if (current.missing) deleted.push(before);
+        else changes.push({ before: current, text: before.text });
+      }
+      for (const file of created) {
+        if (!await this.options.backend.remove?.(file) || !(await this.snapshot(file.path)).missing) complete = false;
+      }
+      for (const file of deleted) {
+        if (!await this.options.backend.create?.({ path: file.path, bytes: file.bytes })) { complete = false; continue; }
+        const current = await this.options.backend.capture(file.path);
+        if (current.text !== file.text || contentHash(current.bytes) !== contentHash(file.bytes)) complete = false;
       }
       if (changes.length && !await this.options.backend.replace(changes)) return false;
       for (const change of changes) {

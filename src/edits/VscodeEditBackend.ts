@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import * as vscode from 'vscode';
 import { EditPreviewContentStore, EDIT_PREVIEW_URI_SCHEME, VscodeEditPreview } from '../editor/ClineEditPreview';
 import { WorkspaceFiles } from '../workspace/WorkspaceFiles';
@@ -14,6 +15,24 @@ export class VscodeEditBackend implements EditBackend, vscode.Disposable {
     this.registration = vscode.workspace.registerTextDocumentContentProvider(EDIT_PREVIEW_URI_SCHEME, this.contentStore);
   }
   capture(path: string): Promise<FileSnapshot> { return this.options.files.capture(path); }
+  // File creation ported from the team's opencode-aligned branch: create refuses an existing path ("wx"), and remove is
+  // used only to undo or roll back a file this extension created after the user approved it.
+  missing(path: string): Promise<FileSnapshot | undefined> { return this.options.files.missingSnapshot(path); }
+  async create(options: { path: string; bytes: Uint8Array }): Promise<boolean> {
+    try {
+      const located = await this.options.files.locate(options.path);
+      if (located.kind !== 'missing') return false;
+      await mkdir(dirname(located.absolutePath), { recursive: true });
+      await writeFile(located.absolutePath, options.bytes, { flag: 'wx' });
+      return true;
+    } catch { return false; }
+  }
+  async remove(snapshot: FileSnapshot): Promise<boolean> {
+    if (snapshot.missing || !this.options.files.canReplace(snapshot)) return false;
+    const edit = new vscode.WorkspaceEdit();
+    edit.deleteFile(vscode.Uri.parse(snapshot.documentUri), { ignoreIfNotExists: false });
+    return vscode.workspace.applyEdit(edit, { isRefactoring: true });
+  }
   async replace(changes: Replacement[]): Promise<boolean> {
     const edit = new vscode.WorkspaceEdit();
     for (const change of changes) {
@@ -29,7 +48,7 @@ export class VscodeEditBackend implements EditBackend, vscode.Disposable {
     const directory = vscode.Uri.joinPath(this.options.storageUri, 'edit-snapshots');
     await mkdir(directory.fsPath, { recursive: true, mode: 0o700 });
     const target = vscode.Uri.joinPath(directory, `${options.id}-${randomUUID()}.json`);
-    const data = { version: 1, transaction_id: options.id, created_at: new Date().toISOString(), files: options.files.map(file => ({ path: file.path, real_path: file.realPath, sha256: contentHash(file.bytes), content_base64: Buffer.from(file.bytes).toString('base64') })) };
+    const data = { version: 1, transaction_id: options.id, created_at: new Date().toISOString(), files: options.files.map(file => ({ path: file.path, real_path: file.realPath, ...(file.missing ? { missing: true } : {}), sha256: contentHash(file.bytes), content_base64: Buffer.from(file.bytes).toString('base64') })) };
     await writeFile(target.fsPath, JSON.stringify(data, null, 2), { mode: 0o600, flag: 'wx' });
     return target.fsPath;
   }

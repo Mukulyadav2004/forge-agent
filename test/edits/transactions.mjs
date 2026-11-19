@@ -429,3 +429,64 @@ test('a staged old_text edit tolerates trailing spaces, keeps CRLF, and a miss r
     /old_text was not found in w\.py\. Copy the exact current text, including indentation\.\nThe closest lines in the file:\n4: def beta\(\):/u);
   await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: 'def gone():\n    pass', text: 'def alpha():\n    return 2\n', explanation: 'Already applied' }), /may already be applied/u);
 });
+
+// File creation (ported with the team's tests from the opencode-aligned branch).
+class CreatingBackend extends MemoryBackend {
+  async missing(path) { return this.files.has(path) ? undefined : { path, realPath: `/workspace/${path}`, documentUri: `file:///workspace/${path}`, identity: `missing:${path}`, text: '', bytes: new Uint8Array(), version: 0, dirty: false, eol: '\n', missing: true }; }
+  async create({ path, bytes }) {
+    if (this.files.has(path)) return false;
+    const text = Buffer.from(bytes).toString('utf8');
+    this.files.set(path, { path, realPath: `/workspace/${path}`, documentUri: `file:///workspace/${path}`, identity: `file:${path}`, text, bytes: Buffer.from(bytes), version: 1, dirty: false, eol: text.includes('\r\n') ? '\r\n' : '\n' });
+    return true;
+  }
+  async remove(snapshot) {
+    const file = this.files.get(snapshot.path);
+    if (!file || file.text !== snapshot.text || contentHash(file.bytes) !== contentHash(snapshot.bytes)) return false;
+    this.files.delete(snapshot.path); return true;
+  }
+}
+function creating(files) { const backend = new CreatingBackend(files); return { backend, service: new EditService({ backend, onChange() {} }) }; }
+
+test('a staged new file is written only on apply, and undo removes it again', async () => {
+  const { backend, service } = creating({ 'a.txt': 'a\n' });
+  const { id } = await service.stageCreate({ path: 'docs/new.md', text: '# New\nbody\n', explanation: 'Add docs' });
+  assert.equal(backend.files.has('docs/new.md'), false, 'Staging writes nothing.');
+  assert.equal(service.state.proposals.find(proposal => proposal.id === id).change, 'create');
+  await assert.rejects(service.stageCreate({ path: 'a.txt', text: 'x\n', explanation: 'Overwrite' }), /already exists/u, 'An existing file is never overwritten by a create.');
+  await service.apply(id);
+  assert.equal(backend.files.get('docs/new.md')?.text, '# New\nbody\n');
+  await service.undo();
+  assert.equal(backend.files.has('docs/new.md'), false);
+});
+
+test('an empty new file is reviewed as one empty hunk', async () => {
+  const { backend, service } = creating({});
+  const created = await service.stageCreate({ path: 'pkg/__init__.py', text: '', explanation: 'Mark the package' });
+  const [hunk] = service.state.proposals.find(proposal => proposal.id === created.id).hunks;
+  assert.deepEqual([hunk.oldLines, hunk.newLines, hunk.status], [0, 0, 'pending']);
+  await service.applyHunk({ id: created.id, hunkId: hunk.id });
+  assert.equal(backend.files.get('pkg/__init__.py')?.text, '');
+});
+
+test('a failed create rolls back the edits in the same batch', async () => {
+  const { backend, service } = creating({ 'a.txt': 'one\n' });
+  const read = await service.read('a.txt');
+  await service.stageEdit({ path: 'a.txt', revision: read.revision, oldText: 'one', text: 'two', explanation: 'Edit' });
+  await service.stageCreate({ path: 'b.txt', text: 'new\n', explanation: 'Create' });
+  backend.create = async () => false;
+  await assert.rejects(service.apply(), /restored/u);
+  assert.equal(backend.get('a.txt').text, 'one\n');
+  assert.equal(backend.files.has('b.txt'), false);
+});
+
+test('Undo this request removes a file created in it and restores edited files', async () => {
+  const { backend, service } = creating({ 'cli.py': 'old\n' });
+  service.beginRequest();
+  const read = await service.read('cli.py');
+  await service.apply((await service.stageEdit({ path: 'cli.py', revision: read.revision, oldText: 'old', text: 'new', explanation: 'Edit' })).id);
+  await service.apply((await service.stageCreate({ path: 'tests/test_new.py', text: 'def test_x():\n    pass\n', explanation: 'Add a test' })).id);
+  assert.deepEqual(service.state.requestSaved, ['cli.py', 'tests/test_new.py']);
+  await service.undoRequest();
+  assert.equal(backend.get('cli.py').text, 'old\n');
+  assert.equal(backend.files.has('tests/test_new.py'), false);
+});
