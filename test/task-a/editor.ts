@@ -104,7 +104,7 @@ export async function run(): Promise<void> {
     } else {
       const until = Date.now() + 180_000;
       while (Date.now() < until && await review.locator('[data-hunk-id]').count() === 0) {
-        const approve = frame.getByRole('button', { name: 'Approve', exact: true });
+        const approve = frame.locator('#approve-button');
         if (await approve.isVisible() && await approve.isEnabled()) await approve.click();
         const status = await frame.locator('#status').innerText();
         const sessionId = /Session ([^\s]+)/.exec(status)?.[1];

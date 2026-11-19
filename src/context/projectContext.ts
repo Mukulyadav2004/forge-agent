@@ -53,19 +53,20 @@ export function selectInstructionFiles(options: { workspaceRoot: string; exists:
 
 /**
  * OpenCode attaches an instruction file the first time a read lands in its directory, walking up to the workspace root.
+ * A folder listing starts the walk at the folder itself; reading an instruction file does not attach that same file.
  * Files already placed in the system prompt are skipped. `already` holds resolved absolute paths.
  */
-export function instructionsBesideRead(options: { workspaceRoot: string; filePath: string; already: ReadonlySet<string>; exists: (absolutePath: string) => boolean }): string[] {
+export function instructionsBesideRead(options: { workspaceRoot: string; filePath: string; directory?: boolean; already: ReadonlySet<string>; exists: (absolutePath: string) => boolean }): string[] {
   const root = resolve(options.workspaceRoot);
+  const target = resolve(options.filePath);
   const found: string[] = [];
-  let current = dirname(resolve(options.filePath));
+  let current = options.directory ? target : dirname(target);
   while (true) {
     const fromRoot = relative(root, current);
     if (fromRoot.startsWith('..') || isAbsolute(fromRoot)) break;
-    for (const name of INSTRUCTION_NAMES) {
-      const file = resolve(current, name);
-      if (options.exists(file) && !options.already.has(file)) { found.push(file); break; }
-    }
+    // OpenCode keeps the first name per directory (AGENTS.md over CLAUDE.md) before excluding the read file.
+    const file = INSTRUCTION_NAMES.map(name => resolve(current, name)).find(options.exists);
+    if (file && file !== target && !options.already.has(file)) found.push(file);
     if (fromRoot === '') break;
     const parent = dirname(current);
     if (parent === current) break;

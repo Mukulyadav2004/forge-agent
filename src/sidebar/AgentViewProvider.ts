@@ -3,7 +3,7 @@ import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
 import { isWebviewMessage } from "../shared/messages";
-import type { ActivityEntry, AgentQuestion, ChatMessage, ComposerSelection, FileEvidence, HostMessage, ModelMenu } from "../shared/messages";
+import type { ActivityEntry, AgentQuestion, ChatMessage, ComposerSelection, FileEvidence, HostMessage, ModelMenu, TokenUsage } from "../shared/messages";
 import { isAgentQuestion } from "../shared/messages";
 import type { EditService } from '../edits/EditService';
 import type { ReviewCommand } from '../edits/review';
@@ -12,6 +12,20 @@ import { describeApproval, StreamedToolCalls } from '../agent/approvalText';
 import { estimateTokens, isArchitectureRequest, renderRestoredTranscript } from '../context/projectContext';
 import { latestTodos } from './TaskHistory';
 import type { StoredTask, TaskHistory } from './TaskHistory';
+
+/** Adds one turn's TrueForge metrics to a chat's totals. A cost is kept only while every counted turn reported one. */
+function addTurnMetrics(total: TokenUsage | undefined, metrics: TrueForgeApi.TurnMetrics | undefined): TokenUsage | undefined {
+  if (!metrics || metrics.totalInputTokens === undefined || metrics.totalOutputTokens === undefined) return total;
+  const sum = (key: 'cacheReadTokens' | 'cacheWriteTokens' | 'reasoningTokens', added: number | undefined) => {
+    const value = total?.[key] === undefined && added === undefined ? undefined : (total?.[key] ?? 0) + (added ?? 0);
+    return value === undefined ? {} : { [key]: value };
+  };
+  const cost = metrics.totalCostInUsd !== undefined && (!total || total.costUsd !== undefined) ? { costUsd: (total?.costUsd ?? 0) + metrics.totalCostInUsd } : {};
+  return {
+    inputTokens: (total?.inputTokens ?? 0) + metrics.totalInputTokens, outputTokens: (total?.outputTokens ?? 0) + metrics.totalOutputTokens,
+    ...sum('cacheReadTokens', metrics.totalCacheReadTokens), ...sum('cacheWriteTokens', metrics.totalCacheWriteTokens), ...sum('reasoningTokens', metrics.totalReasoningTokens), ...cost,
+  };
+}
 
 /** One sidebar chat. The live fields on the provider always point at the active chat. */
 interface HeldChat {
@@ -36,6 +50,11 @@ interface HeldChat {
   contextWindow: number;
   /** Instruction files were already shown in this chat. */
   notedInstructions: boolean;
+  /** Token totals of finished turns, and the running turn's latest metrics; TrueForge reports metrics per turn. */
+  usage: TokenUsage | undefined;
+  turnMetrics: TrueForgeApi.TurnMetrics | undefined;
+  /** Tool name of each pending approval by tool call id, for the approve button's label. */
+  approvalNames: Map<string, string>;
   createdAt: number;
   /** Set when the chat was reopened from history: the saved TrueForge session to reattach, and the transcript for a new session if it is gone. */
   restore?: { sessionId?: string; lastGoodTurnId?: string; model?: string; transcript: string };
@@ -210,6 +229,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       id: randomUUID(), title, session: undefined, busy: false, cancellationRequested: false, status: 'New chat ready',
       approvals: [], toolCalls: new StreamedToolCalls(), turnError: undefined, editScope: undefined, lastInput: undefined,
       messages: [], inspectedFiles: [], activity: [], heldSelections: [], questions: [], contextTokens: 0, contextWindow: 0, notedInstructions: false, createdAt: Date.now(),
+      usage: undefined, turnMetrics: undefined, approvalNames: new Map(),
     };
   }
 
@@ -543,7 +563,7 @@ ${selectedText}`;
       this.session = undefined; this.approvals = []; this.messages.length = 0; this.inspectedFiles.length = 0; this.activity.length = 0; this.toolCalls.clear();
       this.turnError = undefined; this.lastInput = undefined; this.heldSelections.length = 0; this.contextTokens = 0; this.contextWindow = 0;
       const active = this.activeChat();
-      if (active) { active.contextTokens = 0; active.contextWindow = 0; active.notedInstructions = false; active.session = undefined; }
+      if (active) { active.contextTokens = 0; active.contextWindow = 0; active.notedInstructions = false; active.session = undefined; active.usage = undefined; active.turnMetrics = undefined; }
       // The cleared chat is a new task; a fresh id keeps the saved conversation it replaced in history.
       if (active) { active.id = randomUUID(); this.activeId = active.id; active.restore = undefined; active.createdAt = Date.now(); active.title = `Chat ${this.chats.indexOf(active) + 1}`; }
       this.queuedComposer = { type: 'attach_selection', selections: [] };
@@ -561,7 +581,10 @@ ${selectedText}`;
       current: vscode.workspace.getConfiguration("forgeAgent").get<string>("model", "").trim(),
       names: this.modelNames, loading: this.modelsLoading, ...(this.modelsError ? { error: this.modelsError } : {}),
     };
-    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, activity: this.activity, review: this.actions.edits.state, chats: this.chats.map(chat => ({ id: chat.id, title: chat.title, active: chat.id === this.activeId, busy: chat.busy })), questions: this.questions.map(({ toolCallId, question, options }) => ({ toolCallId, question, options })), models, context: { used: this.contextTokens, limit: this.contextWindow }, history: this.actions.history?.list() ?? [] };
+    const active = this.activeChat();
+    const usage = active ? addTurnMetrics(active.usage, active.turnMetrics) : undefined;
+    const approvalTools = this.approvals.map(item => active?.approvalNames.get(item.toolCallId) ?? '');
+    const response: HostMessage = { type: "state", messages: this.messages, busy: this.busy, status: this.status, approval: this.approvals.length > 0, inspectedFiles: this.inspectedFiles, activity: this.activity, review: this.actions.edits.state, chats: this.chats.map(chat => ({ id: chat.id, title: chat.title, active: chat.id === this.activeId, busy: chat.busy })), questions: this.questions.map(({ toolCallId, question, options }) => ({ toolCallId, question, options })), models, context: { used: this.contextTokens, limit: this.contextWindow }, history: this.actions.history?.list() ?? [], ...(usage ? { usage } : {}), ...(approvalTools.length ? { approvalTools } : {}) };
     this.scheduleSave();
     void this.view?.webview.postMessage(response);
   }
@@ -575,36 +598,49 @@ ${selectedText}`;
       events.push({ type: "user.tool_response", threadId: question.threadId, toolCallId: question.toolCallId, content: choice });
     }
     const saved = chat.questions.splice(0, chat.questions.length);
+    const session = chat.session;
     chat.busy = true;
     chat.status = "Sending your answer…";
     this.show(chat);
-    try { await chat.session.respond(events); }
-    catch (error: unknown) {
-      if (chat.session.awaitingApproval && chat.questions.length === 0) chat.questions.push(...saved);
-      chat.status = error instanceof Error ? error.message : "Could not send the answer.";
-      chat.messages.push({ id: randomUUID(), role: "assistant", text: chat.status });
-    } finally {
-      if (!chat.questions.length && !chat.approvals.length) await this.actions.edits.endTurn().catch(() => undefined);
-      chat.busy = false;
-      this.show(chat);
-      this.kick();
-    }
+    // The resumed turn uses the editor tools like any other, so it waits its turn and owns the activity feed meanwhile.
+    this.jobs.unshift(async () => {
+      if (chat.cancellationRequested) { chat.busy = false; this.show(chat); return; }
+      this.owner = chat;
+      try { await session.respond(events); }
+      catch (error: unknown) {
+        if (session.awaitingApproval && chat.questions.length === 0) chat.questions.push(...saved);
+        chat.status = error instanceof Error ? error.message : "Could not send the answer.";
+        chat.messages.push({ id: randomUUID(), role: "assistant", text: chat.status });
+      } finally {
+        this.owner = undefined;
+        if (!chat.questions.length && !chat.approvals.length) await this.actions.edits.endTurn().catch(() => undefined);
+        chat.busy = false;
+        this.show(chat);
+      }
+    });
+    this.kick();
   }
   private async cancel(): Promise<void> {
     const chat = this.activeChat();
     if (!chat) return;
+    // A chat still waiting in the queue has not touched the editor; cancelling it must not discard the running agent's proposals.
+    const inEditor = this.owner === chat || chat.approvals.length > 0 || chat.questions.length > 0 || chat.session?.awaitingApproval === true;
     chat.cancellationRequested = true;
     this.cancellationRequested = true;
     chat.approvals.splice(0, chat.approvals.length);
     chat.questions.splice(0, chat.questions.length);
     try {
-      const discarded = this.actions.edits.cancel();
-      const cancelled = chat.session?.cancel();
-      await discarded; await cancelled;
-      chat.status = "Cancellation requested. Pending proposals were discarded; applied batches remain available in Undo.";
+      if (inEditor) {
+        const discarded = this.actions.edits.cancel();
+        const cancelled = chat.session?.cancel();
+        await discarded; await cancelled;
+        chat.status = "Cancellation requested. Pending proposals were discarded; applied batches remain available in Undo.";
+      } else chat.status = 'Cancelled before this agent started.';
     }
     catch { chat.status = "Could not confirm cancellation. Check the local TrueForge server."; }
     this.show(chat);
+    // A paused agent held the queue; the agents waiting behind it can start now.
+    this.kick();
   }
   /** A model error ends the turn with status "error": retry a transient one twice (2 s, 4 s), then continue once on forgeAgent.fallbackModel. Files are never written here. */
   private async recover(chat: HeldChat): Promise<void> {
@@ -709,6 +745,10 @@ ${selectedText}`;
     if ((event.type === 'model.message' || event.type === 'model.message.delta') && event.usage) chat.contextTokens = event.usage.inputTokens;
     if (chat.session?.contextWindow) chat.contextWindow = chat.session.contextWindow;
     if (event.type === 'model.message.delta' && event.usage && compaction?.kind === 'compaction' && compaction.done && compaction.afterTokens === undefined) compaction.afterTokens = event.usage.inputTokens;
+    // Each turn reports its own running totals; a finished (or abandoned) turn's last report is added to the chat's totals.
+    if (event.type === 'turn.created' && chat.turnMetrics) { chat.usage = addTurnMetrics(chat.usage, chat.turnMetrics); chat.turnMetrics = undefined; }
+    if ((event.type === 'turn.update' || event.type === 'turn.done') && 'metrics' in event.state && event.state.metrics) chat.turnMetrics = event.state.metrics;
+    if (event.type === 'turn.done') { chat.usage = addTurnMetrics(chat.usage, chat.turnMetrics); chat.turnMetrics = undefined; }
     if (event.type === "model.message" && event.toolCalls) chat.toolCalls.remember(event.id, event.toolCalls);
     if (event.type === "model.message" && event.threadId === "main" && typeof event.content === "string" && event.content) {
       const existing = chat.messages.find(message => message.id === event.id && message.role === "assistant");
@@ -741,8 +781,11 @@ ${selectedText}`;
     if (event.type === "tool.approval_required") {
       for (const tool of event.toolCalls) {
         if (!chat.approvals.some(item => item.threadId === event.threadId && item.toolCallId === tool.id)) {
+          const call = chat.toolCalls.find(tool.sourceEventId, tool.id);
           chat.approvals.push({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } });
-          chat.messages.push({ id: randomUUID(), role: "assistant", text: describeApproval(chat.toolCalls.find(tool.sourceEventId, tool.id)) });
+          if (call?.name) chat.approvalNames.set(tool.id, call.name.slice(0, 120));
+          if (chat.approvalNames.size > 50) chat.approvalNames.delete(chat.approvalNames.keys().next().value as string);
+          chat.messages.push({ id: randomUUID(), role: "assistant", text: describeApproval(call) });
         }
       }
     }

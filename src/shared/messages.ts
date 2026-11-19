@@ -68,7 +68,26 @@ export type ActivityEntry = { at?: number } & (
   /** TrueForge summarised the conversation: size that triggered it, the threshold, and the size of the next model call afterwards. */
   | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number }
   /** The agent replaced its to-do list; the latest entry is the current list. */
-  | { kind: 'todo'; todos: TodoItem[] });
+  | { kind: 'todo'; todos: TodoItem[] }
+  /** One web_fetch call: the final URL after redirects, HTTP status and body size, or the error the agent was told. `truncated` means the model saw a shortened page. */
+  | { kind: 'fetch'; url: string; status?: number; bytes?: number; contentType?: string; truncated?: boolean; error?: string; durationMs: number; reason?: string; used?: number });
+
+/** Token totals TrueForge reports in each turn's metrics, summed over this chat's turns. `costUsd` is present only when TrueForge reports a cost. */
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+  costUsd?: number;
+}
+
+function isTokenUsage(value: unknown): value is TokenUsage {
+  if (!isRecord(value)) return false;
+  const amount = (key: string) => typeof value[key] === 'number' && Number.isFinite(value[key]) && (value[key] as number) >= 0;
+  const optional = (key: string) => value[key] === undefined || amount(key);
+  return amount('inputTokens') && amount('outputTokens') && optional('cacheReadTokens') && optional('cacheWriteTokens') && optional('reasoningTokens') && optional('costUsd');
+}
 
 const TODO_STATUSES = new Set(['pending', 'in_progress', 'completed', 'cancelled']);
 function isTodoItem(value: unknown): value is TodoItem {
@@ -99,6 +118,8 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     case 'refused': return text('tool') && text('message');
     case 'compaction': return count('contextTokens') && count('thresholdTokens') && typeof value.done === 'boolean' && (value.durationMs === undefined || count('durationMs')) && (value.afterTokens === undefined || count('afterTokens'));
     case 'todo': return Array.isArray(value.todos) && value.todos.length <= 50 && value.todos.every(isTodoItem);
+    case 'fetch': return text('url') && count('durationMs') && (value.status === undefined || count('status')) && (value.bytes === undefined || count('bytes'))
+      && (value.contentType === undefined || text('contentType')) && (value.truncated === undefined || typeof value.truncated === 'boolean') && (value.error === undefined || text('error'));
     default: return false;
   }
 }
@@ -132,7 +153,11 @@ export type WebviewMessage =
   | { type: "delete_history"; id: string };
 
 export type HostMessage =
-  | { type: "state"; messages: ChatMessage[]; busy: boolean; status: string; approval: boolean; inspectedFiles: FileEvidence[]; activity: ActivityEntry[]; review: ReviewState; chats: ChatTab[]; questions: AgentQuestion[]; models: ModelMenu; context: { used: number; limit: number }; history: TaskHistoryItem[] }
+  | { type: "state"; messages: ChatMessage[]; busy: boolean; status: string; approval: boolean; inspectedFiles: FileEvidence[]; activity: ActivityEntry[]; review: ReviewState; chats: ChatTab[]; questions: AgentQuestion[]; models: ModelMenu; context: { used: number; limit: number }; history: TaskHistoryItem[];
+      /** Token totals for the active chat, once TrueForge has reported a turn's metrics. */
+      usage?: TokenUsage;
+      /** Tool names of the pending approvals, so the approve button can name the action. */
+      approvalTools?: string[] }
   | { type: "attach_selection"; selections: ComposerSelection[] }
   | { type: "focus_composer" };
 
@@ -201,7 +226,9 @@ export function isHostMessage(value: unknown): value is HostMessage {
     value.messages.every(isChatMessage) && Array.isArray(value.chats) && value.chats.length <= 8 && value.chats.every(isChatTab) &&
     Array.isArray(value.questions) && value.questions.length <= 4 && value.questions.every(isAgentQuestion) &&
     isModelMenu(value.models) && isContextWindow(value.context) &&
-    Array.isArray(value.history) && value.history.length <= 200 && value.history.every(isTaskHistoryItem)
+    Array.isArray(value.history) && value.history.length <= 200 && value.history.every(isTaskHistoryItem) &&
+    (value.usage === undefined || isTokenUsage(value.usage)) &&
+    (value.approvalTools === undefined || (Array.isArray(value.approvalTools) && value.approvalTools.length <= 20 && value.approvalTools.every(name => typeof name === 'string' && name.length <= 120)))
   );
 }
 

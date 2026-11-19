@@ -43,6 +43,7 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - `react@18.3.1`, `react-dom@18.3.1` and their dependency `scheduler@0.23.2` (MIT, Meta Platforms, Inc.): `licenses/React-MIT.txt` (identical for react and react-dom) and `licenses/scheduler-MIT.txt`.
 - `clsx@2.1.1` (MIT, Luke Edwards): `licenses/clsx-MIT.txt`.
 - `tailwindcss@4.1.13` (MIT, Tailwind Labs, Inc.) generates `out-webview/webview/main.css`, including its preflight base styles: `licenses/tailwindcss-MIT.txt`.
+- `highlight.js@11.12.0` (BSD-3-Clause, copyright 2006 Ivan Sagalaev): `licenses/highlight.js-BSD-3-Clause.txt`. Only the core and a curated set of languages are bundled, in a separate chunk loaded the first time a reply contains a fenced code block with a language (`src/webview/lib/highlight.ts`). Its token colours follow Cline's `apps/vscode/webview-ui/src/components/common/codeblock-parser.css` (Cline commit and licence as in "Cline sidebar chat UI"), adapted in `src/webview/index.css`.
 
 ## Cline content-search helper
 
@@ -57,6 +58,20 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - Source: `sdk/packages/core/src/extensions/tools/executors/editor.ts` (`replaceInFile`, `insertInFile`, the `old_text`/`insert_line` contract and its error wording).
 - Adapted in: `src/edits/EditService.ts` (exactly-once `old_text` match with a literal replacer; insert-before-line boundary) and the `propose_edit` schema in `src/tools/EditorBridge.ts`.
 - Changes: edits apply to the in-memory pending proposal, never to disk; line numbers refer to the file as read and are shifted past earlier pending changes; overlaps are refused; Forge's revision, conflict, review and undo checks are unchanged. Omitted: file creation, Cline path resolution, `node:fs` writes, line-ending helpers, `@cline/shared` and executor types.
+
+## opencode agent tools and context policy
+
+- Upstream: https://github.com/anomalyco/opencode; reference checkout at commit `3aaac7731360a7be32cc69b65c95add4080f04a9`.
+- Copyright: 2025 opencode. License: MIT; the original licence and copyright notice are retained in `licenses/opencode-MIT.txt`.
+- Ported or adapted (each file names its upstream source in a header comment):
+  - `src/edits/match.ts` from `packages/core/src/tool/plugin/edit.ts` (exact, typographic-variant and per-line trailing-whitespace matching).
+  - `src/edits/patch.ts` from `packages/util/src/patch.ts` and the grammar in `packages/core/src/tool/patch.txt`.
+  - `src/tools/toolOutput.ts` from `packages/core/src/tool-output.ts` (2,000-line / 50 KiB bound, marker wording, saved full output with seven-day retention).
+  - `src/tools/readPage.ts` from `packages/core/src/tool/read-filesystem.ts` and `tool/plugin/read.ts`; `src/tools/fileSearch.ts` from `tool/plugin/grep.ts`, `glob.ts` and `ripgrep.ts`; `src/tools/webFetch.ts` and `src/tools/htmlMarkdown.ts` from `tool/plugin/webfetch.ts`.
+  - `src/tools/runCommand.ts` and `run_command` in `src/tools/EditorBridge.ts` follow `packages/core/src/tool/plugin/shell.ts` (timeouts, background mode, moving a timed-out foreground command to the background).
+  - The `todo_write` summary line in `src/tools/EditorBridge.ts` from `tool/plugin/todo.ts`; model-facing tool descriptions adapted from opencode's tool descriptions.
+  - `src/context/compaction.ts` (reserve of max(15%, 16,000 tokens)) from `packages/core/src/session/compaction.ts`; `src/context/environment.ts` from `packages/core/src/instructions/builtins.ts` and `plugin/identity.ts`; AGENTS.md / CLAUDE.md discovery in `src/context/projectContext.ts` from `packages/core/src/instruction-discovery.ts`, `config/plugin/instruction.ts` and `tool/plugin/read.ts`.
+- Changes: edits are staged as review proposals instead of written; paths are confined to the trusted workspace (saved tool outputs are the only outside files readable, and only by exact name); TrueForge, not Forge, runs the agent loop, summary prompt and verbatim tail of compaction. Effect services, permissions, plugins, the process daemon and session storage are not included.
 
 ## jsdiff dependency
 

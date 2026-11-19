@@ -55,12 +55,14 @@ export function Dropdown(options: {
       const menu = menuRef.current;
       if (!menu) return;
       if (event.key === 'Escape') { event.preventDefault(); close(true); return; }
-      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+      const inSearch = document.activeElement instanceof HTMLInputElement;
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && (inSearch || (event.key !== 'Home' && event.key !== 'End'))) return;
       event.preventDefault();
       const items = menuItems(menu);
       if (!items.length) return;
       const index = items.indexOf(document.activeElement as HTMLButtonElement);
-      const next = event.key === 'ArrowDown' ? (index + 1) % items.length : (index <= 0 ? items.length - 1 : index - 1);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+        : event.key === 'ArrowDown' ? (index + 1) % items.length : (index <= 0 ? items.length - 1 : index - 1);
       items[next]?.focus();
     };
     document.addEventListener('mousedown', onMouseDown);

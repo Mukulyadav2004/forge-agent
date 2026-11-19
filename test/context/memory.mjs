@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { agentSpec, ForgeSession } from '../../out/agent/ForgeSession.js';
-import { environmentInstructions, estimateTokens, findGitRoot, globalInstructionFiles, loadProjectInstructions, modelIdentity, renderRestoredTranscript } from '../../out/context/projectContext.js';
+import { environmentInstructions, estimateTokens, findGitRoot, globalInstructionFiles, instructionsBesideRead, loadProjectInstructions, modelIdentity, renderRestoredTranscript } from '../../out/context/projectContext.js';
 import { latestTodos, pruneHistory, TaskHistory } from '../../out/sidebar/TaskHistory.js';
 
 test('global AGENTS.md files load before the workspace walk, with ~/.claude/CLAUDE.md only as a fallback', async () => {
@@ -36,6 +36,22 @@ test('global AGENTS.md files load before the workspace walk, with ~/.claude/CLAU
     assert.doesNotMatch(none.text, /forge global|opencode global/u);
     assert.equal(findGitRoot(join(repo, 'app'), existsSync), resolve(repo));
   } finally { await rm(base, { recursive: true, force: true }); }
+});
+
+test('instructions beside a read: a folder listing starts at the folder, and an instruction file never attaches itself', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'forge-beside-'));
+  try {
+    await mkdir(join(root, 'pkg', 'lib'), { recursive: true });
+    await writeFile(join(root, 'AGENTS.md'), 'root\n');
+    await writeFile(join(root, 'pkg', 'AGENTS.md'), 'pkg\n');
+    await writeFile(join(root, 'pkg', 'CLAUDE.md'), 'pkg claude\n');
+    await writeFile(join(root, 'pkg', 'lib', 'CLAUDE.md'), 'lib\n');
+    const already = new Set([resolve(root, 'AGENTS.md')]);
+    const beside = options => instructionsBesideRead({ workspaceRoot: root, already, exists: existsSync, ...options });
+    assert.deepEqual(beside({ filePath: join(root, 'pkg', 'lib') }), [resolve(root, 'pkg', 'AGENTS.md')], 'A file path starts at its parent folder.');
+    assert.deepEqual(beside({ filePath: join(root, 'pkg', 'lib'), directory: true }), [resolve(root, 'pkg', 'lib', 'CLAUDE.md'), resolve(root, 'pkg', 'AGENTS.md')], 'A folder listing finds the folder\'s own file first.');
+    assert.deepEqual(beside({ filePath: join(root, 'pkg', 'AGENTS.md') }), [], 'Reading pkg/AGENTS.md does not attach it again, and CLAUDE.md beside it stays shadowed.');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('the system prompt carries the model identity, instructions and environment in OpenCode order', () => {

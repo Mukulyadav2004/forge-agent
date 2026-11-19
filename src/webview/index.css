@@ -122,6 +122,8 @@
   .task-header:not(.is-expanded):hover { background: var(--vscode-toolbar-hoverBackground); }
   .task-title { font-size: var(--text-sm); }
   .context-progress { background: color-mix(in srgb, var(--vscode-foreground) 18%, transparent); }
+  .task-usage, .task-usage-details { color: var(--vscode-descriptionForeground); }
+  .task-cost { padding: 0 0.25rem; border-radius: 999px; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); }
 
   .icon-button {
     display: inline-flex; align-items: center; justify-content: center;
@@ -172,6 +174,31 @@
   .markdown-body .diff-line { display: block; min-width: max-content; padding-left: 0.25rem; border-left: 0.1875rem solid transparent; }
   .markdown-body .diff-line-added { background: var(--vscode-diffEditor-insertedTextBackground); border-left-color: var(--vscode-gitDecoration-addedResourceForeground, currentColor); }
   .markdown-body .diff-line-removed { background: var(--vscode-diffEditor-removedTextBackground); border-left-color: var(--vscode-gitDecoration-deletedResourceForeground, currentColor); }
+  /* Syntax colours from Cline's apps/vscode/webview-ui/src/components/common/codeblock-parser.css (same commit and licence):
+   * highlight.js token classes mapped to the active theme's editor, link and debug-token colours, so light, dark and
+   * high-contrast themes all apply. */
+  .markdown-body .hljs { color: var(--vscode-editor-foreground); background: transparent; }
+  .markdown-body .hljs-variable, .markdown-body .hljs-params, .markdown-body .hljs-attr, .markdown-body .hljs-attribute,
+  .markdown-body .hljs-property, .markdown-body .hljs-selector-class, .markdown-body .hljs-selector-id,
+  .markdown-body .hljs-constant, .markdown-body .hljs-symbol, .markdown-body .hljs-bullet, .markdown-body .hljs-link,
+  .markdown-body .hljs-operator, .markdown-body .hljs-template-tag, .markdown-body .hljs-template-variable, .markdown-body .hljs-subst { color: var(--vscode-editor-foreground); }
+  .markdown-body .hljs-title, .markdown-body .hljs-title.function_, .markdown-body .hljs-built_in, .markdown-body .hljs-section,
+  .markdown-body .hljs-title.class_, .markdown-body .hljs-type { color: var(--vscode-editor-foreground); font-weight: 600; }
+  .markdown-body .hljs-keyword, .markdown-body .hljs-selector-tag, .markdown-body .hljs-tag, .markdown-body .hljs-name, .markdown-body .hljs-doctag { color: var(--vscode-textLink-foreground); }
+  .markdown-body .hljs-variable.language_ { color: var(--vscode-textLink-foreground); font-weight: 600; }
+  .markdown-body .hljs-string, .markdown-body .hljs-regexp, .markdown-body .hljs-template-string { color: var(--vscode-debugTokenExpression-string, var(--vscode-editor-foreground)); }
+  .markdown-body .hljs-number, .markdown-body .hljs-literal { color: var(--vscode-debugTokenExpression-number, var(--vscode-editor-foreground)); }
+  .markdown-body .hljs-meta { color: var(--vscode-debugTokenExpression-name, var(--vscode-editor-foreground)); font-weight: 600; }
+  .markdown-body .hljs-meta .hljs-keyword { color: var(--vscode-debugTokenExpression-type, var(--vscode-textLink-foreground)); font-weight: 700; }
+  .markdown-body .hljs-meta .hljs-string { color: var(--vscode-debugTokenExpression-string, var(--vscode-editor-foreground)); font-style: italic; }
+  .markdown-body .hljs-comment, .markdown-body .hljs-quote { color: var(--vscode-editor-foreground); opacity: 0.6; font-style: italic; }
+  .markdown-body .hljs-emphasis { font-style: italic; }
+  .markdown-body .hljs-strong { font-weight: 700; }
+  .markdown-body .hljs-addition { background: var(--vscode-diffEditor-insertedTextBackground); }
+  .markdown-body .hljs-deletion { background: var(--vscode-diffEditor-removedTextBackground); }
+  /* Dimmed comments would fall below high-contrast themes' contrast; keep them at full strength there. */
+  .vscode-high-contrast .markdown-body .hljs-comment, .vscode-high-contrast .markdown-body .hljs-quote,
+  .vscode-high-contrast-light .markdown-body .hljs-comment, .vscode-high-contrast-light .markdown-body .hljs-quote { opacity: 1; }
   .markdown-body a { color: var(--vscode-textLink-foreground); text-decoration: none; }
   .markdown-body a:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
   .markdown-body blockquote { margin: 0.5rem 0; padding: 0.25rem 0.75rem; border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-focusBorder)); background: var(--vscode-textBlockQuote-background); }
@@ -192,6 +219,19 @@
   .source-reference:hover { color: var(--vscode-textLink-foreground); text-decoration: underline; }
   .activity-request { display: flex; align-items: center; gap: 0.5rem; color: var(--vscode-descriptionForeground); font-size: var(--text-xs); opacity: 0.8; }
   .activity-request::after { content: ""; flex: 1; border-top: 1px solid color-mix(in srgb, var(--vscode-descriptionForeground) 30%, transparent); }
+  .thinking-row { display: flex; align-items: center; gap: 0.375rem; padding: 0 0.25rem; color: var(--vscode-descriptionForeground); font-size: var(--text-sm); }
+  .thinking-row svg { width: 0.875rem; height: 0.875rem; }
+
+  /* Zero-height sticky anchor at the end of the scroll, so the button floats without shifting content. */
+  .scroll-to-bottom-anchor { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: center; height: 0; margin-top: -0.75rem; overflow: visible; pointer-events: none; }
+  .scroll-to-bottom {
+    display: inline-flex; align-items: center; justify-content: center; width: 1.75rem; height: 1.75rem; padding: 0;
+    transform: translateY(calc(-100% - 0.25rem)); border-radius: 50%; pointer-events: auto;
+    color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground);
+    border: 1px solid var(--vscode-widget-border, transparent); box-shadow: 0 1px 4px var(--vscode-widget-shadow, rgb(0 0 0 / 0.3));
+  }
+  .scroll-to-bottom:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .scroll-to-bottom svg { width: 1rem; height: 1rem; }
   .activity-group { padding: 0 0.25rem; color: var(--vscode-descriptionForeground); }
   .activity-group > summary { display: flex; align-items: center; gap: 0.25rem; list-style: none; font-size: var(--text-sm); font-weight: 600; color: var(--vscode-descriptionForeground); }
   .activity-group > summary::-webkit-details-marker { display: none; }
@@ -346,6 +386,10 @@
 
   @media (max-width: 18rem) {
     .context-meter, .mode-pill { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-spin, .spinner, body.busy .status-dot, #history-button.busy::after { animation-duration: 3s; }
   }
 }
 

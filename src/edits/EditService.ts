@@ -208,7 +208,6 @@ export class EditService {
     if (!actual) throw new Error(`${options.path} already exists. Read it, then change it with propose_edit or write_file.`);
     const eol = options.text.includes('\r\n') ? '\r\n' : actual.eol;
     const text = options.text.replace(/\r\n|\r|\n/g, eol);
-    if (text === '') throw new Error('An empty new file cannot be reviewed as a diff. Give it at least one line, such as a comment.');
     return this.addProposal({ path: options.path, actual: { ...actual, eol }, text, rawText: options.text, explanation: options.explanation, pending: undefined, change: 'create' });
   }
   /** Stages deleting a file read at `revision`. The review shows every line as removed. */
@@ -221,7 +220,6 @@ export class EditService {
     if (receipt.task !== this.task || this.cancelled) throw new Error('The proposal belongs to a cancelled task.');
     if (actual.dirty) throw new Error(`Save your unsaved changes in ${options.path} before proposing to delete it.`);
     if (!matches({ actual, expected: receipt.file })) throw new Error(`${options.path} changed after it was read. Read it again before proposing edits.`);
-    if (actual.text === '') throw new Error(`${options.path} is empty, so deleting it cannot be reviewed as a diff. Ask the user to delete it.`);
     return this.addProposal({ path: options.path, actual, text: '', rawText: '', explanation: options.explanation, pending: undefined, change: 'delete' });
   }
   /** The text a file would have with this task's untouched pending proposal applied, if there is one. */
@@ -236,6 +234,12 @@ export class EditService {
     }
     if (options.change === 'edit' && text === actual.text) throw new Error('The proposed content is identical to the current file.');
     const { parts, hunks } = buildLineChanges({ before: actual.text, after: text });
+    // Creating or deleting an empty file changes no lines; one empty hunk stands for the file change so it can be reviewed.
+    if (!hunks.length && options.change !== 'edit') {
+      const hunkId = randomUUID();
+      parts.push({ kind: 'change', id: hunkId, before: '', after: '' });
+      hunks.push({ id: hunkId, oldStart: 1, newStart: 1, oldLines: 0, newLines: 0, removed: '', added: '', truncated: false, status: 'pending' });
+    }
     const id = randomUUID();
     // A combined proposal lists each distinct explanation once; agents often repeat one explanation for every edit to a file.
     const repeated = !options.explanation.trim() || `\n${pending?.view.explanation}\n`.includes(`\n${options.explanation}\n`);

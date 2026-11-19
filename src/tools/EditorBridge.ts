@@ -23,21 +23,21 @@ import { COMMAND_LIMITS, startCommand } from './runCommand';
 import type { CommandHandle, CommandResult } from './runCommand';
 import { DEFAULT_SEARCH_LIMIT, globFiles, grepFiles, renderGlob, renderGrep, SEARCH_TOOL_LIMITS } from './fileSearch';
 import { fileLines, pageDirectory, pageText, READ_LIMITS, renderDirectoryPage, renderTextPage, similarNames } from './readPage';
-import { boundToolResult } from './toolOutput';
+import { boundToolResult, MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, ToolOutputStore } from './toolOutput';
 import { WEB_FETCH_LIMITS, webFetch } from './webFetch';
 
 // Model-facing guidance adapted from opencode's tool descriptions and session/system-prompt.ts (MIT).
 const REASON = z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.');
-const READ_DESCRIPTION = `Read a workspace file or folder. Each text line is prefixed by its 1-based line number as "<line>: <content>"; the prefix is for reference and is not part of the file, so never include it in old_text or new_text. A folder path returns its entries one per line (folders end with "/"). Use offset and limit to read large files or folders in sections: one call returns at most ${READ_LIMITS.lines} lines or ${READ_LIMITS.bytes / 1024} KiB, lines longer than ${READ_LIMITS.line_characters} characters are cut, and "[Output truncated. Continue reading with offset: N]" tells you where to continue. A negative offset reads the last lines. Prefer one larger read over many small slices, read a file you will edit whole, and use grep to find specific content in large files. Returns base_revision, which propose_edit and apply_patch rely on for files you change.`;
+const READ_DESCRIPTION = `Read a workspace file or folder. Each text line is prefixed by its 1-based line number as "<line>: <content>"; the prefix is for reference and is not part of the file, so never include it in old_text or new_text. A folder path returns its entries one per line (folders end with "/"). Use offset and limit to read large files or folders in sections: one call returns at most ${READ_LIMITS.lines} lines or ${READ_LIMITS.bytes / 1024} KiB, lines longer than ${READ_LIMITS.line_characters} characters are cut, and "[Output truncated. Continue reading with offset: N]" tells you where to continue. A negative offset reads the last lines. Prefer one larger read over many small slices, read a file you will edit whole, and use grep to find specific content in large files. Returns base_revision, which propose_edit and apply_patch rely on for files you change. The absolute path of a saved tool output, named in a "[Output truncated: … full output saved to …]" marker, can also be read this way.`;
 const EDIT_DESCRIPTION = `Stage an edit for the user to review; nothing is written until they accept it. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the current text to replace (preferred for targeted changes). Preserve the exact indentation from read_file output and omit the line-number prefix. If there is no exact match, the edit retries while ignoring typographic quote, dash and space variants, then trailing whitespace on each line. By default old_text must identify a UNIQUE location: add more surrounding lines to disambiguate, or set replace_all to true to replace every occurrence (for example when renaming a variable). Line breaks are written as \\n; the file's CRLF or LF endings are preserved. (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file (only after reading every line; prefer write_file for that). Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes. On a miss the error shows the closest numbered lines, so you can retry without rereading.`;
-const WRITE_DESCRIPTION = 'Create a new file, or replace the whole content of an existing one, as a proposal the user reviews; nothing is written until they accept it. Missing parent folders are created on apply. Use this to create files or completely rewrite them; prefer propose_edit (old_text) for targeted changes to existing files. Replacing an existing file requires having read all of it at its current content. Empty files cannot be staged.';
+const WRITE_DESCRIPTION = 'Create a new file, or replace the whole content of an existing one, as a proposal the user reviews; nothing is written until they accept it. Missing parent folders are created on apply. Use this to create files or completely rewrite them; prefer propose_edit (old_text) for targeted changes to existing files. Replacing an existing file requires having read all of it at its current content. Empty content creates an empty file.';
 const PATCH_DESCRIPTION = `Stage a multi-file patch (add, update, delete or move files) as proposals the user reviews; nothing is written until they accept them. Every file in the patch is verified first, so a patch that does not apply stages nothing. Update chunks are matched against the current text, including your pending proposals (exactly, then ignoring trailing whitespace, surrounding whitespace and typographic variants). Use it for changes spanning several files or for creating/deleting files; use propose_edit for a single targeted change.\n\n${PATCH_GUIDE}`;
-const GREP_DESCRIPTION = `Search saved file contents with ripgrep regular expression syntax, or exact text when literal is true. Use it to locate code, symbols or text patterns; narrow with path (a workspace folder or file) or include (a glob such as "*.ts" or "*.{ts,tsx}"). Case-sensitive by default. Returns matching file paths, line numbers and line previews, at most limit matching lines (default ${DEFAULT_SEARCH_LIMIT}). Respects .gitignore; secrets and .git are excluded. Then read_file around the hits you need.`;
+const GREP_DESCRIPTION = `Search saved file contents with ripgrep regular expression syntax, or exact text when literal is true. Use it to locate code, symbols or text patterns; narrow with path (a workspace folder or file, or a saved tool output named in a truncation marker) or include (a glob such as "*.ts" or "*.{ts,tsx}"). Case-sensitive by default. Returns matching file paths, line numbers and line previews, at most limit matching lines (default ${DEFAULT_SEARCH_LIMIT}). Respects .gitignore; secrets and .git are excluded. Then read_file around the hits you need.`;
 const GLOB_DESCRIPTION = `Find workspace files by path glob (examples: "**/*.ts", "src/**/*.tsx", "*.md"), newest first by modification time. Returns at most limit paths (default ${DEFAULT_SEARCH_LIMIT}). Respects .gitignore; hidden files are skipped unless hidden is true. Use it to find files by name; use grep to search contents.`;
-const COMMAND_DESCRIPTION = `Run one non-interactive shell command in the workspace after the user approves its exact text (${process.platform === 'win32' ? 'cmd.exe on Windows' : '/bin/sh'}). Use it for tests, builds, linters and type checks; prefer the narrowest command that checks your change. Prefer dedicated tools over shell commands (read_file, grep, glob instead of cat, grep, find or ls), and do not chain commands with separators like echo "===" that only add noise. Quote paths containing spaces. Set workdir instead of cd. The default timeout is ${COMMAND_LIMITS.timeout_seconds_default} s (at most ${COMMAND_LIMITS.timeout_seconds_max} s); a command still running at its timeout is stopped. Output is capped (the start, an omission note and the last few KiB are kept), so rely on the cap or filter output rather than printing huge logs. There is no input, so prompts and watch modes run until the timeout. Set background to true for dev servers or long builds: it returns a job_id at once, and command_output reads its output later; do not poll it repeatedly. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit, write_file or apply_patch rather than editing through commands. At most ${COMMAND_LIMITS.per_request} commands per request.`;
+const COMMAND_DESCRIPTION = `Run one non-interactive shell command in the workspace after the user approves its exact text (${process.platform === 'win32' ? 'cmd.exe on Windows' : '/bin/sh'}). Use it for tests, builds, linters and type checks; prefer the narrowest command that checks your change. Prefer dedicated tools over shell commands (read_file, grep, glob instead of cat, grep, find or ls), and do not chain commands with separators like echo "===" that only add noise. Quote paths containing spaces. Set workdir instead of cd. The default timeout is ${COMMAND_LIMITS.timeout_seconds_default} s (at most ${COMMAND_LIMITS.timeout_seconds_max} s); a command still running at its timeout moves to the background (read or stop it with command_output) rather than being killed, so do not start another copy. Output is capped (the start, an omission note and the last few KiB are kept) and the full output is saved to a file you can read_file or grep, so rely on the cap or filter output rather than printing huge logs. There is no input, so prompts and watch modes never finish on their own. Set background to true for dev servers or long builds: it returns a job_id at once, and command_output reads its output later; do not poll it repeatedly. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit, write_file or apply_patch rather than editing through commands. At most ${COMMAND_LIMITS.per_request} commands per request.`;
 const WEB_FETCH_DESCRIPTION = `Fetch content from an http:// or https:// URL and return it as markdown (default), text or html, after the user approves the URL. HTML pages are converted; other textual types are returned as is; images and binary files are refused. Responses over ${WEB_FETCH_LIMITS.max_response_bytes / 1024 / 1024} MiB are refused, and the timeout is at most ${WEB_FETCH_LIMITS.timeout_seconds_max} s (default ${WEB_FETCH_LIMITS.timeout_seconds_default} s). Use a more targeted tool when one is available. Read-only.`;
 const TODO_DESCRIPTION = 'Create and update a to-do list for the current task. The user sees it in the sidebar as your working plan. Use it proactively when a task has 3 or more distinct steps, or when the user gives several tasks or asks for a to-do list. Skip it for a single simple task or a purely conversational request. Send the full list on every call; it replaces the previous one. Mark an item in_progress when you start it and completed as soon as it is actually done. Only call it when the list changes.';
-interface CommandJob { id: string; command: string; cwd: string; timeoutSeconds: number; handle: CommandHandle; result?: CommandResult; error?: string }
+interface CommandJob { id: string; command: string; cwd: string; handle: CommandHandle; result?: CommandResult; error?: string }
 const REVIEW_NOTE = 'No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.';
 const TODO_MARKS: Record<TodoItem['status'], string> = { completed: '[x]', in_progress: '[~]', pending: '[ ]', cancelled: '[-]' };
 /** opencode's todowrite summary line. */
@@ -61,6 +61,8 @@ type SearchInput = z.infer<typeof SearchInputSchema>;
 const SearchMatchEventSchema = z.object({ type: z.literal('match'), data: z.object({ path: z.object({ text: z.string() }), line_number: z.number().int().positive(), lines: z.object({ text: z.string() }), submatches: z.array(z.object({ start: z.number().int().nonnegative() })) }) });
 interface SearchHit { line: number; text: string; line_truncated: boolean }
 interface SearchFile { path: string; match_count: number; matches: SearchHit[] }
+/** A failed web_fetch that already has its own activity row, so it is not also shown as a refused call. */
+class FetchReported extends Error {}
 
 export class EditorBridge implements vscode.Disposable {
   private readonly token = randomBytes(32).toString('hex');
@@ -104,8 +106,14 @@ export class EditorBridge implements vscode.Disposable {
       if (!response.headersSent) response.writeHead(500).end('MCP request failed');
     });
   });
-  constructor(private readonly options: { files: WorkspaceFiles; edits: EditService; log: ToolLog }) {}
+  /** Full outputs that were truncated for the model, outside the workspace; without a directory the overflow is dropped. */
+  private readonly outputs: ToolOutputStore | undefined;
+  /** `outputDirectory` holds full tool outputs the model could not receive inline (opencode's tool-output folder). */
+  constructor(private readonly options: { files: WorkspaceFiles; edits: EditService; log: ToolLog; outputDirectory?: string }) {
+    this.outputs = options.outputDirectory ? new ToolOutputStore(options.outputDirectory) : undefined;
+  }
   async start(): Promise<void> {
+    this.outputs?.cleanup();
     await new Promise<void>((resolvePromise, reject) => {
       this.server.once('error', reject);
       this.server.listen(0, '127.0.0.1', () => { this.server.removeListener('error', reject); resolvePromise(); });
@@ -169,13 +177,13 @@ export class EditorBridge implements vscode.Disposable {
     return loaded;
   }
   /** Instruction files beside a read that were not already in the system prompt. OpenCode attaches each one once. */
-  private async instructionsForRead(path: string): Promise<string> {
+  private async instructionsForRead(path: string, directory = false): Promise<string> {
     const root = vscode.workspace.workspaceFolders?.[0];
     if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) return '';
     await this.projectInstructions();
     let absolute = resolve(root.uri.fsPath, path);
     try { absolute = (await this.options.files.resolve(path)).realPath; } catch { /* The workspace-relative path is enough to find a sibling instruction file. */ }
-    const extra = instructionsBesideRead({ workspaceRoot: root.uri.fsPath, filePath: absolute, already: this.loadedInstructions, exists: path => existsSync(path) });
+    const extra = instructionsBesideRead({ workspaceRoot: root.uri.fsPath, filePath: absolute, directory, already: this.loadedInstructions, exists: path => existsSync(path) });
     const files: Array<{ path: string; absolutePath: string; text: string; lines: number }> = [];
     for (const file of extra) {
       try {
@@ -254,12 +262,26 @@ export class EditorBridge implements vscode.Disposable {
       const schema = z.object(config.inputSchema);
       return server.registerTool<z.ZodRawShape, typeof schema>(name, { ...config, inputSchema: schema }, (input, extra) => this.options.log.tool({ name, input, signal: extra.signal, run: async () => {
         // A refused call is shown in the feed too; otherwise the user sees an approval and then nothing.
-        try { return boundToolResult(await handler(input, extra)); }
-        catch (error) { this.activityEvents.fire({ kind: 'refused', tool: name, message: (error instanceof Error ? error.message : 'The tool call failed.').slice(0, 300) }); throw error; }
+        try { return boundToolResult(await handler(input, extra), this.outputs?.save); }
+        catch (error) {
+          if (!(error instanceof FetchReported)) this.activityEvents.fire({ kind: 'refused', tool: name, message: (error instanceof Error ? error.message : 'The tool call failed.').slice(0, 300) });
+          throw error;
+        }
       } }));
     };
     register('search_code', { description: 'Search saved workspace text. Returns hits grouped by file with line numbers, up to three excerpts per file, observed folder counts and a next-step hint. Run one focused search per fact you need (for example where a name is defined, then where it is registered, imported or called); a distinctive identifier finds far fewer, better hits than a common word. Literal and case-insensitive by default; set regex to true for patterns such as alternatives (name_a|name_b). Use glob to filter paths and narrow incomplete searches. Then open each relevant hit with read_file around its line number.', inputSchema: SearchInputSchema.shape, annotations: { readOnlyHint: true } }, async (input, extra) => this.searchCode({ ...input, signal: extra.signal }));
     register('read_file', { description: READ_DESCRIPTION, inputSchema: { path: z.string().max(500).describe('Workspace-relative file or folder to read; "." is the workspace root.'), offset: z.number().int().optional().describe('The line or folder entry to start from (1-based). A negative number reads that many lines from the end of the file.'), limit: z.number().int().min(1).max(READ_LIMITS.lines).optional().describe(`The maximum number of lines or entries to read (defaults to and capped at ${READ_LIMITS.lines}).`), start_line: z.number().int().min(1).optional().describe('Same as offset; kept for compatibility.'), end_line: z.number().int().min(1).optional().describe('Last line to read (inclusive); an alternative to limit.'), reason: REASON }, annotations: { readOnlyHint: true } }, async ({ path, offset, limit, start_line, end_line, reason }) => {
+      const first = offset ?? start_line;
+      if (end_line !== undefined && first !== undefined && first > 0 && end_line < first) throw new Error('end_line must not be before the first line read.');
+      const pageLimit = limit ?? (end_line !== undefined ? end_line - Math.max(1, first ?? 1) + 1 : undefined);
+      const saved = this.outputs?.resolve(path);
+      if (saved) {
+        // A saved tool output is read-only and outside the workspace: no revision, coverage or instructions.
+        const page = pageText(await readFile(saved, 'utf8'), { offset: first, limit: pageLimit });
+        const text = page.lines.map((line, index) => `${page.offset + index}: ${line}`).join('\n');
+        this.budgetUsed += text.length;
+        return { content: [{ type: 'text', text: renderTextPage(path, page, first) }], structuredContent: { path, type: 'tool_output', start_line: page.offset, end_line: page.offset + page.lines.length - 1, total_lines: page.total, text, truncated: page.next !== undefined, ...(page.next !== undefined ? { next_offset: page.next } : {}) } };
+      }
       const located = await this.options.files.locate(path);
       if (located.kind === 'missing') throw new Error(await this.notFound(path, located));
       if (located.kind === 'directory') {
@@ -268,12 +290,11 @@ export class EditorBridge implements vscode.Disposable {
         const text = renderDirectoryPage(located.relative, page);
         this.budgetUsed += text.length;
         this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob: `${located.relative}/`, count: page.entries.length });
-        return { content: [{ type: 'text', text }], structuredContent: { path: located.relative, type: 'directory', entries: page.entries, total_entries: page.total, truncated: page.next !== undefined, ...(page.next !== undefined ? { next_offset: page.next } : {}) } };
+        const instructions = await this.instructionsForRead(path, true);
+        return { content: [{ type: 'text', text: `${text}${instructions ? `\n\n${instructions}` : ''}` }], structuredContent: { path: located.relative, type: 'directory', entries: page.entries, total_entries: page.total, truncated: page.next !== undefined, ...(page.next !== undefined ? { next_offset: page.next } : {}), ...(instructions ? { project_instructions: instructions } : {}) } };
       }
-      const first = offset ?? start_line;
-      if (end_line !== undefined && first !== undefined && first > 0 && end_line < first) throw new Error('end_line must not be before the first line read.');
       const { revision, file } = await this.options.edits.read(path);
-      const page = pageText(file.text, { offset: first, limit: limit ?? (end_line !== undefined ? end_line - Math.max(1, first ?? 1) + 1 : undefined) });
+      const page = pageText(file.text, { offset: first, limit: pageLimit });
       const actualEnd = page.offset + page.lines.length - 1;
       const text = page.lines.map((line, index) => `${page.offset + index}: ${line}`).join('\n');
       this.budgetUsed += text.length;
@@ -286,7 +307,7 @@ export class EditorBridge implements vscode.Disposable {
       // TrueForge prefers structured MCP results, so the source must be present there too.
       return { content: [{ type: 'text', text: `Base revision: ${revision}\n${renderTextPage(path, page, first)}${instructions ? `\n\n${instructions}` : ''}` }], structuredContent: { base_revision: revision, path, start_line: page.offset, end_line: actualEnd, total_lines: page.total, text, truncated: page.next !== undefined, ...(page.next !== undefined ? { next_offset: page.next } : {}), ...(page.pastEnd ? { past_end: true } : {}), ...(instructions ? { project_instructions: instructions } : {}) } };
     });
-    register('run_command', { description: COMMAND_DESCRIPTION, inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters).describe('Shell command string to execute.'), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), workdir: z.string().max(500).optional().describe('Same as cwd (opencode name); takes precedence when both are given.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).default(COMMAND_LIMITS.timeout_seconds_default).describe(`Stop the command after this many seconds (default ${COMMAND_LIMITS.timeout_seconds_default}, at most ${COMMAND_LIMITS.timeout_seconds_max}).`), background: z.boolean().default(false).describe('Start the command and return a job_id at once (for dev servers and long builds); read its output later with command_output. Do not add "&" to the command.'), reason: REASON }, annotations: { readOnlyHint: false } }, async ({ command, cwd, workdir, timeout_seconds, background, reason }, extra) => {
+    register('run_command', { description: COMMAND_DESCRIPTION, inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters).describe('Shell command string to execute.'), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), workdir: z.string().max(500).optional().describe('Same as cwd (opencode name); takes precedence when both are given.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).optional().describe(`Seconds to wait (default ${COMMAND_LIMITS.timeout_seconds_default}, at most ${COMMAND_LIMITS.timeout_seconds_max}). When it expires, a foreground command moves to the background and a background command is stopped; a background command without it runs until stopped.`), background: z.boolean().default(false).describe('Start the command and return a job_id at once (for dev servers and long builds); read its output later with command_output. Do not add "&" to the command.'), reason: REASON }, annotations: { readOnlyHint: false } }, async ({ command, cwd, workdir, timeout_seconds, background, reason }, extra) => {
       if (this.editScope !== undefined) throw new Error(`This is an inline edit of ${this.editScope}; commands are not part of it. Stage the edit, then tell the user which check to run.`);
       if (this.commandsRun >= COMMAND_LIMITS.per_request) throw new Error(`This request already ran ${COMMAND_LIMITS.per_request} commands, the limit per request. Stop running commands; tell the user what to run or what is missing, and they can ask you to continue.`);
       const root = vscode.workspace.workspaceFolders?.[0];
@@ -295,32 +316,48 @@ export class EditorBridge implements vscode.Disposable {
       const folder = await realpath(resolve(rootPath, workdir ?? cwd)).catch(() => { throw new Error('Choose an existing workspace folder for cwd.'); });
       if (folder !== rootPath && !folder.startsWith(rootPath + sep)) throw new Error('cwd must stay inside the workspace.');
       if (!(await stat(folder)).isDirectory()) throw new Error('cwd must be a folder.');
-      const running = [...this.jobs.values()].filter(job => !job.handle.isDone()).length;
-      if (background && running >= COMMAND_LIMITS.background_jobs) throw new Error(`${running} background commands are already running, the limit. Stop one with command_output (stop: true) first.`);
+      const runningJobs = () => [...this.jobs.values()].filter(job => !job.handle.isDone()).length;
+      if (background && runningJobs() >= COMMAND_LIMITS.background_jobs) throw new Error(`${runningJobs()} background commands are already running, the limit. Stop one with command_output (stop: true) first.`);
       const outputCharacters = COMMAND_LIMITS.output_characters;
       const where = relative(rootPath, folder) || '.';
+      let outputFile: string | undefined;
+      try { outputFile = this.outputs?.newFile(); } catch { outputFile = undefined; }
       this.commandsRun++; // counted only once it actually runs; refused calls do not use the budget
       if (background) {
-        const id = `job-${randomBytes(4).toString('hex')}`;
-        const handle = startCommand({ command, cwd: folder, timeoutSeconds: timeout_seconds, outputCharacters });
-        const job: CommandJob = { id, command, cwd: where, timeoutSeconds: timeout_seconds, handle };
-        this.jobs.set(id, job);
-        for (const [key, old] of this.jobs) if (this.jobs.size > 20 && old.handle.isDone()) this.jobs.delete(key);
-        handle.result.then(result => {
-          job.result = result;
-          this.activityEvents.fire({ kind: 'command', command, cwd: where, exitCode: result.exit_code, timedOut: result.timed_out, cancelled: result.cancelled, durationMs: result.duration_ms, ...(reason ? { reason } : {}) });
-        }, error => { job.error = error instanceof Error ? error.message : 'The command could not start.'; });
-        const message = `Started in the background as ${id} (cwd ${where}; stopped after ${timeout_seconds} s). Keep working on anything that does not depend on it; read its output with command_output when you need the result. Do not poll repeatedly.`;
+        // opencode: a background command has no timeout unless one is given; stop it with command_output or by closing the window.
+        const handle = startCommand({ command, cwd: folder, timeoutSeconds: timeout_seconds ?? 0, outputCharacters, outputFile });
+        const id = this.trackJob({ command, cwd: where, handle, reason });
+        const message = `Started in the background as ${id} (cwd ${where}; ${timeout_seconds ? `stopped after ${timeout_seconds} s` : 'runs until it exits or is stopped'}). Keep working on anything that does not depend on it; read its output with command_output when you need the result. Do not poll repeatedly.`;
         return { content: [{ type: 'text', text: `$ ${command}\n${message}` }], structuredContent: { job_id: id, status: 'running', command, cwd: where, background: true, message } };
       }
-      const result = await startCommand({ command, cwd: folder, timeoutSeconds: timeout_seconds, outputCharacters, signal: extra.signal }).result;
+      // opencode's shell tool: a foreground command still running at its timeout moves to the background instead of being killed.
+      const timeout = timeout_seconds ?? COMMAND_LIMITS.timeout_seconds_default;
+      const handle = startCommand({ command, cwd: folder, timeoutSeconds: 0, outputCharacters, outputFile });
+      let timer: NodeJS.Timeout | undefined;
+      const onAbort = () => handle.stop('cancel');
+      extra.signal.addEventListener('abort', onAbort, { once: true });
+      if (extra.signal.aborted) handle.stop('cancel');
+      const outcome = await Promise.race([
+        handle.result.then(() => 'done' as const, () => 'done' as const),
+        new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), timeout * 1000); }),
+      ]).finally(() => { clearTimeout(timer); extra.signal.removeEventListener('abort', onAbort); });
+      if (outcome === 'timeout' && !handle.isDone() && runningJobs() < COMMAND_LIMITS.background_jobs) {
+        const id = this.trackJob({ command, cwd: where, handle, reason });
+        const snapshot = handle.snapshot();
+        this.budgetUsed += snapshot.output.length;
+        const message = `The command did not finish within its timeout of ${timeout} s and was moved to the background as ${id} (cwd ${where}). Do not start another copy while it is running. Keep working on anything that does not depend on it; read its output with command_output when you need the result (stop: true stops it). Do not poll repeatedly.`;
+        return { content: [{ type: 'text', text: `$ ${command}\n${message}\nOutput so far:\n${snapshot.output || '(no output yet)'}` }], structuredContent: { job_id: id, status: 'running', command, cwd: where, background: true, moved_to_background: true, message, ...snapshot } };
+      }
+      // No free background slot: stop it, as before opencode moved commands to the background.
+      if (outcome === 'timeout') handle.stop('timeout');
+      const result = await handle.result;
       this.budgetUsed += result.output.length;
       this.activityEvents.fire({ kind: 'command', used: this.budgetUsed, command, cwd: where, exitCode: result.exit_code, timedOut: result.timed_out, cancelled: result.cancelled, durationMs: result.duration_ms, ...(reason ? { reason } : {}) });
-      const ended = result.cancelled ? 'cancelled' : result.timed_out ? `stopped at the ${timeout_seconds} s timeout` : `exit code ${result.exit_code ?? result.signal}`;
+      const ended = result.cancelled ? 'cancelled' : result.timed_out ? `stopped at the ${timeout} s timeout because ${COMMAND_LIMITS.background_jobs} background commands are already running` : `exit code ${result.exit_code ?? result.signal}`;
       const structured = { command, cwd: where, ...result };
       return { content: [{ type: 'text', text: `$ ${command}\n(cwd ${where}) ${ended} after ${(result.duration_ms / 1000).toFixed(1)} s${result.output_truncated ? `; output shortened from ${result.total_output_characters} characters` : ''}\n${result.output}` }], structuredContent: structured };
     });
-    register('command_output', { description: 'Read the output of a background command started by run_command with background: true. Returns its status (running or finished), exit code and output so far. wait_seconds waits up to that long for it to finish first; stop: true stops it. Read it when you need the result, not in a polling loop.', inputSchema: { job_id: z.string().max(40), wait_seconds: z.number().int().min(0).max(60).default(0), stop: z.boolean().default(false) }, annotations: { readOnlyHint: false } }, async ({ job_id, wait_seconds, stop }, extra) => {
+    register('command_output', { description: 'Read the output of a background command: one started by run_command with background: true, or one that run_command moved to the background at its timeout. Returns its status (running or finished), exit code and output so far. wait_seconds waits up to that long for it to finish first; stop: true stops it. Read it when you need the result, not in a polling loop.', inputSchema: { job_id: z.string().max(40), wait_seconds: z.number().int().min(0).max(60).default(0), stop: z.boolean().default(false) }, annotations: { readOnlyHint: false } }, async ({ job_id, wait_seconds, stop }, extra) => {
       const job = this.jobs.get(job_id);
       if (!job) throw new Error(`No background command ${job_id} in this window. Known jobs: ${[...this.jobs.keys()].join(', ') || 'none'}.`);
       if (stop) job.handle.stop();
@@ -386,7 +423,8 @@ export class EditorBridge implements vscode.Disposable {
     });
     register('apply_patch', { description: PATCH_DESCRIPTION, inputSchema: { patch_text: z.string().min(1).max(MAX_EDIT_CHARACTERS * 2).describe('The full patch text, from "*** Begin Patch" to "*** End Patch".'), explanation: z.string().max(2000) }, annotations: { readOnlyHint: true } }, async ({ patch_text, explanation }) => this.applyPatch({ patchText: patch_text, explanation }));
     register('grep', { description: GREP_DESCRIPTION, inputSchema: { pattern: z.string().min(1).max(1000).describe('Regular expression (ripgrep syntax) or, with literal, exact text to match in file contents.'), path: z.string().max(500).optional().describe('Workspace-relative folder or file to search; defaults to the workspace root.'), include: z.string().max(200).optional().describe('Glob filter for files, for example "*.js" or "*.{ts,tsx}".'), literal: z.boolean().default(false).describe('Treat pattern as exact text instead of a regular expression.'), case_sensitive: z.boolean().default(true), limit: z.number().int().min(1).max(SEARCH_TOOL_LIMITS.max_limit).default(DEFAULT_SEARCH_LIMIT).describe('Maximum number of matching lines to return.'), reason: REASON }, annotations: { readOnlyHint: true } }, async ({ pattern, path, include, literal, case_sensitive, limit, reason }, extra) => {
-      const { folder, prefix, file } = await this.searchTarget(path ?? '.');
+      const saved = path ? this.outputs?.resolve(path) : undefined;
+      const { folder, prefix, file } = saved ? { folder: dirname(saved), prefix: dirname(saved).replace(/\\/gu, '/'), file: basename(saved) } : await this.searchTarget(path ?? '.');
       const { matches, truncated } = await grepFiles({ rgPath: ripgrepPath(), cwd: folder, prefix, file, pattern, include, literal, caseSensitive: case_sensitive, limit, signal: extra.signal });
       const text = renderGrep(matches, truncated);
       const files = [...new Set(matches.map(match => match.path))];
@@ -403,9 +441,18 @@ export class EditorBridge implements vscode.Disposable {
       this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob: prefix ? `${prefix}/${pattern}` : pattern, count: files.length });
       return { content: [{ type: 'text', text }], structuredContent: { pattern, files, truncated } };
     });
-    register('web_fetch', { description: WEB_FETCH_DESCRIPTION, inputSchema: { url: z.string().min(1).max(4000).describe('The http:// or https:// URL to fetch.'), format: z.enum(['markdown', 'text', 'html']).default('markdown').describe('The format to return the content in. Defaults to markdown.'), timeout: z.number().min(1).max(WEB_FETCH_LIMITS.timeout_seconds_max).optional().describe(`Optional timeout in seconds (maximum ${WEB_FETCH_LIMITS.timeout_seconds_max}).`), reason: REASON }, annotations: { readOnlyHint: true } }, async ({ url, format, timeout }, extra) => {
-      const result = await webFetch({ url, format, timeoutSeconds: timeout ?? WEB_FETCH_LIMITS.timeout_seconds_default, signal: extra.signal }).catch(error => { throw new Error(`Unable to fetch ${url}: ${error instanceof Error ? error.message : String(error)}`); });
+    register('web_fetch', { description: WEB_FETCH_DESCRIPTION, inputSchema: { url: z.string().min(1).max(4000).describe('The http:// or https:// URL to fetch.'), format: z.enum(['markdown', 'text', 'html']).default('markdown').describe('The format to return the content in. Defaults to markdown.'), timeout: z.number().min(1).max(WEB_FETCH_LIMITS.timeout_seconds_max).optional().describe(`Optional timeout in seconds (maximum ${WEB_FETCH_LIMITS.timeout_seconds_max}).`), reason: REASON }, annotations: { readOnlyHint: true } }, async ({ url, format, timeout, reason }, extra) => {
+      const started = performance.now();
+      const why = reason ? { reason: reason.slice(0, 300) } : {};
+      const result = await webFetch({ url, format, timeoutSeconds: timeout ?? WEB_FETCH_LIMITS.timeout_seconds_default, signal: extra.signal }).catch(error => {
+        const message = `Unable to fetch ${url}: ${error instanceof Error ? error.message : String(error)}`;
+        this.activityEvents.fire({ kind: 'fetch', url: url.slice(0, 2000), error: message.slice(0, 300), durationMs: Math.round(performance.now() - started), ...why });
+        throw new FetchReported(message);
+      });
       this.budgetUsed += result.output.length;
+      // boundToolResult cuts at the same limits after this handler returns.
+      const truncated = result.output.split('\n').length > MAX_OUTPUT_LINES || Buffer.byteLength(result.output, 'utf8') > MAX_OUTPUT_BYTES;
+      this.activityEvents.fire({ kind: 'fetch', url: result.url.slice(0, 2000), status: result.status, bytes: result.bytes, contentType: result.contentType.slice(0, 200), truncated, durationMs: Math.round(performance.now() - started), used: this.budgetUsed, ...why });
       return { content: [{ type: 'text', text: result.output || '(empty response)' }], structuredContent: { url: result.url, status: result.status, content_type: result.contentType, bytes: result.bytes, output: result.output } };
     });
     register('todo_write', { description: TODO_DESCRIPTION, inputSchema: { todos: z.array(z.object({ content: z.string().min(1).max(500).describe('Brief description of the task.'), status: z.enum(['pending', 'in_progress', 'completed', 'cancelled']).describe('Current status of the task.') })).max(50).describe('The updated to-do list; it replaces the previous one.') }, annotations: { readOnlyHint: true } }, async ({ todos }) => {
@@ -415,6 +462,18 @@ export class EditorBridge implements vscode.Disposable {
       return { content: [{ type: 'text', text }], structuredContent: { todos: list } };
     });
     return server;
+  }
+  /** Keeps a running command as a background job of this window; its activity row is added when it ends. */
+  private trackJob(options: { command: string; cwd: string; handle: CommandHandle; reason?: string }): string {
+    const id = `job-${randomBytes(4).toString('hex')}`;
+    const job: CommandJob = { id, command: options.command, cwd: options.cwd, handle: options.handle };
+    this.jobs.set(id, job);
+    for (const [key, old] of this.jobs) if (this.jobs.size > 20 && old.handle.isDone()) this.jobs.delete(key);
+    options.handle.result.then(result => {
+      job.result = result;
+      this.activityEvents.fire({ kind: 'command', command: options.command, cwd: options.cwd, exitCode: result.exit_code, timedOut: result.timed_out, cancelled: result.cancelled, durationMs: result.duration_ms, ...(options.reason ? { reason: options.reason } : {}) });
+    }, error => { job.error = error instanceof Error ? error.message : 'The command could not start.'; });
+    return id;
   }
   /** Refuses paths outside an Edit Selection request's one file. */
   private assertInScope(paths: string[]): void {
@@ -546,8 +605,7 @@ function searchWithRipgrep(options: SearchInput & { paths: Map<string, string>; 
       return { files: [...selected.values()], folder_counts: folderCounts, omitted_folder_matches: omitted, observed_matches: observed, returned_matches: shown, counts_complete: !incomplete, truncated: incomplete || shown < observed };
     };
     if (!options.paths.size) { resolve(summarize(false)); return; }
-    const executable = join(vscode.env.appRoot, 'node_modules', '@vscode', 'ripgrep', 'bin', process.platform === 'win32' ? 'rg.exe' : 'rg');
-    const child = spawn(executable, ['--no-config', '--json', '--max-filesize=256K', ...(options.regex ? [] : ['--fixed-strings']), ...(options.case_sensitive ? [] : ['--ignore-case']), '-e', options.query, '--', ...options.paths.keys()], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(ripgrepPath(), ['--no-config', '--json', '--max-filesize=256K', ...(options.regex ? [] : ['--fixed-strings']), ...(options.case_sensitive ? [] : ['--ignore-case']), '-e', options.query, '--', ...options.paths.keys()], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let pending = '', stderr = '', received = 0, settled = false;
     const finish = (error?: Error, truncated = false) => {
       if (settled) return;

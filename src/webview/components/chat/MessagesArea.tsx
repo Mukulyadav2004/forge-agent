@@ -8,7 +8,7 @@ import { Fragment, useState } from 'react';
 import type { ActivityEntry, ChatMessage, TaskHistoryItem } from '../../../shared/messages.js';
 import { plural, size } from '../../lib/format.js';
 import { post } from '../../vscode.js';
-import { ChevronRightIcon } from '../common/Icons.js';
+import { ChevronRightIcon, LoaderIcon } from '../common/Icons.js';
 import { WelcomeSection } from '../welcome/WelcomeSection.js';
 import { ChatRow } from './ChatRow.js';
 import type { ToolEntry } from './ToolRows.js';
@@ -60,7 +60,7 @@ function ToolGroup({ group }: { group: Group }) {
  * Consecutive searches and reads collapse into one "Forge read … searched …" block; commands, staged edits,
  * refusals, compaction and to-do lists stand alone. A request line marks each user message.
  */
-export function MessagesArea({ messages, activity, complete, history }: { messages: ChatMessage[]; activity: ActivityEntry[]; complete: boolean; history: TaskHistoryItem[] }) {
+export function MessagesArea({ messages, activity, busy, complete, history }: { messages: ChatMessage[]; activity: ActivityEntry[]; busy: boolean; complete: boolean; history: TaskHistoryItem[] }) {
   const after = new Map<number, Item[]>();
   const place = (at: number, item: Item) => after.set(at, [...(after.get(at) ?? []), item]);
   let group: Group | undefined;
@@ -103,9 +103,12 @@ export function MessagesArea({ messages, activity, complete, history }: { messag
   };
 
   const empty = messages.length === 0 && activity.length === 0;
+  // Streaming assistant text shows progress by itself; otherwise the feed ends in a request or a finished tool.
+  const tail = (after.get(messages.length) ?? []).filter(item => item.type !== 'request');
+  const thinking = busy && (messages.at(-1)?.role !== 'assistant' || tail.length > 0);
   return (
-    <div aria-label="Conversation" aria-live="polite" aria-relevant="additions text" id="messages" role="log">
-      {empty && <WelcomeSection history={history} onOpen={id => post({ type: 'open_history', id })} />}
+    <div aria-busy={busy} aria-label="Conversation" aria-live="polite" aria-relevant="additions text" id="messages" role="log">
+      {empty && !busy && <WelcomeSection history={history} onOpen={id => post({ type: 'open_history', id })} />}
       {(after.get(0) ?? []).map(render)}
       {messages.map((message, index) => (
         <Fragment key={message.id}>
@@ -113,6 +116,7 @@ export function MessagesArea({ messages, activity, complete, history }: { messag
           {(after.get(index + 1) ?? []).map(render)}
         </Fragment>
       ))}
+      {thinking && <div aria-hidden="true" className="thinking-row"><LoaderIcon className="animate-spin" />Thinking…</div>}
     </div>
   );
 }

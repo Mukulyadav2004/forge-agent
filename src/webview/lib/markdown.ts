@@ -1,6 +1,6 @@
 import DOMPurify from 'dompurify';
 import { Marked } from 'marked';
-import mermaid from 'mermaid';
+import type { Mermaid } from 'mermaid';
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -14,17 +14,53 @@ const markdown = new Marked({
     image: ({ text }) => escapeHtml(text),
   },
 });
-mermaid.initialize({
-  startOnLoad: false,
-  securityLevel: 'strict',
-  suppressErrorRendering: true,
-  maxTextSize: 20000,
-  maxEdges: 150,
-  htmlLabels: false,
-  theme: document.body.classList.contains('vscode-light') ? 'default' : 'dark',
-  flowchart: { htmlLabels: false },
-});
+let mermaidLoad: Promise<Mermaid> | undefined;
+
+/** Mermaid is several megabytes, so it is fetched the first time a reply contains a diagram. */
+function loadMermaid(): Promise<Mermaid> {
+  mermaidLoad ??= import('mermaid').then(({ default: mermaid }) => {
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      suppressErrorRendering: true,
+      maxTextSize: 20000,
+      maxEdges: 150,
+      htmlLabels: false,
+      theme: document.body.classList.contains('vscode-light') ? 'default' : 'dark',
+      flowchart: { htmlLabels: false },
+    });
+    return mermaid;
+  }, (error: unknown) => {
+    mermaidLoad = undefined;
+    throw error;
+  });
+  return mermaidLoad;
+}
 let diagramId = 0;
+
+type Highlighter = typeof import('./highlight.js');
+let highlighter: Highlighter | undefined;
+let highlighterLoad: Promise<Highlighter> | undefined;
+
+/** Code blocks that name a language, other than diff and Mermaid, which have their own renderers. */
+function codeToHighlight(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('pre > code[class*="language-"]:not(.language-diff):not(.language-mermaid)'));
+}
+
+/** highlight.js is fetched the first time a reply contains a fenced block with a language; later renders colour synchronously. */
+function highlightBlocks(container: HTMLElement): void {
+  const blocks = codeToHighlight(container);
+  if (!blocks.length) return;
+  if (highlighter) { for (const code of blocks) highlighter.highlightCode(code); return; }
+  highlighterLoad ??= import('./highlight.js').then(module => (highlighter = module), (error: unknown) => {
+    highlighterLoad = undefined;
+    throw error;
+  });
+  void highlighterLoad.then(module => {
+    // The container may have been re-rendered meanwhile; colour whatever plain blocks it holds now.
+    for (const code of codeToHighlight(container)) if (code.isConnected && !code.classList.contains('hljs')) module.highlightCode(code);
+  }, () => undefined);
+}
 
 /** Renders model Markdown into `container`. Raw HTML and images are escaped, and the result is sanitised again by DOMPurify. */
 export function renderMarkdown(options: { container: HTMLElement; text: string }): void {
@@ -44,6 +80,7 @@ export function renderMarkdown(options: { container: HTMLElement; text: string }
       return row;
     }));
   }
+  highlightBlocks(options.container);
   // Cline's CodeBlock copy control, added as our own element after sanitising.
   for (const pre of Array.from(options.container.querySelectorAll('pre'))) {
     const copy = document.createElement('button');
@@ -65,13 +102,16 @@ export function renderMarkdown(options: { container: HTMLElement; text: string }
 }
 
 export async function renderDiagrams(container: HTMLElement): Promise<void> {
-  for (const code of Array.from(container.querySelectorAll('pre > code.language-mermaid'))) {
+  const blocks = Array.from(container.querySelectorAll('pre > code.language-mermaid'));
+  if (!blocks.length) return;
+  for (const code of blocks) {
     if (!(code instanceof HTMLElement) || code.dataset.rendering) continue;
     code.dataset.rendering = 'true';
     const source = code.textContent ?? '';
     const pre = code.parentElement;
     if (!pre || source.length > 20000) continue;
     try {
+      const mermaid = await loadMermaid();
       const rendered = await mermaid.render(`forge-diagram-${++diagramId}`, source);
       if (!code.isConnected) continue;
       const diagram = document.createElement('figure');

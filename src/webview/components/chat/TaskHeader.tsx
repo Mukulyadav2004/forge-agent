@@ -5,6 +5,7 @@
  */
 import clsx from 'clsx';
 import { useLayoutEffect, useRef, useState } from 'react';
+import type { TokenUsage } from '../../../shared/messages.js';
 import { formatLargeNumber } from '../../lib/format.js';
 import { ChevronDownIcon, ChevronRightIcon, PlusIcon } from '../common/Icons.js';
 
@@ -26,8 +27,27 @@ export function ContextWindow({ used, limit }: { used: number; limit: number }) 
   );
 }
 
-/** The current task: its first request as a title, Cline's expandable details, and the context window. */
-export function TaskHeader({ text, context, onNewTask }: { text: string; context: { used: number; limit: number }; onNewTask: () => void }) {
+/** Cline's "Tokens: ↑ in ↓ out" figures, summed from TrueForge's turn metrics. Cost is shown only when TrueForge reported one. */
+function UsageSummary({ usage }: { usage: TokenUsage }) {
+  const details = [
+    `Input tokens: ${usage.inputTokens.toLocaleString('en-US')}`,
+    `Output tokens: ${usage.outputTokens.toLocaleString('en-US')}`,
+    ...(usage.cacheReadTokens ? [`Cache reads: ${usage.cacheReadTokens.toLocaleString('en-US')}`] : []),
+    ...(usage.cacheWriteTokens ? [`Cache writes: ${usage.cacheWriteTokens.toLocaleString('en-US')}`] : []),
+    ...(usage.reasoningTokens ? [`Reasoning tokens: ${usage.reasoningTokens.toLocaleString('en-US')}`] : []),
+    ...(usage.costUsd !== undefined ? [`Cost reported by TrueForge: $${usage.costUsd.toFixed(4)}`] : []),
+  ].join('\n');
+  return (
+    <span aria-label={details.replace(/\n/gu, ', ')} className="task-usage inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs" role="note" title={details}>
+      <span>{`↑ ${formatLargeNumber(usage.inputTokens)}`}</span>
+      <span>{`↓ ${formatLargeNumber(usage.outputTokens)}`}</span>
+      {usage.costUsd !== undefined && <span className="task-cost" id="price-tag">{`$${usage.costUsd.toFixed(4)}`}</span>}
+    </span>
+  );
+}
+
+/** The current task: its first request as a title, Cline's expandable details, token figures, and the context window. */
+export function TaskHeader({ text, context, usage, onNewTask }: { text: string; context: { used: number; limit: number }; usage?: TokenUsage; onNewTask: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const [textExpanded, setTextExpanded] = useState(false);
@@ -53,6 +73,7 @@ export function TaskHeader({ text, context, onNewTask }: { text: string; context
           {!expanded && <span className="task-title min-w-0 grow basis-0 select-none overflow-hidden text-ellipsis whitespace-nowrap">{text}</span>}
           {expanded && <span className="task-title select-none font-semibold">Task</span>}
         </div>
+        {usage && <UsageSummary usage={usage} />}
         <button aria-label="New task" className="icon-button shrink-0" onClick={onNewTask} title="Start a new task" type="button"><PlusIcon /></button>
       </div>
       {expanded && (
@@ -64,6 +85,13 @@ export function TaskHeader({ text, context, onNewTask }: { text: string; context
           {text}
         </div>
       )}
+      {expanded && usage && (usage.cacheReadTokens || usage.cacheWriteTokens || usage.reasoningTokens) ? (
+        <div className="task-usage-details mt-1 flex flex-wrap gap-x-3 px-0.5 text-xs">
+          {usage.cacheReadTokens ? <span>{`Cache reads: ${formatLargeNumber(usage.cacheReadTokens)}`}</span> : null}
+          {usage.cacheWriteTokens ? <span>{`Cache writes: ${formatLargeNumber(usage.cacheWriteTokens)}`}</span> : null}
+          {usage.reasoningTokens ? <span>{`Reasoning: ${formatLargeNumber(usage.reasoningTokens)}`}</span> : null}
+        </div>
+      ) : null}
       <ContextWindow limit={context.limit} used={context.used} />
     </div>
   );

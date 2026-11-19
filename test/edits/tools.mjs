@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
@@ -13,7 +14,7 @@ before(async () => {
   folder = await mkdtemp(join(tmpdir(), 'forge-tools-'));
   const outfile = join(folder, 'tools.mjs');
   await build({
-    stdin: { contents: ["export * from './src/tools/toolOutput';", "export * from './src/tools/readPage';", "export * from './src/tools/htmlMarkdown';"].join('\n'), resolveDir: process.cwd(), loader: 'ts' },
+    stdin: { contents: ["export * from './src/tools/toolOutput';", "export * from './src/tools/readPage';", "export * from './src/tools/htmlMarkdown';", "export * from './src/tools/runCommand';"].join('\n'), resolveDir: process.cwd(), loader: 'ts' },
     bundle: true, platform: 'node', format: 'esm', outfile, logLevel: 'silent',
   });
   tools = await import(pathToFileURL(outfile).href);
@@ -87,6 +88,43 @@ test('tool output is bounded to 2000 lines or 50 KiB with a narrowing hint', () 
   assert.equal(result.structuredContent.path, 'x');
 });
 
+test('truncated output is saved to a retained file that only the store resolves, as in opencode', async () => {
+  const store = new tools.ToolOutputStore(join(folder, 'tool-output'));
+  const many = Array.from({ length: 2500 }, (_, index) => `row ${index + 1}`).join('\n');
+  const result = tools.boundToolResult({ content: [{ type: 'text', text: many }], structuredContent: { output: 'small' } }, store.save);
+  const marker = /full output saved to (\S+)\. Read the rest with read_file on that path \(offset 2001 continues/u.exec(result.content[0].text);
+  assert.ok(marker, result.content[0].text.slice(-400));
+  const saved = marker[1];
+  assert.equal(result.structuredContent.output_path, saved);
+  assert.equal(await readFile(saved, 'utf8'), many, 'The whole text is saved.');
+  assert.ok(store.resolve(saved) && store.resolve(saved.replace(/\\/gu, '/')), 'Either slash style resolves.');
+  assert.equal(store.resolve(join(folder, 'tool-output', '..', 'tools.mjs')), undefined, 'Only saved outputs resolve.');
+  assert.equal(store.resolve('tool_0123456789abcdef.txt'), undefined, 'A relative name is a workspace path, not a saved output.');
+  const unsaved = tools.boundText(many, { save: () => ({ error: 'disk full' }) });
+  assert.match(unsaved.text, /could not be saved \(disk full\)[\s\S]*Narrow the request/u);
+  store.cleanup(Date.now() + tools.OUTPUT_RETENTION_MS + 1000);
+  assert.equal(existsSync(saved), false, 'Saved outputs expire after the retention period.');
+});
+
+test('a command streams its full output to a file kept only when the inline output was shortened', async () => {
+  const store = new tools.ToolOutputStore(join(folder, 'command-output'));
+  const node = JSON.stringify(process.execPath);
+  const longFile = store.newFile();
+  const long = await tools.startCommand({ command: `${node} -e "for (let i = 0; i < 5000; i++) console.log('line ' + i)"`, cwd: folder, timeoutSeconds: 30, outputCharacters: 4096, outputFile: longFile }).result;
+  assert.equal(long.output_truncated, true);
+  assert.equal(long.output_path, longFile);
+  assert.match(long.output, /is saved to [\s\S]*line 4999/u);
+  assert.equal((await readFile(longFile, 'utf8')).split(/\r?\n/u).filter(Boolean).length, 5000);
+  const shortFile = store.newFile();
+  const short = await tools.startCommand({ command: `${node} -e "console.log('ok')"`, cwd: folder, timeoutSeconds: 30, outputCharacters: 4096, outputFile: shortFile }).result;
+  assert.deepEqual([short.output.trim(), short.output_path, existsSync(shortFile)], ['ok', undefined, false]);
+  const handle = tools.startCommand({ command: `${node} -e "setTimeout(() => {}, 30000)"`, cwd: folder, timeoutSeconds: 0, outputCharacters: 4096 });
+  assert.equal(handle.isDone(), false, 'A timeout of 0 leaves the command running until it is stopped.');
+  handle.stop('timeout');
+  const stopped = await handle.result;
+  assert.deepEqual([stopped.timed_out, stopped.cancelled], [true, false]);
+});
+
 test('read_file pages with offset and limit, hints the next offset and shows the tail past the end', () => {
   const text = Array.from({ length: 30 }, (_, index) => `row ${index + 1}`).join('\r\n') + '\r\n';
   const first = tools.pageText(text, { offset: 1, limit: 10 });
@@ -151,11 +189,27 @@ test('a staged new file is created on apply and removed again by undo', async ()
   const { id } = await service.stageCreate({ path: 'docs/new.md', text: '# New\nbody\n', explanation: 'Add docs' });
   assert.equal(backend.files.has('docs/new.md'), false, 'Staging writes nothing.');
   await assert.rejects(service.stageCreate({ path: 'a.txt', text: 'x\n', explanation: 'Overwrite' }), /already exists/u);
-  await assert.rejects(service.stageCreate({ path: 'empty.txt', text: '', explanation: 'Empty' }), /empty new file/u);
   await service.apply(id);
   assert.equal(backend.files.get('docs/new.md')?.text, '# New\nbody\n');
   await service.undo();
   assert.equal(backend.files.has('docs/new.md'), false);
+});
+
+test('empty files can be created and deleted through review with one empty hunk', async () => {
+  const backend = new MemoryBackend({ 'blank.txt': '' });
+  const service = new EditService({ backend, onChange() {} });
+  const created = await service.stageCreate({ path: 'pkg/__init__.py', text: '', explanation: 'Mark the package' });
+  const [hunk] = service.state.proposals.find(proposal => proposal.id === created.id).hunks;
+  assert.deepEqual([hunk.oldLines, hunk.newLines, hunk.status], [0, 0, 'pending']);
+  await service.applyHunk({ id: created.id, hunkId: hunk.id });
+  assert.equal(backend.files.get('pkg/__init__.py')?.text, '');
+  assert.equal(service.state.proposals.find(proposal => proposal.id === created.id).status, 'applied');
+  const read = await service.read('blank.txt');
+  const deleted = await service.stageDelete({ path: 'blank.txt', revision: read.revision, explanation: 'Unused' });
+  await service.apply(deleted.id);
+  assert.equal(backend.files.has('blank.txt'), false);
+  await service.undo();
+  assert.equal(backend.files.get('blank.txt')?.text, '', 'Undo recreates the empty file.');
 });
 
 test('a staged deletion removes the file on apply and undo restores its bytes', async () => {

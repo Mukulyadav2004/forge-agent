@@ -4,9 +4,10 @@
  * Copyright 2026 Cline Bot Inc. Licensed under Apache-2.0; see licenses/Cline-Apache-2.0.txt.
  */
 import type { MouseEvent, RefObject } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ComposerSelection, HostMessage } from '../../../shared/messages.js';
 import { post } from '../../vscode.js';
-import { HistoryIcon, LinkIcon, PlusIcon } from '../common/Icons.js';
+import { ChevronDownIcon, HistoryIcon, LinkIcon, PlusIcon } from '../common/Icons.js';
 import { ReviewPanel } from '../review/ReviewPanel.js';
 import { ActionButtons } from './ActionButtons.js';
 import { ChatTextArea } from './ChatTextArea.js';
@@ -30,6 +31,41 @@ function openLink(event: MouseEvent<HTMLElement>) {
   catch { return; }
 }
 
+/**
+ * Cline's bottom pinning: while the reader is at the bottom, content that grows later (streamed Markdown, diagrams,
+ * the review panel) keeps the view pinned; once they scroll up, a button brings them back.
+ */
+function useStickToBottom(scrollerRef: RefObject<HTMLElement>) {
+  const [atBottom, setAtBottom] = useState(true);
+  const stick = useRef(true);
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    const onScroll = () => {
+      if (!scroller.clientHeight) return;
+      stick.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 48;
+      setAtBottom(stick.current);
+    };
+    const observer = new ResizeObserver(() => {
+      if (!scroller.clientHeight) return;
+      if (stick.current) scroller.scrollTop = scroller.scrollHeight;
+      else onScroll();
+    });
+    for (const child of Array.from(scroller.children)) observer.observe(child);
+    observer.observe(scroller);
+    scroller.addEventListener('scroll', onScroll, { passive: true });
+    return () => { observer.disconnect(); scroller.removeEventListener('scroll', onScroll); };
+  }, [scrollerRef]);
+  const scrollToBottom = () => {
+    const scroller = scrollerRef.current;
+    if (!scroller) return;
+    stick.current = true;
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: reduced ? 'auto' : 'smooth' });
+  };
+  return { atBottom, scrollToBottom };
+}
+
 export function ChatView(props: {
   hidden: boolean;
   state: HostState;
@@ -43,6 +79,8 @@ export function ChatView(props: {
   inputRef: RefObject<HTMLTextAreaElement>;
 }) {
   const { state } = props;
+  const scrollerRef = useRef<HTMLElement>(null);
+  const { atBottom, scrollToBottom } = useStickToBottom(scrollerRef);
   const stopping = state.busy || state.approval;
   const firstRequest = state.messages.find(message => message.role === 'user')?.text;
   const activeChat = state.chats.find(chat => chat.active);
@@ -59,13 +97,18 @@ export function ChatView(props: {
             <button aria-label="Copy MCP connection" className="icon-button" id="copy-mcp-button" onClick={() => post({ type: 'copy_mcp_connection' })} title="Copy MCP connection" type="button"><LinkIcon /></button>
           </div>
         </div>
-        {firstRequest !== undefined && <TaskHeader context={state.context} onNewTask={() => post({ type: 'new_chat' })} text={firstRequest} />}
+        {firstRequest !== undefined && <TaskHeader context={state.context} usage={state.usage} onNewTask={() => post({ type: 'new_chat' })} text={firstRequest} />}
       </header>
-      <main aria-label="Task workspace" id="task-content" onClick={openLink}>
-        <MessagesArea activity={state.activity} complete={!state.busy} history={state.history} messages={state.messages} />
+      <main aria-label="Task workspace" id="task-content" onClick={openLink} ref={scrollerRef}>
+        <MessagesArea activity={state.activity} busy={state.busy} complete={!state.busy} history={state.history} messages={state.messages} />
         <ReviewPanel disabled={state.busy || state.approval} lockNote={lockNote} onCommand={command => post({ type: 'review', command })} state={state.review} />
+        {!atBottom && (
+          <div className="scroll-to-bottom-anchor">
+            <button aria-label="Scroll to bottom" className="scroll-to-bottom" onClick={scrollToBottom} title="Scroll to bottom" type="button"><ChevronDownIcon /></button>
+          </div>
+        )}
       </main>
-      <ActionButtons approval={state.approval} busy={state.busy} />
+      <ActionButtons approval={state.approval} approvalTools={state.approvalTools} busy={state.busy} />
       {state.questions.length > 0 && <OptionsButtons key={JSON.stringify(state.questions)} questions={state.questions} />}
       <ChatTextArea
         attached={props.attached}

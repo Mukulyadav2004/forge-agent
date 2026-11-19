@@ -8,7 +8,7 @@ import type { ReactNode } from 'react';
 import type { ActivityEntry, TodoItem } from '../../../shared/messages.js';
 import { plural, size, where } from '../../lib/format.js';
 import { post } from '../../vscode.js';
-import { AlertIcon, CheckIcon, CircleDotIcon, CircleIcon, FileDiffIcon, FileTextIcon, FoldIcon, FolderIcon, ListTodoIcon, LoaderIcon, SearchIcon, TerminalIcon, XIcon } from '../common/Icons.js';
+import { AlertIcon, CheckIcon, CircleDotIcon, CircleIcon, FileDiffIcon, FileTextIcon, FoldIcon, FolderIcon, GlobeIcon, ListTodoIcon, LoaderIcon, SearchIcon, TerminalIcon, XIcon } from '../common/Icons.js';
 
 export type ToolEntry = Exclude<ActivityEntry, { kind: 'request' }>;
 
@@ -18,8 +18,10 @@ function SourceLink({ path, line, label }: { path: string; line: number; label: 
 
 const ICONS: Record<ToolEntry['kind'], (props: { className?: string }) => ReactNode> = {
   search: SearchIcon, open: FileTextIcon, propose: FileDiffIcon, list: FolderIcon, command: TerminalIcon,
-  context: FileTextIcon, refused: AlertIcon, compaction: FoldIcon, todo: ListTodoIcon,
+  context: FileTextIcon, refused: AlertIcon, compaction: FoldIcon, todo: ListTodoIcon, fetch: GlobeIcon,
 };
+
+const bytes = (count: number) => count < 1024 ? `${count} B` : count < 1024 * 1024 ? `${(count / 1024).toFixed(1)} KB` : `${(count / 1024 / 1024).toFixed(1)} MB`;
 
 /**
  * One completed tool call as one line of text, like Cline's tool group items. The row is inline text so it reads
@@ -62,6 +64,20 @@ export function ActivityRow({ entry, added, nested, card, children }: { entry: T
       main = [`context ${size(entry.contextTokens)} tokens reached the ${size(entry.thresholdTokens)}-token threshold${entry.afterTokens !== undefined ? `; TrueForge summarised it to ${size(entry.afterTokens)} tokens` : entry.done ? '; TrueForge summarised it' : '…'}${entry.durationMs !== undefined ? ` in ${(entry.durationMs / 1000).toFixed(1)} s` : ''}`];
       notes.push('Earlier messages and file contents were replaced by a summary; the agent re-reads what it still needs.');
       break;
+    case 'fetch': {
+      kind = entry.error !== undefined ? 'Fetch failed' : 'Fetched';
+      const url = entry.url.length > 200 ? `${entry.url.slice(0, 200)}…` : entry.url;
+      main = [<span className="fetch-url" key="url" title={entry.url}>{url}</span>];
+      if (entry.error !== undefined) {
+        failed = true;
+        notes.push(entry.error);
+      } else {
+        const type = entry.contentType?.split(';', 1)[0]?.trim();
+        main.push(`: ${[entry.status !== undefined ? `HTTP ${entry.status}` : '', entry.bytes !== undefined ? bytes(entry.bytes) : '', type ?? ''].filter(Boolean).join(' · ')} in ${(entry.durationMs / 1000).toFixed(1)} s`);
+        if (entry.truncated) notes.push('The page was longer than a tool result may be, so the agent saw a shortened copy.');
+      }
+      break;
+    }
     case 'command':
     case 'todo':
       return null;

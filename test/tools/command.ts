@@ -21,8 +21,12 @@ export async function checkCommand(options: { client: Client; frame: Frame }): P
   assert.equal((await run({ command: 'pwd', cwd: '..' })).result.isError, true, 'cwd must stay inside the workspace.');
   assert.equal((await run({ command: 'pwd', cwd: 'missing-folder' })).result.isError, true);
   const started = Date.now();
-  const slow = (await run({ command: 'sleep 30', timeout_seconds: 1 })).data;
-  assert.ok(slow?.timed_out && Date.now() - started < 10_000, 'The timeout stops the command and its process group.');
+  // opencode: a foreground command still running at its timeout moves to the background instead of being killed.
+  const slow = await options.client.callTool({ name: 'run_command', arguments: { command: 'sleep 30', timeout_seconds: 1 } });
+  const moved = z.object({ job_id: z.string(), status: z.literal('running'), moved_to_background: z.literal(true) }).parse(slow.structuredContent);
+  assert.ok(Date.now() - started < 10_000, 'The call returns at its timeout.');
+  const stopped = await options.client.callTool({ name: 'command_output', arguments: { job_id: moved.job_id, stop: true } });
+  assert.equal((stopped.structuredContent as { status?: string } | undefined)?.status, 'finished', 'command_output stops the moved command and its process group.');
   const long = (await run({ command: "head -c 120000 /dev/zero | tr '\\\\0' 'x'; echo; echo LAST-LINE" })).data;
   assert.ok(long?.output_truncated, 'Long output is shortened.');
   assert.ok(long.output.length < 52_000 && long.total_output_characters > 120_000);
@@ -34,7 +38,7 @@ export async function checkCommand(options: { client: Client; frame: Frame }): P
   const row = options.frame.locator('#messages .activity-command').filter({ hasText: 'echo checked' });
   await row.waitFor();
   assert.match(await row.innerText(), /^Ran\s+echo checked; echo warn >&2; exit 3\s+exit 3 after [\d.]+ s \(\+\d+ chars\)[\s\S]*Check the exit code/u);
-  assert.ok((await options.frame.locator('#messages .activity-command').filter({ hasText: 'sleep 30' }).innerText()).includes('timed out'));
+  assert.ok((await options.frame.locator('#messages .activity-command').filter({ hasText: 'sleep 30' }).innerText()).includes('cancelled'));
   assert.ok(await options.frame.locator('#messages .activity-card.activity-command').count() >= 3, 'Each command that ran is its own row in the conversation.');
   await options.frame.locator('#messages .activity-refused').filter({ hasText: 'run_command: cwd must stay inside the workspace.' }).waitFor();
 }

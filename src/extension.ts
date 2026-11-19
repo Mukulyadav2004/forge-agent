@@ -28,7 +28,7 @@ export function activate(context: vscode.ExtensionContext): void {
   ForgeSession.observe = event => toolLog?.recordSession(event);
   const editChanges = new vscode.EventEmitter<void>();
   const edits = new EditService({ backend, onChange: () => editChanges.fire() });
-  const bridge = new EditorBridge({ files, edits, log: toolLog });
+  const bridge = new EditorBridge({ files, edits, log: toolLog, outputDirectory: vscode.workspace.getWorkspaceFolder(context.globalStorageUri) ? undefined : vscode.Uri.joinPath(context.globalStorageUri, 'tool-output').fsPath });
   const bridgeReady = bridge.start();
   void bridgeReady.catch((error: unknown) => vscode.window.showErrorMessage(`Forge MCP: ${error instanceof Error ? error.message : "Start failed"}`));
   // Saved chats belong to the workspace, like OpenCode's per-project sessions; with no folder open they share one global list.

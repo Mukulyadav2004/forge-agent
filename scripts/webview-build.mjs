@@ -5,7 +5,12 @@ import { dirname, join } from 'node:path';
 /** esbuild options for the React sidebar webview. */
 export const webviewOptions = {
   entryPoints: ['src/webview/main.tsx'],
-  outfile: 'out-webview/webview/main.js',
+  outdir: 'out-webview/webview',
+  entryNames: '[name]',
+  // Mermaid is loaded with import() only when a reply contains a diagram, so it lives in its own chunk.
+  // The chunks are served from the webview's own origin, which the CSP's script-src already allows.
+  splitting: true,
+  chunkNames: 'chunks/[name]-[hash]',
   bundle: true,
   platform: 'browser',
   format: 'esm',

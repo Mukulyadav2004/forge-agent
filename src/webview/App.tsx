@@ -84,6 +84,9 @@ export function App() {
     if (!text) return;
     setSubmitting(true);
     awaitingAck.current = true;
+    // Like Cline, sending re-engages following even if the reader had scrolled up.
+    const scroller = document.getElementById('task-content');
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
     post({ type: 'send_message', text, ...(attached.length ? { selections: attached } : {}) });
   }, [draft, attached]);
   const onDone = useCallback(() => setView('chat'), []);
