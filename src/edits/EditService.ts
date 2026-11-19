@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { ProposalView, ReviewState } from './review';
 import { buildLineChanges, composeLineChanges } from './lineChanges';
+import { replaceMatched } from './match';
 import type { ReviewPart } from './lineChanges';
 
 export const MAX_EDIT_CHARACTERS = 500_000;
+export { missHint, normalizeForMatch, replaceMatched } from './match';
 
 export interface FileSnapshot {
   path: string;
@@ -185,17 +187,16 @@ export class EditService {
       }
       text = replaceLines({ text: base, eol: actual.eol, start: start + shift, endExclusive: endExclusive + shift, insert: text });
     } else if (options.oldText !== undefined) {
-      // Adapted from cline/cline sdk/packages/core/src/extensions/tools/executors/editor.ts (replaceInFile)
+      // Error wording adapted from cline/cline sdk/packages/core/src/extensions/tools/executors/editor.ts (replaceInFile)
       // at 7a7878cb52fc33967d8b464b3e3d899beac42d4d; Copyright 2026 Cline Bot Inc., Apache-2.0.
-      // Applied to the in-memory proposal text instead of writing the file.
-      const oldText = options.oldText.replace(/\r\n|\r|\n/g, actual.eol);
-      const occurrences = oldText ? base.split(oldText).length - 1 : 0;
-      if (occurrences !== 1) {
-        throw new Error(occurrences ? `No change staged: old_text matches ${occurrences} places in ${options.path}. Include more surrounding lines so it matches exactly once.`
-          : `No change staged: old_text was not found in ${options.path}${pending ? ' including your pending changes' : ''}. Copy the exact current text, including indentation.`);
+      // Matching is opencode's (src/edits/match.ts, MIT): exact, then typographic quote/dash/space variants, then line by
+      // line ignoring trailing whitespace; it must still match exactly once. Applied to the in-memory proposal, never to disk.
+      const matched = replaceMatched({ source: base, oldText: options.oldText, newText: text });
+      if (!matched.ok) {
+        throw new Error(matched.count ? `No change staged: old_text matches ${matched.count} places in ${options.path}. Include more surrounding lines so it matches exactly once.`
+          : `No change staged: old_text was not found in ${options.path}${pending ? ' including your pending changes' : ''}. Copy the exact current text, including indentation.${matched.hint ? `\n${matched.hint}` : ''}`);
       }
-      const replacement = text;
-      text = base.replace(oldText, () => replacement); // A replacer keeps "$" sequences in code literal.
+      text = matched.text;
     }
     if (text.length > MAX_EDIT_CHARACTERS || text.includes('\0') || options.text.startsWith('\uFEFF') || new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(text, 'utf8')) !== text) {
       throw new Error('Proposals must contain valid UTF-8 text within the file limit, without NUL characters or a leading BOM. Encoding metadata is preserved automatically.');

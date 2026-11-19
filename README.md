@@ -74,6 +74,6 @@ pnpm run eval:session --last   # what the agent did in the last session, and any
 
 ## Credits and licence
 
-Built from scratch for the TrueFoundry Forge-a-thon; it is not a fork. A few editor pieces (the diff preview, diff rows, sidebar layout, ripgrep search handling and the `old_text`/`insert_line` edit rules) are adapted from [Cline](https://github.com/cline/cline) at commit `7a7878cb52fc33967d8b464b3e3d899beac42d4d`, under Apache-2.0. Cline's agent loop and provider code are not used. Details and attribution are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the [guide](docs/GUIDE.md#starting-point-upstream-source-and-licence).
+Built from scratch for the TrueFoundry Forge-a-thon; it is not a fork. A few editor pieces (the diff preview, diff rows, sidebar layout, ripgrep search handling and the `old_text`/`insert_line` edit rules) are adapted from [Cline](https://github.com/cline/cline) at commit `7a7878cb52fc33967d8b464b3e3d899beac42d4d`, under Apache-2.0. The tolerant `old_text` matching in `src/edits/match.ts` is ported from [opencode](https://github.com/anomalyco/opencode) (MIT). Cline's agent loop and provider code are not used. Details and attribution are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the [guide](docs/GUIDE.md#starting-point-upstream-source-and-licence).
 
 Licensed under [Apache-2.0](LICENSE).

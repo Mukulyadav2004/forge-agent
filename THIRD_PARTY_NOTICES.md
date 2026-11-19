@@ -53,6 +53,13 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - Taken, reworded for Forge's tools: gather context including how tests run; plan with the first tool calls; batch independent calls; use only libraries confirmed in use; complete code without placeholders; state assumptions and limitations; validate by running; verify edits before finishing; do not announce a tool without calling it; answer simple questions directly.
 - Not taken: "don't ask for permission" (Forge proposes each command for user approval and forbids system-wide installs), absolute paths (Forge tools are workspace-relative), plan/act modes and Cline's loop rules (TrueForge runs the loop).
 
+## opencode old_text matching
+
+- Upstream: https://github.com/anomalyco/opencode; reference checkout at commit `3aaac7731360a7be32cc69b65c95add4080f04a9`.
+- Copyright: 2025 opencode. License: MIT; the original licence and copyright notice are retained in `licenses/opencode-MIT.txt`.
+- Ported in: `src/edits/match.ts` from `packages/core/src/tool/plugin/edit.ts` (exact, typographic-variant and per-line trailing-whitespace matching; the closest-lines hint on a miss). Ported by the team on branch `context-pi-opencode-alignment`; brought to `main` unchanged.
+- Used by: the `old_text` path of `EditService.stageEdit`, which still requires exactly one match and applies it to the in-memory proposal; nothing is written until the user approves or applies it.
+
 ## jsdiff dependency
 
 - Package: `diff@8.0.2`, https://github.com/kpdecker/jsdiff.

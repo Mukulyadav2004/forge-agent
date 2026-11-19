@@ -403,3 +403,29 @@ test('save on approve: each approved edit is its own guarded batch, other reads 
   assert.equal(service.state.requestSaved, undefined);
   await assert.rejects(service.undoRequest(), /Nothing saved in this request/u);
 });
+
+// Matcher tests from the team's opencode port (src/edits/match.ts, MIT; see THIRD_PARTY_NOTICES.md).
+test('old_text matching tries exact, then typographic variants, then trailing whitespace', async () => {
+  const { replaceMatched } = await import('../../out/edits/EditService.js');
+  assert.deepEqual(replaceMatched({ source: 'a = 1\nb = 2\n', oldText: 'b = 2', newText: 'b = 3' }), { ok: true, text: 'a = 1\nb = 3\n', count: 1, tier: 'exact' });
+  const quoted = replaceMatched({ source: 'say(“hello”)\n', oldText: 'say("hello")', newText: 'say("bye")' });
+  assert.equal(quoted.ok && quoted.tier, 'normalized');
+  assert.equal(quoted.ok && quoted.text, 'say("bye")\n');
+  const trailing = replaceMatched({ source: 'if (x) {   \n  run();\n}\n', oldText: 'if (x) {\n  run();', newText: 'if (y) {\n  run();' });
+  assert.equal(trailing.ok && trailing.tier, 'line-trim');
+  assert.equal(trailing.ok && trailing.text, 'if (y) {\n  run();\n}\n');
+  const ambiguous = replaceMatched({ source: 'let x = 1;\nuse(x);\nuse(x);\n', oldText: 'use(x);', newText: 'use(y);' });
+  assert.deepEqual([ambiguous.ok, ambiguous.count], [false, 2], 'More than one match is still refused.');
+});
+
+test('a staged old_text edit tolerates trailing spaces, keeps CRLF, and a miss returns the closest numbered lines', async () => {
+  const { backend, service } = setup({ 'w.py': 'def alpha():   \r\n    return 1\r\n\r\ndef beta():\r\n    return "$1"\r\n' });
+  const read = await service.read('w.py');
+  const id = await service.stageEdit({ path: 'w.py', revision: read.revision, oldText: 'def alpha():\n    return 1', text: 'def alpha():\n    return 2', explanation: 'Trailing spaces differ' });
+  await service.apply(id.id);
+  assert.equal(backend.get('w.py').text, 'def alpha():\r\n    return 2\r\n\r\ndef beta():\r\n    return "$1"\r\n', 'The match ignores trailing spaces and the file keeps CRLF and literal "$1".');
+  const again = await service.read('w.py');
+  await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: 'def beta():\n    return "$2"', text: 'def beta():\n    return 3', explanation: 'Wrong old text' }),
+    /old_text was not found in w\.py\. Copy the exact current text, including indentation\.\nThe closest lines in the file:\n4: def beta\(\):/u);
+  await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: 'def gone():\n    pass', text: 'def alpha():\n    return 2\n', explanation: 'Already applied' }), /may already be applied/u);
+});
