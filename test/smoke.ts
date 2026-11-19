@@ -140,9 +140,24 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const client = new Client({ name: "forge-smoke", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(connection.url), { requestInit: { headers: { Authorization: connection.headers.Authorization } } }));
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'run_command', 'search_code']);
+  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'run_command', 'search_code', 'write_file']);
   await checkSearch({ client, extensionUri: extension.extensionUri });
   await checkCommand({ client, frame: restoredFrame });
+  // write_file through the real editor and MCP: staging writes nothing, Apply creates the file and its folder, Undo removes it.
+  const workspaceRoot = vscode.workspace.workspaceFolders?.[0];
+  assert.ok(workspaceRoot);
+  const createdUri = vscode.Uri.joinPath(workspaceRoot.uri, 'new-folder', 'created.txt');
+  const created = await client.callTool({ name: 'write_file', arguments: { path: 'new-folder/created.txt', content: 'made by write_file\n', explanation: 'Smoke check of file creation' } });
+  assert.equal(created.isError, undefined, JSON.stringify(created.content));
+  await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(createdUri)), 'Staging a new file writes nothing.');
+  assert.equal((await client.callTool({ name: 'write_file', arguments: { path: 'example.txt', content: 'x\n', explanation: 'Overwrite' } })).isError, true, 'write_file never overwrites an existing file.');
+  assert.equal((await client.callTool({ name: 'write_file', arguments: { path: '.env', content: 'x\n', explanation: 'Secret' } })).isError, true, 'Secret paths stay unavailable.');
+  assert.equal((await client.callTool({ name: 'write_file', arguments: { path: '../outside.txt', content: 'x\n', explanation: 'Escape' } })).isError, true, 'Paths outside the workspace are refused.');
+  await vscode.commands.executeCommand('forgeAgent.applyAll');
+  assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(createdUri)), 'made by write_file\n', 'Apply creates the file.');
+  await vscode.commands.executeCommand('forgeAgent.undo');
+  await assert.rejects(Promise.resolve(vscode.workspace.fs.stat(createdUri)), 'Undo removes the created file.');
+  await vscode.workspace.fs.delete(vscode.Uri.joinPath(workspaceRoot.uri, 'new-folder'), { recursive: true });
   const read = await client.callTool({ name: "read_file", arguments: { path: "example.txt" } });
   assert.equal(read.isError, undefined);
   assert.ok(JSON.stringify(read).includes("original text"));

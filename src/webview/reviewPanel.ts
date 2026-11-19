@@ -37,7 +37,7 @@ export function renderReviewPanel(options: { container: HTMLElement; state: Revi
   for (const proposal of [...active, ...state.proposals.filter(item => !active.includes(item))]) {
     const row = document.createElement('article');
     row.className = 'proposal-row'; row.dataset.proposalId = proposal.id;
-    const name = document.createElement('h3'); name.textContent = proposal.path;
+    const name = document.createElement('h3'); name.textContent = proposal.change === 'create' ? `${proposal.path} (new file)` : proposal.path;
     const status = document.createElement('span'); status.className = 'proposal-status'; status.textContent = proposal.status;
     if (proposal.status === 'superseded') {
       row.classList.add('superseded');

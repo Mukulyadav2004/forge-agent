@@ -13,6 +13,9 @@ import { describeApproval, StreamedToolCalls } from '../agent/approvalText';
 import type { PendingToolCall } from '../agent/approvalText';
 
 /** One sidebar chat. The live fields on the provider always point at the active chat. */
+/** Tools whose approval is a review of a staged change (save on approve). */
+const isEditTool = (name: string | undefined) => name === 'propose_edit' || name === 'write_file';
+
 interface HeldChat {
   id: string;
   title: string;
@@ -77,7 +80,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
       projectOverview: () => Promise<string>;
-      prepareEdit: (argumentsJson: string) => Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }>;
+      prepareEdit: (name: 'propose_edit' | 'write_file', argumentsJson: string) => Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }>;
       settleEdits: (allow: boolean) => Promise<void>;
       /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
       beginRequest: (scope?: string) => void;
@@ -413,8 +416,8 @@ ${selectedText}`;
   private async prepareApprovals(chat: HeldChat): Promise<void> {
     for (const item of chat.approvals) {
       const call = this.approvalCalls.get(item.toolCallId);
-      if (call?.name !== 'propose_edit' || this.presetDecisions.has(item.toolCallId)) continue;
-      const prepared = await this.actions.prepareEdit(call.arguments);
+      if ((call?.name !== 'propose_edit' && call?.name !== 'write_file') || this.presetDecisions.has(item.toolCallId)) continue;
+      const prepared = await this.actions.prepareEdit(call.name, call.arguments);
       if (prepared.status === 'stage') this.presetDecisions.set(item.toolCallId, { status: 'allow' });
       else if (prepared.status === 'invalid') this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: `The editor could not build this edit, so it was not shown to the user: ${prepared.message}` });
       else {
@@ -428,7 +431,7 @@ ${selectedText}`;
   private async decide(chat: HeldChat, allow: boolean): Promise<void> {
     // Taken at once, so a second click cannot send the same decision twice; busy keeps review and the buttons still while saving.
     const items = chat.approvals.splice(0, chat.approvals.length);
-    const reviewing = items.some(item => this.approvalCalls.get(item.toolCallId)?.name === 'propose_edit' && !this.presetDecisions.get(item.toolCallId));
+    const reviewing = items.some(item => isEditTool(this.approvalCalls.get(item.toolCallId)?.name) && !this.presetDecisions.get(item.toolCallId));
     if (reviewing) {
       chat.busy = true;
       chat.status = allow ? 'Saving the hunks you kept…' : 'Discarding the reviewed edits…';
@@ -441,7 +444,7 @@ ${selectedText}`;
   private queueDecision(chat: HeldChat, allow: boolean, items = chat.approvals.splice(0, chat.approvals.length)): void {
     const input: TrueForgeApi.UserToolApprovalInputEvent[] = items.map(item => {
       const preset = this.presetDecisions.get(item.toolCallId);
-      const edit = this.approvalCalls.get(item.toolCallId)?.name === 'propose_edit';
+      const edit = isEditTool(this.approvalCalls.get(item.toolCallId)?.name);
       this.presetDecisions.delete(item.toolCallId);
       this.approvalCalls.delete(item.toolCallId);
       return { ...item, approval: preset ?? (allow ? { status: 'allow' } : { status: 'deny', reason: edit ? 'The user reviewed the diff and declined this edit. Nothing was saved. Ask what they want instead, or propose a different change.' : 'Declined in VS Code' }) };
@@ -625,7 +628,7 @@ ${selectedText}`;
           if (call) this.approvalCalls.set(tool.id, call);
           chat.approvals.push({ type: "user.tool_approval", threadId: event.threadId, toolCallId: tool.id, approval: { status: "allow" } });
           // An edit's card waits until its diff is staged for review (prepareApprovals); Edit Selection never shows one.
-          if (call?.name !== 'propose_edit') chat.messages.push({ id: randomUUID(), role: "assistant", text: describeApproval(call) });
+          if (!isEditTool(call?.name)) chat.messages.push({ id: randomUUID(), role: "assistant", text: describeApproval(call) });
         }
       }
     }

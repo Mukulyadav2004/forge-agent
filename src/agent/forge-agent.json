@@ -11,7 +11,7 @@
   },
   "editorServer": {
     "preload": true,
-    "enableTools": ["read_file", "list_files", "search_code", "propose_edit", "run_command"],
-    "requireApprovalForTools": ["run_command", "propose_edit"]
+    "enableTools": ["read_file", "list_files", "search_code", "propose_edit", "write_file", "run_command"],
+    "requireApprovalForTools": ["run_command", "propose_edit", "write_file"]
   }
 }

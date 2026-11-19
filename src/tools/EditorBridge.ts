@@ -29,6 +29,15 @@ const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 
 const PROPOSE_SHAPE = { path: z.string(), base_revision: z.string(), new_text: z.string().max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') };
 const ProposeInputSchema = z.object(PROPOSE_SHAPE);
 type ProposeInput = z.infer<typeof ProposeInputSchema>;
+/** write_file arguments: a new file and its whole content. */
+const WRITE_SHAPE = {
+  path: z.string().describe('Workspace-relative path of the new file; folders are created as needed. It must not exist yet.'),
+  content: z.string().max(MAX_EDIT_CHARACTERS).describe('The complete text of the new file.'),
+  explanation: z.string().max(2000).describe('One short sentence telling the user why this file is needed.'),
+};
+const WriteInputSchema = z.object(WRITE_SHAPE);
+type WriteInput = z.infer<typeof WriteInputSchema>;
+function writeKey(input: WriteInput): string { return JSON.stringify(['write_file', input.path, input.content, input.explanation]); }
 /** Identifies one propose_edit call by its arguments, so the tool call after an approval finds the result the user already decided. */
 function editKey(input: ProposeInput): string {
   return JSON.stringify([input.path, input.base_revision, input.new_text, input.explanation, input.old_text ?? null, input.start_line ?? null, input.end_line ?? null, input.insert_line ?? null]);
@@ -145,22 +154,35 @@ export class EditorBridge implements vscode.Disposable {
    * user reviews it hunk by hunk before deciding. Edit Selection keeps the staged review ('stage'); a call that cannot
    * be staged is returned with its error ('invalid') so the agent can correct it without asking the user.
    */
-  async prepareEdit(argumentsJson: string): Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }> {
+  async prepareEdit(name: 'propose_edit' | 'write_file', argumentsJson: string): Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }> {
     if (this.editScope !== undefined) return { status: 'stage' };
-    let input: ProposeInput;
-    try { input = ProposeInputSchema.parse(JSON.parse(argumentsJson)); }
-    catch { return { status: 'invalid', message: 'The propose_edit arguments could not be read. Send the call again with valid arguments.' }; }
+    let parsed: unknown;
+    try { parsed = JSON.parse(argumentsJson); } catch { return { status: 'invalid', message: `The ${name} arguments could not be read. Send the call again with valid arguments.` }; }
     try {
-      const staged = await this.stageProposal(input);
-      this.awaitingReview.set(editKey(input), { path: input.path });
-      this.activityEvents.fire({ kind: 'propose', path: input.path, detail: `${staged.detail} · waiting for your review`, reason: input.explanation.slice(0, 300) });
-      await this.options.edits.preview(staged.id).catch(() => undefined);
+      let key: string, path: string, explanation: string, detail: string, id: string;
+      if (name === 'write_file') {
+        const input = WriteInputSchema.parse(parsed);
+        ({ id } = await this.stageWrite(input));
+        [key, path, explanation, detail] = [writeKey(input), input.path, input.explanation, 'new file'];
+      } else {
+        const input = ProposeInputSchema.parse(parsed);
+        const staged = await this.stageProposal(input);
+        [key, path, explanation, detail, id] = [editKey(input), input.path, input.explanation, staged.detail, staged.id];
+      }
+      this.awaitingReview.set(key, { path });
+      this.activityEvents.fire({ kind: 'propose', path, detail: `${detail} · waiting for your review`, reason: explanation.slice(0, 300) });
+      await this.options.edits.preview(id).catch(() => undefined);
       return { status: 'review' };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'The edit could not be prepared.';
-      this.activityEvents.fire({ kind: 'refused', tool: 'propose_edit', message });
+      const message = error instanceof z.ZodError ? `The ${name} arguments are invalid: ${error.issues.map(issue => `${issue.path.join('.')} ${issue.message}`).join('; ')}` : error instanceof Error ? error.message : 'The edit could not be prepared.';
+      this.activityEvents.fire({ kind: 'refused', tool: name, message });
       return { status: 'invalid', message };
     }
+  }
+  /** Checks and stages one new file; nothing is written. */
+  private async stageWrite(input: WriteInput): Promise<{ id: string }> {
+    if (this.editScope !== undefined) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not create files; mention any other change you think is needed in your reply instead.`);
+    return this.options.edits.stageCreate({ path: input.path, text: input.content, explanation: input.explanation });
   }
   /**
    * Save-on-approve, step 2: Approve saves every hunk the user did not reject (guarded apply, undoable); Deny rejects them.
@@ -350,6 +372,20 @@ export class EditorBridge implements vscode.Disposable {
       this.budgetUsed += listed.length;
       this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob, count: files.length });
       return { content: [{ type: 'text', text: `${listed}${found.length > 100 ? '\nMore files match; narrow the glob to see them.' : ''}\n${this.budgetNote()}` }] };
+    });
+    register('write_file', { description: 'Create a new file with its complete content, for example a new module or test file; folders are created as needed. The path must not exist: to change an existing file, read it and use propose_edit. The user reviews the new file like an edit; depending on a setting it is saved when they approve it, or staged for them to apply later, and the result says which.', inputSchema: WRITE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
+      const key = writeKey(input);
+      const reviewed = this.reviewed.get(key);
+      if (reviewed) {
+        this.reviewed.delete(key);
+        if (reviewed.error) throw new Error(reviewed.error);
+        this.activityEvents.fire({ kind: 'propose', path: input.path, detail: reviewed.saved ? 'new file saved after your review' : 'new file rejected in review, nothing saved', reason: input.explanation.slice(0, 300) });
+        return { content: [{ type: 'text', text: reviewed.message }], structuredContent: { status: reviewed.saved ? 'saved' : 'rejected', path: input.path, ...(reviewed.revision ? { base_revision: reviewed.revision } : {}), message: reviewed.message } };
+      }
+      const { id } = await this.stageWrite(input);
+      this.activityEvents.fire({ kind: 'propose', path: input.path, detail: 'new file', reason: input.explanation.slice(0, 300) });
+      const message = `Proposal ${id} stages the new file ${input.path}. No files changed. To create it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all.`;
+      return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path: input.path, message } };
     });
     register('propose_edit', { description: 'Propose an edit for the user to review. Depending on a setting, the user approves the diff and the accepted hunks are saved before this call returns, or the edit is staged for them to apply later; the result says which. Pass base_revision from read_file. Locate the change in exactly one way: (1) old_text, the current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored; differences only in typographic quotes, dashes or trailing spaces still match, and when nothing matches the error shows the closest numbered lines to copy from); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: PROPOSE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
       // An edit the user already reviewed in the approval card was settled before TrueForge called the tool: report that result.

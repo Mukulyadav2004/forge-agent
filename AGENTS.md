@@ -167,7 +167,7 @@ See docs/TASK-A.md and its recorded evidence; one pass is not a reliability rate
 
 Not built: search/symbol tools, @file/@symbol mentions, query-driven
 retrieval with selection reasons/token accounting, command execution,
-file create/delete/rename, automatic model fallback, scout subagents,
+file delete/rename (create exists: write_file), automatic model fallback, scout subagents,
 persistent conversation/undo history. Not verified end to end: Tasks B/C,
 live mid-generation cancellation, broad model compatibility and the final
 latest-version clean-clone run. Update status with evidence.

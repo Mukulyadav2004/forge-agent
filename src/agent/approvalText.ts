@@ -79,6 +79,14 @@ export function describeApproval(call: PendingToolCall | undefined, options: { s
     const reason = clip((text('reason') ?? '').trim(), 300) || 'none given';
     return `**Approve running a command?**\n\n${fence}sh\n${command}\n${fence}\n\n- Folder: \`${text('cwd') ?? '.'}\` (inside the workspace)\n- Stops after: ${number('timeout_seconds') ?? 60} s\n- Agent's reason: ${reason}\n\nIt runs with your permissions and can change files; Forge cannot undo what a command does. Deny it if you are unsure.`;
   }
+  if (call.name === 'write_file' && text('path') !== undefined) {
+    const content = text('content') ?? '';
+    const why = clip((text('explanation') ?? '').trim(), 300) || 'none given';
+    const preview = previewBlock({ added: content, label: 'New file content:' });
+    return options.saveOnApprove
+      ? `**Review this new file, then approve to create it**\n\n- File: \`${text('path')}\` (new, ${lineCount(content)} line(s))\n- Agent's reason: ${why}${preview}\n\n**Approve** creates the file so the agent can use it; **Deny** discards it. Nothing is written before you approve, and **Undo last apply** removes it again.`
+      : `**Approve staging a new file?**\n\n- File: \`${text('path')}\` (new, ${lineCount(content)} line(s))\n- Agent's reason: ${why}${preview}\n\nApproving only stages it for review. Nothing is written until you accept it.`;
+  }
   if (call.name !== 'propose_edit' || text('path') === undefined) return `**Approve \`${call.name}\`?**\n\nArguments: \`${clip(call.arguments, 300).replace(/`/gu, "'")}\``;
   const start = number('start_line'), end = number('end_line'), insert = number('insert_line'), oldText = text('old_text');
   const added = lineCount(text('new_text') ?? '');

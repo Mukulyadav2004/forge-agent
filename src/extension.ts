@@ -19,7 +19,9 @@ export function activate(context: vscode.ExtensionContext): void {
     resolvePath: async path => {
       const root = vscode.workspace.workspaceFolders?.[0];
       if (!root) throw new Error('Workspace unavailable.');
-      return relative(await realpath(root.uri.fsPath), (await files.resolve(path)).realPath).split(sep).join('/');
+      // locate applies the same containment and secret rules as resolve, and also names a new file write_file will create.
+      const located = await files.locate(path);
+      return located.kind === 'missing' ? located.relative : relative(await realpath(root.uri.fsPath), located.realPath).split(sep).join('/');
     },
     onFailure: () => { void vscode.window.showWarningMessage('Forge event logging is unavailable. Editor tools can continue; this run has incomplete measurement.'); },
   });
@@ -38,7 +40,7 @@ export function activate(context: vscode.ExtensionContext): void {
     openFile: options => bridge.openFile(options),
     architectureContext: () => bridge.architectureContext(),
     projectOverview: () => bridge.projectOverview(),
-    prepareEdit: argumentsJson => bridge.prepareEdit(argumentsJson),
+    prepareEdit: (name, argumentsJson) => bridge.prepareEdit(name, argumentsJson),
     settleEdits: allow => bridge.settleEdits(allow),
     beginRequest: scope => bridge.beginRequest(scope),
     edits,

@@ -63,7 +63,7 @@ pnpm run eval:session --last   # what the agent did in the last session, and any
 
 - Free model tiers have per-minute limits; a multi-file task can hit them, and the agent then waits or switches models.
 - Small models make mistakes, like escaping quotes in Python. The review step and the test loop are how you catch them.
-- No creating, deleting or renaming files yet. `run_command` is tested on macOS only.
+- The agent can create new files (`write_file`) but not delete or rename them. `run_command` is tested on macOS only.
 - The context budget counts characters, not tokens.
 
 ## More

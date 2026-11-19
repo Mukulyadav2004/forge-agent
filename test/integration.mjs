@@ -106,8 +106,8 @@ test('the agent definition file is what TrueForge receives', () => {
   assert.deepEqual(spec.mcpServers, [{ name: 'forge-editor-abc', ...definition.editorServer }]);
   assert.deepEqual(spec.model, { name: 'test/model', params: { reasoningEffort: 'low' } });
   assert.ok(spec.instructions.startsWith('You are Forge Agent'));
-  assert.deepEqual(definition.editorServer.requireApprovalForTools, ['run_command', 'propose_edit'], 'Commands and edits need approval: an edit is reviewed hunk by hunk and saved when approved.');
-  assert.deepEqual(agentSpec({ model: 'test/model', connector: 'c', approveEdits: false }).mcpServers[0].requireApprovalForTools, ['run_command'], 'With forgeAgent.saveOnApprove off, propose_edit only stages a diff for Review changes.');
+  assert.deepEqual(definition.editorServer.requireApprovalForTools, ['run_command', 'propose_edit', 'write_file'], 'Commands and edits need approval: an edit or new file is reviewed and saved when approved.');
+  assert.deepEqual(agentSpec({ model: 'test/model', connector: 'c', approveEdits: false }).mcpServers[0].requireApprovalForTools, ['run_command'], 'With forgeAgent.saveOnApprove off, propose_edit and write_file only stage a diff for Review changes.');
   assert.deepEqual(definition.config.contextManagement.compaction, { enabled: true, trigger: { type: 'input_tokens', value: 100000 } }, 'Compaction is for long conversations: below 100k tokens a coding task keeps every file it read. TrueForge\'s default (80% of a 1M window) would rarely fire.');
   assert.deepEqual(agentSpec({ model: 'test/model' }).mcpServers, []);
 });
@@ -160,7 +160,7 @@ test('a failed turn can switch the session model with the full spec and retry wi
     const patch = requests.find(request => request.method === 'PATCH');
     assert.equal(patch.url, '/api/v1/sessions/s1');
     assert.equal(patch.body.agent.spec.model.name, 'backup/model');
-    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['run_command', 'propose_edit'], 'PATCH replaces the spec, so approvals must be resent.');
+    assert.deepEqual(patch.body.agent.spec.mcp_servers[0].require_approval_for_tools, ['run_command', 'propose_edit', 'write_file'], 'PATCH replaces the spec, so approvals must be resent.');
     assert.equal(patch.body.agent.spec.config.dynamic_sub_agents.enabled, false);
     fail = false;
     await session.send([{ type: 'user.message', content: 'hello' }], { retry: true });
@@ -403,4 +403,13 @@ test('an edit approval card asks for review and says Approve saves the kept hunk
   assert.match(card, /- a = 1\n\+ a = 2/u, 'The diff is in the card.');
   assert.match(card, /\*\*Approve\*\* saves every hunk you did not reject[\s\S]*\*\*Deny\*\* discards the edit[\s\S]*Undo last apply/u);
   assert.match(describeApproval(call), /Approving only stages a diff for review/u, 'Without save on approve the old wording stays.');
+});
+
+test('a new-file approval card shows the content and says Approve creates it', () => {
+  const call = { name: 'write_file', arguments: JSON.stringify({ path: 'tests/test_config.py', content: 'def test_config():\n    assert True\n', explanation: 'Cover flask config' }) };
+  const card = describeApproval(call, { saveOnApprove: true });
+  assert.match(card, /^\*\*Review this new file, then approve to create it\*\*/u);
+  assert.match(card, /`tests\/test_config\.py` \(new, 2 line\(s\)\)/u);
+  assert.match(card, /\+ def test_config\(\):\n\+     assert True/u);
+  assert.match(describeApproval(call), /Approving only stages it for review/u);
 });

@@ -19,9 +19,9 @@ export function classifyModelError(message: string): { transient: boolean; summa
 
 /** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
 export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean }): TrueForgeApi.AgentSpec {
-  // forgeAgent.saveOnApprove (default on): TrueForge pauses on every propose_edit so the user reviews the diff before it is saved.
+  // forgeAgent.saveOnApprove (default on): TrueForge pauses on every propose_edit and write_file so the user reviews the diff before it is saved.
   // Off: propose_edit only stages a diff, and the user applies it later in Review changes.
-  const editorServer = { ...definition.editorServer, requireApprovalForTools: definition.editorServer.requireApprovalForTools.filter(tool => options.approveEdits !== false || tool !== 'propose_edit') };
+  const editorServer = { ...definition.editorServer, requireApprovalForTools: definition.editorServer.requireApprovalForTools.filter(tool => options.approveEdits !== false || (tool !== 'propose_edit' && tool !== 'write_file')) };
   return {
     model: { name: options.model, ...(options.reasoningEffort ? { params: { reasoningEffort: options.reasoningEffort } } : {}) },
     instructions: agentInstructions,
