@@ -525,7 +525,7 @@ test('after a save, only errors that are new are reported, even when lines moved
   ];
   assert.deepEqual(newProblems(before, after).map(problem => problem.line), [1118, 30]);
   assert.equal(describeProblems('src/flask/cli.py', newProblems(before, after)),
-    'New problems in src/flask/cli.py after saving (VS Code diagnostics):\n30: [Pylance] "itemgetter" is not defined\n1118: [Pylance] Expected expression\nFix these first; a test run would fail on them too.');
+    'Problems in src/flask/cli.py that your edits in this request introduced and VS Code still reports:\n30: [Pylance] "itemgetter" is not defined\n1118: [Pylance] Expected expression\nFix these first; a test run would fail on them too.');
   assert.equal(describeProblems('a.py', []), '', 'No new errors, nothing added.');
   const many = Array.from({ length: 14 }, (_, index) => ({ line: index + 1, message: `problem ${index}\n  detail` }));
   const text = describeProblems('a.py', newProblems([], many));

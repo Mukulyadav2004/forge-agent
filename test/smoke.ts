@@ -2,6 +2,7 @@ import { checkEditorTransactions } from './edits/realEditor';
 import { checkReviewFeedback } from './sidebar/reviewFeedback';
 import { checkSearch } from './tools/search';
 import { checkCommand } from './tools/command';
+import { checkDiskTruth } from './tools/diskTruth';
 import { checkToolLog } from './observability/editor';
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -196,6 +197,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   await checkEditorTransactions({ client, frame: restoredFrame, extensionUri: extension.extensionUri });
   await checkReviewFeedback({ client, frame: restoredFrame, extensionUri: extension.extensionUri });
   await checkToolLog({ client, extensionUri: extension.extensionUri, authorization: connection.headers.Authorization });
+  await checkDiskTruth({ client, frame: restoredFrame });
   const pendingRead = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
   const pendingRevision = (pendingRead.structuredContent as { base_revision: string }).base_revision;
   assert.equal((await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision: pendingRevision, new_text: 'held turn check\n', explanation: 'Pending during a held turn' } })).isError, undefined);

@@ -494,3 +494,15 @@ test('the run guard follows Cline: a note at 3 identical calls, a stop at 5, a s
   const report = progressReport({ failing: { command: 'pytest tests/test_cli.py', count: 3, error: 'E   AssertionError: assert 1 == 0' }, edits: guard.topEdits(), open: [{ quote: 'be documented alongside the other built-in commands', change: '', file: 'docs/cli.rst' }], commandsLeft: 6, siblings: ['run_command'] });
   assert.match(report, /^Progress check:\n- pytest tests\/test_cli\.py has failed 3 times in a row with the same error: E {3}AssertionError: assert 1 == 0\n- Edits since the plan: src\/cli_config\.py ×6\n- Still open: "be documented alongside the other built-in commands"\n- Commands left in this request: 6\nChoose one and say which: \(a\) step back and change approach, comparing with how run_command is defined, registered and tested; \(b\) ask the user with ask_user_question/u);
 });
+
+test('placeholder comments for left-out code are found in any comment style, but not real code or lines already in the file', async () => {
+  const { placeholderLine, checkPlanCoverage } = await import('../out/context/plan.js');
+  assert.deepEqual(placeholderLine('import json\n# ... (rest of imports)\n', 'import os\n'), { line: 2, text: '# ... (rest of imports)' });
+  assert.equal(placeholderLine('    // … existing code …\n', '')?.line, 1);
+  assert.equal(placeholderLine('<!-- ... -->\n', '')?.line, 1);
+  assert.equal(placeholderLine('def f():\n    ...\n', ''), undefined, "Python's Ellipsis body is code, not a comment.");
+  assert.equal(placeholderLine('>>> f(\n... 1)\n# loading...\n', ''), undefined, 'A doctest continuation or a comment ending in dots is not a placeholder.');
+  assert.equal(placeholderLine('x = 1\n# ... see below\n', 'a\n# ... see below\n'), undefined, 'A line already in the file is kept, not refused.');
+  const refused = checkPlanCoverage('Add a command.\nIt\nmust appear in help', [{ quote: 'Add a command', change: 'add', file: 'a.py' }]);
+  assert.ok(!refused.ok && refused.message.includes('"It must appear in help"'), 'Line breaks in the request are shown as spaces, so the model can copy the words.');
+});

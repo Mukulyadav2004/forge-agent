@@ -89,7 +89,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       beginRequest: (scope?: string, requestText?: string) => void;
       finishChecklist: () => Array<{ quote: string; file: string }>;
       openRequirements: () => Array<{ quote: string; file: string }>;
-      lastCommandResult: () => { command: string; exitCode: number | null } | undefined;
+      lastCommandResult: () => { command: string; exitCode: number | null; savedAfter?: string } | undefined;
       commandsLeft: () => number;
       guardDeny: (name: string, argumentsJson: string, reason: string) => string;
       edits: EditService;
@@ -519,6 +519,7 @@ ${selectedText}`;
     return [
       open.length ? `These requirements from your plan have no change yet: ${open.map(item => `"${item.quote}" (planned: ${item.file})`).join('; ')}. Do them now, or call plan_task again with a skip_reason that says plainly why not.` : '',
       last && last.exitCode !== 0 ? `The last command (${last.command.slice(0, 160)}) ended with exit ${last.exitCode ?? 'signal'}. Fix the cause, or say plainly in your summary that it still fails.` : '',
+      last?.exitCode === 0 && last.savedAfter ? `${last.savedAfter} was saved after the last passing command (${last.command.slice(0, 160)}), so that run did not test it. Run the tests again before you summarize.` : '',
     ].filter(Boolean);
   }
   /** A stop the guard asked for: say why in the conversation, then cancel like the Cancel button (saved files stay, with Undo). */

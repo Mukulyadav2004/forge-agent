@@ -11,6 +11,8 @@ const STOPWORDS = new Set(['that', 'this', 'with', 'from', 'into', 'must', 'shou
   'then', 'than', 'each', 'when', 'will', 'your', 'what', 'where', 'there', 'these', 'those', 'make', 'sure', 'please', 'other', 'like', 'some',
   'only', 'very', 'such', 'more', 'most', 'just', 'does', 'been', 'being', 'were', 'they', 'well', 'onto', 'over', 'under', 'about']);
 
+/** The user's words as shown back in a message: line breaks in the request become spaces, so a quote copied from it matches. */
+const oneLine = (text: string) => text.replace(/\s+/gu, ' ').trim();
 const normalize = (text: string) => text.toLowerCase().replace(/[“”"'`]/gu, '').replace(/\s+/gu, ' ').trim();
 const words = (text: string) => normalize(text).match(/[\p{L}\p{N}_-]{4,}/gu)?.filter(word => !STOPWORDS.has(word)) ?? [];
 /** The request split into its parts: sentences, then comma-separated clauses. */
@@ -25,7 +27,7 @@ export function checkPlanCoverage(request: string, items: PlanItem[]): { ok: tru
   if (!text) return { ok: true };
   for (const [index, item] of items.entries()) {
     const quote = normalize(item.quote);
-    if (!quote || !text.includes(quote)) return { ok: false, message: `Requirement ${index + 1} quotes words that are not in the user's request: "${item.quote.slice(0, 120)}". Quote the user's own words for each requirement.` };
+    if (!quote || !text.includes(quote)) return { ok: false, message: `Requirement ${index + 1} quotes words that are not in the user's request: "${oneLine(item.quote).slice(0, 120)}". Quote the user's own words for each requirement.` };
     if (items.length === 1 && clauses(request).length > 1 && quote.length > text.length * PLAN_LIMITS.max_quote_share) {
       return { ok: false, message: 'Split the request into one requirement per thing it asks for (for example the feature, its test and its documentation), each quoting the user\'s words for that part.' };
     }
@@ -34,7 +36,7 @@ export function checkPlanCoverage(request: string, items: PlanItem[]): { ok: tru
   const missing = new Set(words(request).filter(word => !covered.has(word)));
   if (!missing.size) return { ok: true };
   const parts = clauses(request).filter(part => words(part).some(word => missing.has(word)));
-  return { ok: false, message: `These parts of the request are not in your plan yet: ${parts.map(part => `"${part.slice(0, 160)}"`).join('; ')}. Add a requirement for each, quoting those words, with the file you will change (or a skip_reason if nothing needs to change).` };
+  return { ok: false, message: `These parts of the request are not in your plan yet: ${parts.map(part => `"${oneLine(part).slice(0, 160)}"`).join('; ')}. Add a requirement for each, quoting those words, with the file you will change (or a skip_reason if nothing needs to change).` };
 }
 
 const cleanPath = (path: string) => path.trim().replace(/\\/gu, '/').replace(/^\.\//u, '');
@@ -120,4 +122,16 @@ export function progressReport(facts: { failing?: { command: string; count: numb
   lines.push(`- Commands left in this request: ${facts.commandsLeft}`);
   lines.push(`Choose one and say which: (a) step back and change approach${facts.siblings.length ? `, comparing with how ${facts.siblings.join(', ')} is defined, registered and tested` : ''}; (b) ask the user with ask_user_question, naming the options you see; (c) stop and summarize what works, what still fails, and why.`);
   return lines.join('\n');
+}
+
+/**
+ * A comment line that stands in for code left out, such as "# ... (rest of imports)" or "// ... existing code ...":
+ * a comment marker followed by an ellipsis. Saved as-is it deletes or breaks the code it replaced, whatever the model or
+ * language. A line already in the file is not a placeholder. Returns the first such line with its number in new_text.
+ */
+export function placeholderLine(newText: string, currentText: string): { line: number; text: string } | undefined {
+  const existing = new Set(currentText.split('\n').map(line => line.trim()));
+  const lines = newText.split('\n');
+  const index = lines.findIndex(line => /^\s*(?:#|\/\/|\/\*|<!--|--|;|\*)\s*(?:\.{3}|…)/u.test(line) && !existing.has(line.trim()));
+  return index < 0 ? undefined : { line: index + 1, text: (lines[index] ?? '').trim().slice(0, 120) };
 }

@@ -23,11 +23,11 @@ export function newProblems(before: Problem[], after: Problem[]): Problem[] {
   });
 }
 
-/** The lines added to a saved edit's tool result, or '' when the save introduced no errors. */
+/** The lines added to a saved edit's or a command's result, or '' when there are none. */
 export function describeProblems(path: string, problems: Problem[]): string {
   if (!problems.length) return '';
   const shown = [...problems].sort((a, b) => a.line - b.line).slice(0, PROBLEM_LIMITS.max_problems)
     .map(problem => `${problem.line}: ${problem.source ? `[${problem.source}] ` : ''}${problem.message.replace(/\s+/gu, ' ').slice(0, PROBLEM_LIMITS.message_characters)}`);
   const more = problems.length > shown.length ? `\n… ${problems.length - shown.length} more` : '';
-  return `New problems in ${path} after saving (VS Code diagnostics):\n${shown.join('\n')}${more}\nFix these first; a test run would fail on them too.`;
+  return `Problems in ${path} that your edits in this request introduced and VS Code still reports:\n${shown.join('\n')}${more}\nFix these first; a test run would fail on them too.`;
 }

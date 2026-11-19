@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { open, realpath, stat } from 'node:fs/promises';
+import { open, readFile, realpath, stat } from 'node:fs/promises';
 import { join, normalize, relative, resolve, sep } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -17,7 +17,7 @@ import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import { savedExcerpt } from '../edits/lineChanges';
 import { describeProblems, newProblems } from '../edits/diagnostics';
-import { checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, PLAN_LIMITS, progressReport, RunGuard } from '../context/plan';
+import { checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, placeholderLine, PLAN_LIMITS, progressReport, RunGuard } from '../context/plan';
 import type { PlanItem } from '../context/plan';
 import type { Problem } from '../edits/diagnostics';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
@@ -44,7 +44,7 @@ function errorsOf(uri: vscode.Uri | undefined): Problem[] {
     .map(diagnostic => ({ line: diagnostic.range.start.line + 1, message: diagnostic.message, ...(diagnostic.source ? { source: diagnostic.source } : {}) }));
 }
 /** propose_edit arguments; the approval card and the later tool call carry the same ones. */
-const PROPOSE_SHAPE = { path: z.string(), base_revision: z.string().optional().describe('From read_file. Required for start_line/end_line, insert_line and whole-file edits; optional with old_text, whose exact match proves the text is current.'), new_text: z.string({ error: 'new_text is required: the text that replaces the located lines. To delete them, pass an empty string.' }).max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') };
+const PROPOSE_SHAPE = { path: z.string(), base_revision: z.string().optional().describe('Optional. From read_file or a saved result; if given, the file must not have changed since. Line numbers must refer to lines you have read since the file last changed, whether or not you pass it.'), new_text: z.string({ error: 'new_text is required: the text that replaces the located lines. To delete them, pass an empty string.' }).max(MAX_EDIT_CHARACTERS), explanation: z.string().max(2000), old_text: z.string().min(1).max(MAX_EDIT_CHARACTERS).optional().describe('Exact current text to replace; must appear once. When given, it alone locates the change.'), start_line: z.number().int().min(1).optional().describe('First line to replace; requires end_line.'), end_line: z.number().int().min(1).optional().describe('Last line to replace (inclusive); requires start_line.'), insert_line: z.number().int().min(1).optional().describe('Insert new_text before this line instead of replacing lines.') };
 const ProposeInputSchema = z.object(PROPOSE_SHAPE);
 type ProposeInput = z.infer<typeof ProposeInputSchema>;
 /** write_file arguments: a new file and its whole content. */
@@ -91,11 +91,62 @@ export class EditorBridge implements vscode.Disposable {
     }
     return unread + Math.max(0, total - next + 1);
   }
+  /** The first run of lines between from and to that the agent has not read at this content, if any. */
+  private unreadRange(path: string, text: string, from: number, to: number): [number, number] | undefined {
+    const ranges = this.readCoverage.get(this.coverageKey(path, text)) ?? [];
+    const isRead = (line: number) => ranges.some(([start, end]) => line >= start && line <= end);
+    let first: number | undefined;
+    for (let line = from; line <= to; line++) {
+      if (!isRead(line)) first ??= line;
+      else if (first !== undefined) return [first, line - 1];
+    }
+    return first === undefined ? undefined : [first, to];
+  }
+  /** Lines shown to the agent in a saved excerpt ("12: text") count as read at the saved content. */
+  private markExcerptRead(path: string, text: string, excerpt: string): void {
+    const key = this.coverageKey(path, text);
+    const shown = [...excerpt.matchAll(/^(\d+): /gmu)].map(match => Number(match[1]));
+    this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), ...shown.map(line => [line, line] as [number, number])]);
+  }
   /** Called once per user request (not for approvals or retries of it). */
   beginRequest(scope?: string, requestText = ''): void {
     this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest();
     this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
+    this.textAtStart.clear(); this.textSaved.clear(); this.problemsAtStart.clear();
     this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET });
+  }
+  /**
+   * Files Forge saved in this request: their text before the first save (empty for a new file) and right after the
+   * last one. A command can change them behind Forge's back (git checkout, a formatter), so after each command the
+   * disk is compared with both and the checklist follows the disk, not the history of saves.
+   */
+  private readonly textAtStart = new Map<string, string>();
+  private readonly textSaved = new Map<string, string>();
+  /** VS Code's errors in each file before the agent's first save to it in this request: later saves report every error added since, until it is fixed. */
+  private readonly problemsAtStart = new Map<string, Problem[]>();
+  private uriOf(path: string): vscode.Uri | undefined { const root = vscode.workspace.workspaceFolders?.[0]; return root ? vscode.Uri.joinPath(root.uri, path) : undefined; }
+  /** Errors the agent's saved edits in this request introduced that VS Code still reports, for command results. */
+  private lingeringProblems(): string {
+    return [...this.problemsAtStart].map(([path, before]) => describeProblems(path, newProblems(before, errorsOf(this.uriOf(path))))).filter(Boolean).join('\n');
+  }
+  private async checkSavedFiles(rootPath: string, command: string): Promise<string> {
+    const same = (a: string, b: string) => a.replace(/^﻿/u, '').replace(/\r\n/gu, '\n') === b.replace(/^﻿/u, '').replace(/\r\n/gu, '\n');
+    const notes: string[] = [];
+    for (const [path, saved] of this.textSaved) {
+      const now = await readFile(resolve(rootPath, path), 'utf8').catch(() => undefined);
+      const start = this.textAtStart.get(path) ?? '';
+      if (now !== undefined && same(now, saved)) continue;
+      if (now === undefined ? start === '' : same(now, start)) {
+        this.textSaved.delete(path); this.changedPaths.delete(path);
+        notes.push(`${path} is back to how it was before this request${now === undefined ? ' (the file is gone)' : ''}: your saved changes to it are gone. Make them again with propose_edit${now === undefined ? ' or write_file' : ''} after reading the file.`);
+        this.activityEvents.fire({ kind: 'propose', path, detail: 'reverted by a command · your saved changes are gone', reason: `Changed by: ${command.slice(0, 200)}` });
+      } else {
+        this.textSaved.set(path, now ?? '');
+        notes.push(`${path} was changed by this command after your last save${now === undefined ? ' (the file was deleted)' : ''}. Read it again before editing it.`);
+        this.activityEvents.fire({ kind: 'propose', path, detail: now === undefined ? 'deleted by a command' : 'changed by a command after your last save', reason: `Changed by: ${command.slice(0, 200)}` });
+      }
+    }
+    return notes.length ? `Files you saved in this request were changed by this command:\n- ${notes.join('\n- ')}` : '';
   }
   /** The user's words for this request, its plan (plan_task), files changed so far, and the last failure of each command. */
   private requestText = '';
@@ -132,7 +183,7 @@ export class EditorBridge implements vscode.Disposable {
   }
   /** Identical refused calls in this request, and the last command that ran (shown in the end-of-turn checklist). */
   private readonly refusals = new Map<string, number>();
-  private lastCommand: { command: string; exitCode: number | null } | undefined;
+  private lastCommand: { command: string; exitCode: number | null; savedAfter?: string } | undefined;
   /** The checklist line; for a saved or staged file the plan does not name, a note so a wrong file is noticed early. */
   private checklistNote(path?: string): string {
     const line = checklistLine(this.plan, this.changedPaths);
@@ -146,7 +197,7 @@ export class EditorBridge implements vscode.Disposable {
   /** Requirements of this request's plan that have no change and no stated reason. */
   openRequirements(): PlanItem[] { return (this.plan ?? []).filter(item => itemStatus(item, this.changedPaths) === 'open'); }
   /** The last command and its exit code, for the end-of-turn check. */
-  lastCommandResult(): { command: string; exitCode: number | null } | undefined { return this.lastCommand; }
+  lastCommandResult(): { command: string; exitCode: number | null; savedAfter?: string } | undefined { return this.lastCommand; }
   /** When the turn ends: show the checklist and return requirements that have no change and no stated reason. */
   finishChecklist(): PlanItem[] {
     if (!this.plan?.length) return [];
@@ -224,7 +275,20 @@ export class EditorBridge implements vscode.Disposable {
     if (old_text === undefined && (start_line === undefined) !== (end_line === undefined)) throw new Error('Provide both start_line and end_line to replace lines, or use old_text or insert_line.');
     if (old_text === undefined && start_line !== undefined && insert_line !== undefined) throw new Error('Use either start_line/end_line (replace lines) or insert_line (insert before a line), not both.');
     const range = old_text === undefined && start_line !== undefined && end_line !== undefined ? { startLine: start_line, endLine: end_line } : undefined;
-    const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision: base_revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined });
+    const current = await this.options.edits.read(path);
+    const placeholder = placeholderLine(new_text, current.file.text);
+    if (placeholder) throw new Error(`Line ${placeholder.line} of new_text stands in for code that was left out: "${placeholder.text}". Saved as-is, it would delete or break that code. new_text must be the exact final text of what it replaces; to change several places, send one propose_edit per place.`);
+    let revision = base_revision;
+    if (old_text === undefined && (range || insert_line !== undefined)) {
+      // Line numbers are only safe for lines the agent has read since the file last changed (its own saves included).
+      const total = fileLines(current.file.text).length;
+      const [from, to] = range ? [range.startLine, range.endLine] : [Math.max(1, (insert_line ?? 1) - 1), Math.min(insert_line ?? 1, total)];
+      const unread = this.unreadRange(path, current.file.text, from, Math.min(to, total));
+      if (unread) throw new Error(`Line(s) ${unread[0]}–${unread[1]} of ${path} have not been read since the file last changed, so these line numbers may point at the wrong place. Read them with read_file (for example start_line ${Math.max(1, unread[0] - 5)}, end_line ${unread[1] + 5}), then propose the edit again, or locate it with old_text.`);
+      // The read proves the numbers refer to the current file, so a missing base_revision is filled in from it.
+      revision ??= current.revision;
+    } else if (old_text === undefined && revision === undefined && this.unreadLines(path, current.file.text) === 0) revision = current.revision;
+    const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined });
     const detail = old_text !== undefined ? 'replace matched text' : range ? `lines ${range.startLine}–${range.endLine}` : insert_line !== undefined ? `insert at line ${insert_line}` : 'whole file';
     return { id, combined, replaced, detail, ignored };
   }
@@ -266,6 +330,8 @@ export class EditorBridge implements vscode.Disposable {
   /** Checks and stages one new file; nothing is written. */
   private async stageWrite(input: WriteInput): Promise<{ id: string }> {
     if (this.editScope !== undefined) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not create files; mention any other change you think is needed in your reply instead.`);
+    const placeholder = placeholderLine(input.content, '');
+    if (placeholder) throw new Error(`Line ${placeholder.line} of content stands in for code that was left out: "${placeholder.text}". Write the complete file.`);
     return this.options.edits.stageCreate({ path: input.path, text: input.content, explanation: input.explanation });
   }
   /**
@@ -289,6 +355,8 @@ export class EditorBridge implements vscode.Disposable {
       // A new file has no text yet; the saved excerpt then shows all of it.
       textBefore.set(path, await this.options.edits.read(path).then(read => read.file.text, () => ''));
       problemsBefore.set(path, errorsOf(uriOf(path)));
+      const clean = path.replace(/^\.\//u, '');
+      if (!this.problemsAtStart.has(clean)) this.problemsAtStart.set(clean, problemsBefore.get(path) ?? []);
       try { if (proposal.hunks.some(hunk => hunk.status === 'pending')) await this.options.edits.apply(proposal.id); }
       catch (error) {
         for (const [key, item] of waiting) if (item.path === path) this.reviewed.set(key, { message: '', saved: 0, rejected: 0, error: `Nothing was saved to ${path}: ${error instanceof Error ? error.message : 'the apply failed'} Read the file again and propose the edit again.` });
@@ -296,7 +364,7 @@ export class EditorBridge implements vscode.Disposable {
     }
     if (!allow) return;
     await rechecked;
-    const afterSave = new Map<string, { revision?: string; excerpt: string; firstLine?: number; problems: Problem[] }>();
+    const afterSave = new Map<string, { revision?: string; excerpt: string; firstLine?: number; problems: Problem[]; text?: string }>();
     let shown: { path: string; line: number } | undefined;
     for (const [key, { path }] of waiting) {
       if (this.reviewed.has(key)) continue;
@@ -309,8 +377,9 @@ export class EditorBridge implements vscode.Disposable {
         try {
           const read = await this.options.edits.read(path);
           const excerpt = saved ? savedExcerpt(textBefore.get(path) ?? '', read.file.text) : { text: '' };
-          const problems = saved ? newProblems(problemsBefore.get(path) ?? [], errorsOf(uriOf(path))) : [];
-          state = { revision: read.revision, excerpt: excerpt.text, problems, ...(excerpt.firstLine ? { firstLine: excerpt.firstLine } : {}) };
+          const problems = saved ? newProblems(this.problemsAtStart.get(path.replace(/^\.\//u, '')) ?? problemsBefore.get(path) ?? [], errorsOf(uriOf(path))) : [];
+          if (saved) this.markExcerptRead(path, read.file.text, excerpt.text);
+          state = { revision: read.revision, excerpt: excerpt.text, problems, text: read.file.text, ...(excerpt.firstLine ? { firstLine: excerpt.firstLine } : {}) };
         } catch { /* reported without a revision or excerpt */ }
         afterSave.set(path, state);
         if (saved && state.firstLine) shown = { path, line: state.firstLine };
@@ -321,7 +390,14 @@ export class EditorBridge implements vscode.Disposable {
         state.revision ? `Use base_revision ${state.revision} for further edits to ${path}.` : '',
       ].filter(Boolean).join(' ') + (saved && state.excerpt ? `\nSaved lines of ${path}, numbered as the file is now:\n${state.excerpt}` : '')
         + (state.problems.length ? `\n${describeProblems(path, state.problems)}` : '');
-      if (saved) this.changedPaths.add(path.replace(/^\.\//u, ''));
+      if (saved) {
+        const clean = path.replace(/^\.\//u, '');
+        this.changedPaths.add(clean);
+        if (!this.textAtStart.has(clean)) this.textAtStart.set(clean, textBefore.get(path) ?? '');
+        if (state.text !== undefined) this.textSaved.set(clean, state.text);
+        // Tests that passed before this save did not run the saved code.
+        if (this.lastCommand?.exitCode === 0) this.lastCommand.savedAfter = clean;
+      }
       this.reviewed.set(key, { message: message + this.checklistNote(saved ? path : undefined) + (saved ? this.editedNote(path) : ''), saved, rejected: rejected.length, problems: state.problems.length, ...(state.revision ? { revision: state.revision } : {}) });
     }
     // Like Cline, the saved file opens in the editor at the change; focus stays in the sidebar so review continues there.
@@ -517,6 +593,7 @@ export class EditorBridge implements vscode.Disposable {
       this.activityEvents.fire({ kind: 'command', used: this.budgetUsed, command, cwd: where, exitCode: result.exit_code, timedOut: result.timed_out, cancelled: result.cancelled, durationMs: result.duration_ms, ...(reason ? { reason } : {}) });
       const ended = result.cancelled ? 'cancelled' : result.timed_out ? `stopped at the ${timeout_seconds} s timeout` : `exit code ${result.exit_code ?? result.signal}`;
       this.lastCommand = { command, exitCode: result.exit_code };
+      const changedByCommand = await this.checkSavedFiles(rootPath, command);
       const missing = await this.missingToolHint(result.output, result.exit_code);
       // The same failure twice in a row means the last change did not touch the cause: point at the code to compare with.
       const signature = result.exit_code ? failureSignature(result.output) : '';
@@ -526,7 +603,7 @@ export class EditorBridge implements vscode.Disposable {
       // From the third identical failure on, once per command: the facts and three ways on, for the model to choose.
       const stalled = failedInARow >= GUARD_LIMITS.same_failure_report && this.guard.firstReport(`fail:${command}`) ? this.progress({ command, count: failedInARow, error: signature }) : '';
       const same = stalled ? stalled : repeated ? `Same failure as the previous run of this command, so the last change did not reach the cause. Before editing the test again, compare your code with how ${siblings.length ? siblings.join(', ') : 'the existing similar code'} is defined, registered and tested, or run a small probe to see the actual state.` : '';
-      const hint = [missing, same].filter(Boolean).join('\n') + (this.plan ? checklistLine(this.plan, this.changedPaths) ? `\n${checklistLine(this.plan, this.changedPaths)}` : '' : '');
+      const hint = [changedByCommand, this.lingeringProblems(), missing, same].filter(Boolean).join('\n') + (this.plan ? checklistLine(this.plan, this.changedPaths) ? `\n${checklistLine(this.plan, this.changedPaths)}` : '' : '');
       const structured = { command, cwd: where, ...result, ...(hint ? { hint } : {}), context_budget: this.budget };
       return { content: [{ type: 'text', text: `$ ${command}\n(cwd ${where}) ${ended} after ${(result.duration_ms / 1000).toFixed(1)} s${result.output_truncated ? `; output shortened from ${result.total_output_characters} characters` : ''}\n${result.output}\n${hint ? `${hint}\n` : ''}${this.budgetNote()}` }], structuredContent: structured };
     });
@@ -584,7 +661,7 @@ export class EditorBridge implements vscode.Disposable {
       const message = `Proposal ${id} stages the new file ${input.path}. No files changed. To create it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all.${this.checklistNote(input.path)}`;
       return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path: input.path, message } };
     });
-    register('propose_edit', { description: 'Propose an edit for the user to review. Depending on a setting, the user approves the diff and the accepted hunks are saved before this call returns, or the edit is staged for them to apply later; the result says which. Pass base_revision from read_file (it may be omitted with old_text). Locate the change in exactly one way: (1) old_text, the current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored; differences only in typographic quotes, dashes or trailing spaces still match, and when nothing matches the error shows the closest numbered lines to copy from); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: PROPOSE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
+    register('propose_edit', { description: 'Propose an edit for the user to review. Depending on a setting, the user approves the diff and the accepted hunks are saved before this call returns, or the edit is staged for them to apply later; the result says which. base_revision is optional. Locate the change in exactly one way: (1) old_text, the current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored; differences only in typographic quotes, dashes or trailing spaces still match, and when nothing matches the error shows the closest numbered lines to copy from); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file or the saved lines in a result showed it; lines you have not read since the file last changed are refused. A comment that stands in for left-out code (such as "# ... rest of the code") is refused: new_text is the exact final text. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: PROPOSE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
       // An edit the user already reviewed in the approval card was settled before TrueForge called the tool: report that result.
       // Matched by the exact arguments; if TrueForge re-encoded them, by path and base_revision when that is unambiguous.
       const sameRead = [...this.reviewed.keys()].filter(candidate => { const [path, revision] = JSON.parse(candidate) as [string, string]; return path === input.path && revision === input.base_revision; });

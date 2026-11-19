@@ -103,6 +103,19 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.equal(whole.isError, undefined, `After reading every line, a whole-file replacement is allowed: ${JSON.stringify(whole.content)}`);
   await vscode.commands.executeCommand('forgeAgent.rejectAll');
   await vscode.workspace.fs.delete(coverageUri);
+  // Line edits need their lines read since the file last changed; then base_revision may be left out. Placeholders are refused.
+  const placementUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0]!.uri, 'placement-probe.txt');
+  await vscode.workspace.fs.writeFile(placementUri, new TextEncoder().encode(Array.from({ length: 50 }, (_, index) => `line ${index + 1}`).join('\n') + '\n'));
+  await client.callTool({ name: 'read_file', arguments: { path: 'placement-probe.txt', start_line: 1, end_line: 10 } });
+  const unreadInsert = await client.callTool({ name: 'propose_edit', arguments: { path: 'placement-probe.txt', insert_line: 30, new_text: 'new\n', explanation: 'Unread insert' } });
+  assert.equal(unreadInsert.isError, true, 'An insert at a line the agent has not read is refused.');
+  assert.match(JSON.stringify(unreadInsert.content), /Line\(s\) 29–30 of placement-probe\.txt have not been read since the file last changed/u);
+  const placeholder = await client.callTool({ name: 'propose_edit', arguments: { path: 'placement-probe.txt', old_text: 'line 3\n', new_text: 'line 3\n# ... (rest of the code)\n', explanation: 'Placeholder' } });
+  assert.match(JSON.stringify(placeholder.content), /Line 2 of new_text stands in for code that was left out: \\"# \.\.\. \(rest of the code\)\\"/u);
+  const readInsert = await client.callTool({ name: 'propose_edit', arguments: { path: 'placement-probe.txt', insert_line: 5, new_text: 'new\n', explanation: 'Read insert without base_revision' } });
+  assert.equal(readInsert.isError, undefined, `An insert at read lines needs no base_revision: ${JSON.stringify(readInsert.content)}`);
+  await vscode.commands.executeCommand('forgeAgent.rejectAll');
+  await vscode.workspace.fs.delete(placementUri);
   const proposals = (await feed()).activity.filter(entry => entry.kind === 'propose' && entry.reason === 'MCP combine check').map(entry => entry.detail);
   assert.deepEqual(proposals, ['lines 2–2', 'insert at line 4, combined with earlier changes', 'replace matched text, combined with earlier changes']);
   const activityRows = frame.locator('#messages .activity-row');
