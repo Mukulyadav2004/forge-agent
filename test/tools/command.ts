@@ -28,14 +28,14 @@ export async function checkCommand(options: { client: Client; frame: Frame }): P
   assert.ok(long.output.length < 16_200 && long.total_output_characters > 60_000);
   assert.match(long.output, /characters omitted[\s\S]*LAST-LINE/u, 'The end of the output, where errors usually are, is kept.');
   assert.ok(long.context_budget.used > 0);
-  // failing, sleep and long output are three commands that ran (the refused cwd calls do not count); five more reach the limit of eight.
+  // failing, sleep and long output are three commands that ran (the refused cwd calls do not count); twelve more reach the limit of fifteen.
   const missing = (await run({ command: 'forge-missing-tool-check' })).data;
   assert.equal(missing?.exit_code, 127);
   assert.match(missing?.hint ?? '', /^Hint: a program or module was not found and the workspace has no virtual environment\./u, 'A missing tool points at the overview setup instead of variants.');
-  for (let index = 5; index <= 8; index += 1) assert.equal((await run({ command: `echo command ${index}` })).data?.exit_code, 0, `Command ${index} of 8 runs.`);
-  const ninth = await run({ command: 'echo one too many' });
-  assert.equal(ninth.result.isError, true, 'A request runs at most eight commands.');
-  assert.match(JSON.stringify(ninth.result.content), /already ran 8 commands, the limit per request/u);
+  for (let index = 5; index <= 15; index += 1) assert.equal((await run({ command: `echo command ${index}` })).data?.exit_code, 0, `Command ${index} of 15 runs.`);
+  const sixteenth = await run({ command: 'echo one too many' });
+  assert.equal(sixteenth.result.isError, true, 'A request runs at most fifteen commands.');
+  assert.match(JSON.stringify(sixteenth.result.content), /already ran 15 commands, the limit per request/u);
   const row = options.frame.locator('#messages .activity-command').filter({ hasText: 'echo checked' });
   await row.waitFor();
   assert.match(await row.innerText(), /^Ran\s+echo checked; echo warn >&2; exit 3\s+exit 3 after [\d.]+ s \(\+\d+ chars\)[\s\S]*Check the exit code/u);
