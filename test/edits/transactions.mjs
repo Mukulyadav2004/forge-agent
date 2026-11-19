@@ -500,3 +500,16 @@ test('an old_text edit may omit base_revision; line-based and whole-file edits s
   await assert.rejects(service.stageEdit({ path: 'a.txt', text: 'whole', explanation: 'Whole file without revision' }), /Only old_text edits can omit it/u);
   await assert.rejects(service.stageEdit({ path: 'a.txt', oldText: 'gone', text: 'x', explanation: 'Stale text' }), /old_text was not found/u, 'Without a revision, a stale old_text is still refused.');
 });
+
+test('a saved edit reports the saved lines with context, numbered as the file is now', async () => {
+  const { savedExcerpt } = await import('../../out/edits/EditService.js');
+  const before = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join('\n') + '\n';
+  const after = before.replace('line 10\n', 'line 10\ninserted A\ninserted B\n').replace('line 25\n', 'changed 25\n');
+  const excerpt = savedExcerpt(before, after);
+  assert.equal(excerpt.firstLine, 11);
+  assert.equal(excerpt.text, ['9: line 9', '10: line 10', '11: inserted A', '12: inserted B', '13: line 11', '14: line 12', '…', '25: line 23', '26: line 24', '27: changed 25', '28: line 26', '29: line 27'].join('\n'), 'Changed lines with two lines of context; a gap is marked; numbers follow the saved file.');
+  const created = savedExcerpt('', 'a\nb\n');
+  assert.deepEqual([created.firstLine, created.text], [1, '1: a\n2: b'], 'A new file shows all of its lines.');
+  const big = savedExcerpt('', Array.from({ length: 500 }, (_, index) => `x${index}`).join('\n'));
+  assert.ok(big.text.split('\n').length <= 61 && /… \d+ more changed or context line\(s\); read_file shows them$/u.test(big.text), 'A large change is cut to the limit and says so.');
+});

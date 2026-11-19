@@ -6,6 +6,7 @@ import type { ReviewPart } from './lineChanges';
 
 export const MAX_EDIT_CHARACTERS = 500_000;
 export { missHint, normalizeForMatch, replaceMatched } from './match';
+export { savedExcerpt } from './lineChanges';
 
 export interface FileSnapshot {
   path: string;

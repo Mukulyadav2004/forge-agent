@@ -15,6 +15,7 @@ import { buildProjectContext, buildProjectOverview, fileOutline } from '../conte
 import { loadWorkspaceInstructions } from '../context/environment';
 import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
+import { savedExcerpt } from '../edits/lineChanges';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
 import type { ToolLog, ToolName } from '../observability/events';
 import { COMMAND_LIMITS, runCommand } from './runCommand';
@@ -123,10 +124,11 @@ export class EditorBridge implements vscode.Disposable {
     void vscode.window.showInformationMessage('Editor MCP details copied. Forge connects automatically when a new task starts; use these details only for manual setup or diagnostics.');
   }
   dispose(): void { this.server.close(); this.activityEvents.dispose(); }
-  async openFile(options: { path: string; line: number }): Promise<void> {
+  async openFile(options: { path: string; line: number }): Promise<void> { await this.showFile(options); }
+  private async showFile(options: { path: string; line: number; preserveFocus?: boolean }): Promise<void> {
     const document = await this.options.files.open(options.path);
     const position = new vscode.Position(Math.max(0, Math.min(options.line - 1, document.lineCount - 1)), 0);
-    await vscode.window.showTextDocument(document, { selection: new vscode.Range(position, position), preview: true });
+    await vscode.window.showTextDocument(document, { selection: new vscode.Range(position, position), preview: true, preserveFocus: options.preserveFocus ?? false });
   }
   async architectureContext(): Promise<string> {
     const paths = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,.venv,venv,__pycache__}/**', 500);
@@ -199,30 +201,46 @@ export class EditorBridge implements vscode.Disposable {
     const waiting = [...this.awaitingReview];
     this.awaitingReview.clear();
     const latest = (path: string) => [...this.options.edits.state.proposals].reverse().find(proposal => proposal.path === path && proposal.status !== 'superseded');
+    const textBefore = new Map<string, string>();
     for (const path of new Set(waiting.map(([, item]) => item.path))) {
       const proposal = latest(path);
       if (!proposal || (proposal.status !== 'pending' && proposal.status !== 'conflict')) continue;
       if (!allow) { await this.options.edits.reject(proposal.id).catch(() => undefined); continue; }
+      // A new file has no text yet; the saved excerpt then shows all of it.
+      textBefore.set(path, await this.options.edits.read(path).then(read => read.file.text, () => ''));
       try { if (proposal.hunks.some(hunk => hunk.status === 'pending')) await this.options.edits.apply(proposal.id); }
       catch (error) {
         for (const [key, item] of waiting) if (item.path === path) this.reviewed.set(key, { message: '', saved: 0, rejected: 0, error: `Nothing was saved to ${path}: ${error instanceof Error ? error.message : 'the apply failed'} Read the file again and propose the edit again.` });
       }
     }
     if (!allow) return;
+    const afterSave = new Map<string, { revision?: string; excerpt: string; firstLine?: number }>();
+    let shown: { path: string; line: number } | undefined;
     for (const [key, { path }] of waiting) {
       if (this.reviewed.has(key)) continue;
       const hunks = latest(path)?.hunks ?? [];
       const saved = hunks.filter(hunk => hunk.status === 'applied').length;
       const rejected = hunks.filter(hunk => hunk.status === 'rejected');
-      let revision: string | undefined;
-      try { revision = (await this.options.edits.read(path)).revision; } catch { /* reported without a revision */ }
+      let state = afterSave.get(path);
+      if (!state) {
+        state = { excerpt: '' };
+        try {
+          const read = await this.options.edits.read(path);
+          const excerpt = saved ? savedExcerpt(textBefore.get(path) ?? '', read.file.text) : { text: '' };
+          state = { revision: read.revision, excerpt: excerpt.text, ...(excerpt.firstLine ? { firstLine: excerpt.firstLine } : {}) };
+        } catch { /* reported without a revision or excerpt */ }
+        afterSave.set(path, state);
+        if (saved && state.firstLine) shown = { path, line: state.firstLine };
+      }
       const message = [
         saved ? `Saved ${path} after the user reviewed the diff: ${saved} of ${hunks.length} hunk(s) are on disk, so commands now see them.` : `The user rejected every hunk of this edit to ${path}; nothing was saved.`,
         rejected.length ? `The user rejected the hunk(s) at original line(s) ${rejected.map(hunk => hunk.oldStart).join(', ')}; they were not saved. Do not propose them again unless the user asks.` : '',
-        revision ? `Use base_revision ${revision} for further edits to ${path}.` : '',
-      ].filter(Boolean).join(' ');
-      this.reviewed.set(key, { message, saved, rejected: rejected.length, ...(revision ? { revision } : {}) });
+        state.revision ? `Use base_revision ${state.revision} for further edits to ${path}.` : '',
+      ].filter(Boolean).join(' ') + (saved && state.excerpt ? `\nSaved lines of ${path}, numbered as the file is now:\n${state.excerpt}` : '');
+      this.reviewed.set(key, { message, saved, rejected: rejected.length, ...(state.revision ? { revision: state.revision } : {}) });
     }
+    // Like Cline, the saved file opens in the editor at the change; focus stays in the sidebar so review continues there.
+    if (shown) await this.showFile({ ...shown, preserveFocus: true }).catch(() => undefined);
   }
   /** Python interpreters of virtual environments at the workspace root (existence only; nothing is run or read). */
   private async workspaceEnvironments(): Promise<string[]> {
