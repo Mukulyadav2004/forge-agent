@@ -11,7 +11,7 @@ const CommandSchema = z.object({
 /** run_command through the real MCP server: exit codes, cwd containment, timeout and bounded output. */
 export async function checkCommand(options: { client: Client; frame: Frame }): Promise<void> {
   const run = async (args: Record<string, unknown>) => {
-    const result = await options.client.callTool({ name: 'run_command', arguments: args });
+    const result = await options.client.callTool({ name: 'run_command', arguments: { reason: 'Smoke check of run_command', ...args } });
     return { result, data: result.isError ? undefined : CommandSchema.parse(result.structuredContent) };
   };
   const failing = (await run({ command: 'echo checked; echo warn >&2; exit 3', reason: 'Check the exit code' })).data;

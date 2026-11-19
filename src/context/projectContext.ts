@@ -173,6 +173,29 @@ export async function buildProjectOverview(options: {
   return { text: `${OVERVIEW_HEADER}\n${folderTree(options.paths)}\n\n${tests}${environments}${suggested}\n`, files };
 }
 
+/** Underlines that mark an RST heading, e.g. "-----" under a title. */
+const RST_UNDERLINE = /^([=\-~^"'`#*+])\1{2,}\s*$/u;
+const CODE_DEFINITION = /^\s{0,8}(?:(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:def|class|function|interface|struct|enum|fn|func|type|impl)\s+\w|(?:export\s+)?(?:const|let)\s+\w+\s*=\s*(?:async\s*)?(?:\(|function)|@\w[\w.]*\()/u;
+
+/** Definitions (code) or headings (docs) with line numbers, so a model can read one block of a long file instead of all of it. */
+export function fileOutline(path: string, text: string, characterLimit = 4000): string {
+  const lines = text.split('\n');
+  const document = /\.(?:rst|md|markdown|txt)$/iu.test(path);
+  const entries: string[] = [];
+  lines.forEach((line, index) => {
+    const heading = document && line.trim() !== '' && !RST_UNDERLINE.test(line) && (/^#{1,4}\s/u.test(line) || RST_UNDERLINE.test(lines[index + 1] ?? ''));
+    if (heading || (!document && CODE_DEFINITION.test(line))) entries.push(`${index + 1}: ${line.trim().slice(0, 120)}`);
+  });
+  const kept: string[] = [];
+  let length = 0;
+  for (const entry of entries) {
+    if (length + entry.length + 1 > characterLimit) break;
+    kept.push(entry);
+    length += entry.length + 1;
+  }
+  return kept.length < entries.length ? `${kept.join('\n')}\n… +${entries.length - kept.length} more; read a later range to see them` : kept.join('\n');
+}
+
 export function isArchitectureRequest(text: string): boolean {
   return /\bar(?:ch|c)[a-z]*tect[a-z]*\b|\bcodebase\b|\b(?:project|system)\s+(?:map|overview)\b/iu.test(text);
 }

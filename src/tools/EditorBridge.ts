@@ -11,7 +11,7 @@ import { z } from 'zod';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
 import type { ActivityEntry } from '../shared/messages';
-import { buildProjectContext, buildProjectOverview } from '../context/projectContext';
+import { buildProjectContext, buildProjectOverview, fileOutline } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
@@ -22,7 +22,8 @@ import { COMMAND_LIMITS, runCommand } from './runCommand';
 /** Characters one request may read, about 90k tokens; TrueForge compacts the conversation at 100k tokens (forge-agent.json). */
 export const CONTEXT_BUDGET = 350_000;
 /** One read_file call: big enough to read a typical source file whole (Flask's cli.py is about 1,100 lines and 46,000 characters). */
-const READ_LIMITS = { lines_per_call: 2000, characters_per_call: 60000 };
+/** Without end_line a read returns a window plus an outline of the file; an explicit range may be up to lines_per_call long. */
+const READ_LIMITS = { default_window_lines: 300, lines_per_call: 2000, characters_per_call: 60000, outline_characters: 4000 };
 const SEARCH_LIMITS = { candidate_files: 1000, file_bytes: 262144, total_bytes: 8388608, output_characters: 20000, line_characters: 1000, matches_per_file: 3, timeout_ms: 5000 };
 const SEARCH_EXCLUDE = '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage}/**';
 const SearchInputSchema = z.object({ query: z.string().min(1).max(500), glob: z.string().min(1).max(200).default('**/*').describe('Workspace-relative path filter. Narrow to a folder or extension when results are incomplete.'), regex: z.boolean().default(false), case_sensitive: z.boolean().default(false), max_results: z.number().int().min(1).max(100).default(40), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') });
@@ -207,11 +208,11 @@ export class EditorBridge implements vscode.Disposable {
       } }));
     };
     register('search_code', { description: 'Search saved workspace text. Returns hits grouped by file with line numbers, up to three excerpts per file, observed folder counts and a next-step hint. Run one focused search per fact you need (for example where a name is defined, then where it is registered, imported or called); a distinctive identifier finds far fewer, better hits than a common word. Literal and case-insensitive by default; set regex to true for patterns such as alternatives (name_a|name_b). Use glob to filter paths and narrow incomplete searches. Then open each relevant hit with read_file around its line number.', inputSchema: SearchInputSchema.shape, annotations: { readOnlyHint: true } }, async (input, extra) => this.searchCode({ ...input, signal: extra.signal }));
-    register('read_file', { description: `Read numbered lines from a workspace file. Without end_line it reads from start_line to the end of the file, up to ${READ_LIMITS.lines_per_call} lines or ${READ_LIMITS.characters_per_call} characters per call. Read a file you will edit whole, in one call, so you do not need to search it again. For a question about one block of a large file, start a few lines before a known line number and read to the end of that block. Returns the actual range, total_lines, whether more lines follow, and the base_revision that propose_edit needs.`, inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
+    register('read_file', { description: `Read numbered lines from a workspace file. Without end_line it returns up to ${READ_LIMITS.default_window_lines} lines from start_line; if the file is longer, it also returns an outline of the whole file (definitions or headings with line numbers). Use the outline or a search hit to read just the block you need with start_line and end_line (up to ${READ_LIMITS.lines_per_call} lines or ${READ_LIMITS.characters_per_call} characters per call). Returns the actual range, total_lines, whether more lines follow, and the base_revision that propose_edit needs.`, inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
       const { revision, file } = await this.options.edits.read(path);
       const lines = file.text.split('\n');
       if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
-      const end = Math.min(end_line ?? lines.length, start_line + READ_LIMITS.lines_per_call - 1, lines.length);
+      const end = Math.min(end_line ?? start_line + READ_LIMITS.default_window_lines - 1, start_line + READ_LIMITS.lines_per_call - 1, lines.length);
       const allowance = Math.min(READ_LIMITS.characters_per_call, this.remaining());
       if (allowance < 1000) throw this.budgetError();
       const output: string[] = [];
@@ -225,14 +226,17 @@ export class EditorBridge implements vscode.Disposable {
       if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
       const actualEnd = start_line + output.length - 1;
       const text = output.join('\n');
-      this.budgetUsed += text.length;
+      // A default-window read of a longer file also gets the file's outline, so the next read can target one block.
+      const outline = end_line === undefined && (start_line > 1 || actualEnd < lines.length) ? fileOutline(path, file.text, Math.min(READ_LIMITS.outline_characters, Math.max(0, this.remaining() - text.length))) : '';
+      this.budgetUsed += text.length + outline.length;
       const key = this.coverageKey(path, file.text);
       this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), [start_line, actualEnd]]);
       this.activityEvents.fire({ kind: 'open', used: this.budgetUsed, path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       // TrueForge prefers structured MCP results, so the source must be present there too.
-      return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${this.budgetNote()}\n${text}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, truncated: actualEnd < lines.length, context_budget: this.budget } };
+      const outlineText = outline ? `\n\nOutline of ${path} (${lines.length} lines; read a block with start_line and end_line):\n${outline}` : '';
+      return { content: [{ type: 'text', text: `Base revision: ${revision}\n${path}: lines ${start_line}-${actualEnd} of ${lines.length}${actualEnd < lines.length ? '. More lines are available.' : ''}\n${this.budgetNote()}\n${text}${outlineText}` }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, text, ...(outline ? { outline } : {}), truncated: actualEnd < lines.length, context_budget: this.budget } };
     });
-    register('run_command', { description: 'Run one non-interactive shell command in the workspace, such as a test, lint or type check, after the user approves its exact text. Prefer the narrowest command that checks your change (for example one test file). Returns the exit code, duration and combined output; long output keeps the start and the end. There is no input, so prompts, servers and watch modes run until the timeout. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit rather than editing through commands.', inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).default(COMMAND_LIMITS.timeout_seconds_default), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: false } }, async ({ command, cwd, timeout_seconds, reason }, extra) => {
+    register('run_command', { description: 'Run one non-interactive shell command in the workspace, such as a test, lint or type check, after the user approves its exact text. Prefer the narrowest command that checks your change (for example one test file). Returns the exit code, duration and combined output; long output keeps the start and the end. There is no input, so prompts, servers and watch modes run until the timeout. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit rather than editing through commands.', inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).default(COMMAND_LIMITS.timeout_seconds_default), reason: z.string().min(1).max(300).describe('One short sentence telling the user why this command is needed; shown in the approval and the activity feed.') }, annotations: { readOnlyHint: false } }, async ({ command, cwd, timeout_seconds, reason }, extra) => {
       if (this.editScope !== undefined) throw new Error(`This is an inline edit of ${this.editScope}; commands are not part of it. Stage the edit, then tell the user which check to run.`);
       if (this.commandsRun >= COMMAND_LIMITS.per_request) throw new Error(`This request already ran ${COMMAND_LIMITS.per_request} commands, the limit per request. Stop running commands; tell the user what to run or what is missing, and they can ask you to continue.`);
       const root = vscode.workspace.workspaceFolders?.[0];

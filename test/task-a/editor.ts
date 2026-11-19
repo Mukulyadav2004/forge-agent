@@ -97,7 +97,7 @@ export async function run(): Promise<void> {
       const outside = await client.callTool({ name: 'propose_edit', arguments: { path: 'tests/test_helpers.py', base_revision: testRevision, insert_line: 1, new_text: '# not requested\n', explanation: 'Unrequested test edit' } });
       assert.equal(outside.isError, true, 'Edit Selection limits staged edits to the selected file.');
       assert.match(JSON.stringify(outside.content), /limited to src\/flask\/helpers\.py, the file the user selected/u);
-      const command = await client.callTool({ name: 'run_command', arguments: { command: 'echo not part of an inline edit' } });
+      const command = await client.callTool({ name: 'run_command', arguments: { command: 'echo not part of an inline edit', reason: 'Check that inline edits refuse commands' } });
       assert.equal(command.isError, true, 'Edit Selection requests do not run commands.');
       assert.match(JSON.stringify(command.content), /inline edit of src\/flask\/helpers\.py; commands are not part of it/u);
       await client.close();

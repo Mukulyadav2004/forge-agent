@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { agentSpec, classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
 import { readFileSync } from 'node:fs';
 import { evaluateSession } from '../scripts/eval-session.mjs';
-import { buildProjectContext, buildProjectOverview, isArchitectureRequest, OVERVIEW_LIMITS, suggestTestCommands } from '../out/context/projectContext.js';
+import { buildProjectContext, buildProjectOverview, isArchitectureRequest, OVERVIEW_LIMITS, suggestTestCommands, fileOutline } from '../out/context/projectContext.js';
 import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
 import './observability/events.mjs';
@@ -383,4 +383,14 @@ test('the overview suggests ready test commands from the project files, pinned b
   assert.deepEqual(suggest({ 'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }) }, [], 'darwin', ['package.json', 'pnpm-lock.yaml']), ['pnpm test']);
   assert.deepEqual(suggest({ 'package.json': JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }) }, [], 'darwin', ['package.json', 'Cargo.toml']), ['cargo test'], 'npm\'s placeholder test script is not a test command.');
   assert.deepEqual(suggest({}, [], 'darwin', ['README.md']), [], 'No test setup, no suggestion.');
+});
+
+test('a long file read gets an outline of definitions or headings with line numbers', () => {
+  const code = ['import click', '', '@click.command("routes")', '@with_appcontext', 'def routes_command() -> None:', '    pass', '', 'class FlaskGroup(AppGroup):', '    def __init__(self):', '        x = 1', 'export const run = async () => 1;'].join('\n');
+  assert.equal(fileOutline('src/cli.py', code), ['3: @click.command("routes")', '5: def routes_command() -> None:', '8: class FlaskGroup(AppGroup):', '9: def __init__(self):', '11: export const run = async () => 1;'].join('\n'), 'Decorators with arguments, functions, classes and methods are kept; plain statements are not.');
+  const rst = ['Command Line Interface', '======================', '', 'Text.', '', 'Open a Shell', '------------', '', '    $ flask shell', '', '# Markdown title'].join('\n');
+  assert.equal(fileOutline('docs/cli.rst', rst), '1: Command Line Interface\n6: Open a Shell\n11: # Markdown title', 'RST titles are found by their underline.');
+  const many = Array.from({ length: 500 }, (_, index) => `def function_${index}():\n    pass`).join('\n');
+  const capped = fileOutline('big.py', many, 1000);
+  assert.ok(capped.length < 1100 && /… \+\d+ more; read a later range to see them$/u.test(capped), 'The outline is bounded and says what it left out.');
 });
