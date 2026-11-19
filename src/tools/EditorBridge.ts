@@ -110,17 +110,31 @@ export class EditorBridge implements vscode.Disposable {
     for (const file of context.files) this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: file.path, startLine: file.startLine, endLine: file.endLine });
     return context.text;
   }
+  /** Python interpreters of virtual environments at the workspace root (existence only; nothing is run or read). */
+  private async workspaceEnvironments(): Promise<string[]> {
+    const root = vscode.workspace.workspaceFolders?.[0];
+    if (!root) return [];
+    const found: string[] = [];
+    for (const candidate of ['.venv/bin/python', 'venv/bin/python', '.venv/Scripts/python.exe', 'venv/Scripts/python.exe']) {
+      try { await vscode.workspace.fs.stat(vscode.Uri.joinPath(root.uri, candidate)); found.push(candidate); } catch { /* not present */ }
+    }
+    return found;
+  }
+  /** After "command not found" or a missing module, point at the workspace environment or the overview's setup instead of letting the model guess variants. */
+  private async missingToolHint(output: string, exitCode: number | null): Promise<string> {
+    if (exitCode !== 127 && !/command not found|No module named|is not recognized as an internal or external command/u.test(output)) return '';
+    const [environment] = await this.workspaceEnvironments();
+    return environment
+      ? `Hint: a program or module was not found. The workspace has a virtual environment; run Python tools through it, for example ${environment} -m pytest, instead of retrying system commands.`
+      : 'Hint: a program or module was not found and the workspace has no virtual environment. Use the setup commands from the project overview, or ask the user how they run tests. Do not retry variants of the same command.';
+  }
   /** First request of a chat: a depth-2 tree and the project's declared test setup, charged to the budget and shown in the activity. */
   async projectOverview(): Promise<string> {
     const root = vscode.workspace.workspaceFolders?.[0];
     if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) return '';
     const uris = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage,.tox,.nox,.mypy_cache,.pytest_cache,.ruff_cache,target}/**', 3000);
     const paths = uris.map(uri => vscode.workspace.asRelativePath(uri, false)).filter(path => !/(^|\/)\.env(\.|$)/u.test(path));
-    const environments: string[] = [];
-    for (const candidate of ['.venv/bin/python', 'venv/bin/python', '.venv/Scripts/python.exe', 'venv/Scripts/python.exe']) {
-      try { await vscode.workspace.fs.stat(vscode.Uri.joinPath(root.uri, candidate)); environments.push(candidate); } catch { /* not present */ }
-    }
-    const overview = await buildProjectOverview({ paths, environments, readFile: async path => (await this.options.files.open(path)).getText() });
+    const overview = await buildProjectOverview({ paths, environments: await this.workspaceEnvironments(), platform: process.platform, readFile: async path => (await this.options.files.open(path)).getText() });
     if (!overview.text) return '';
     this.budgetUsed += overview.text.length;
     this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob: 'project overview (folders to depth 2)', count: paths.length });
@@ -235,8 +249,9 @@ export class EditorBridge implements vscode.Disposable {
       const where = relative(rootPath, folder) || '.';
       this.activityEvents.fire({ kind: 'command', used: this.budgetUsed, command, cwd: where, exitCode: result.exit_code, timedOut: result.timed_out, cancelled: result.cancelled, durationMs: result.duration_ms, ...(reason ? { reason } : {}) });
       const ended = result.cancelled ? 'cancelled' : result.timed_out ? `stopped at the ${timeout_seconds} s timeout` : `exit code ${result.exit_code ?? result.signal}`;
-      const structured = { command, cwd: where, ...result, context_budget: this.budget };
-      return { content: [{ type: 'text', text: `$ ${command}\n(cwd ${where}) ${ended} after ${(result.duration_ms / 1000).toFixed(1)} s${result.output_truncated ? `; output shortened from ${result.total_output_characters} characters` : ''}\n${result.output}\n${this.budgetNote()}` }], structuredContent: structured };
+      const hint = await this.missingToolHint(result.output, result.exit_code);
+      const structured = { command, cwd: where, ...result, ...(hint ? { hint } : {}), context_budget: this.budget };
+      return { content: [{ type: 'text', text: `$ ${command}\n(cwd ${where}) ${ended} after ${(result.duration_ms / 1000).toFixed(1)} s${result.output_truncated ? `; output shortened from ${result.total_output_characters} characters` : ''}\n${result.output}\n${hint ? `${hint}\n` : ''}${this.budgetNote()}` }], structuredContent: structured };
     });
     register('list_files', { description: 'List up to 100 workspace file paths matching a glob, to get oriented when you do not yet know where relevant code lives. Narrow the glob to a folder or extension when the list is incomplete. A listing shows names only; read files before making claims about them.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');

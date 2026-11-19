@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { agentSpec, classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
 import { readFileSync } from 'node:fs';
 import { evaluateSession } from '../scripts/eval-session.mjs';
-import { buildProjectContext, buildProjectOverview, isArchitectureRequest, OVERVIEW_LIMITS } from '../out/context/projectContext.js';
+import { buildProjectContext, buildProjectOverview, isArchitectureRequest, OVERVIEW_LIMITS, suggestTestCommands } from '../out/context/projectContext.js';
 import { describeApproval, StreamedToolCalls } from '../out/agent/approvalText.js';
 import './sidebar/feedback.mjs';
 import './observability/events.mjs';
@@ -367,4 +367,20 @@ test('a new chat gets a bounded project overview: a depth-2 tree and the test se
   assert.doesNotMatch(js.text, /Python environment/u, 'A project without Python gets no Python line.');
   assert.match((await buildProjectOverview({ paths: ['app.py'], environments: ['.venv/bin/python'], readFile: async () => '' })).text, /Python environments in the workspace: \.venv\/bin\/python/u);
   assert.equal((await buildProjectOverview({ paths: [], environments: [], readFile: async () => '' })).text, '');
+});
+
+test('the overview suggests ready test commands from the project files, pinned by uv.lock when present', () => {
+  const paths = ['pyproject.toml', 'uv.lock', 'src/app/core.py', 'tests/test_core.py'];
+  const pyproject = ['[dependency-groups]', 'docs = ["sphinx"]', 'tests = [', '    "pytest",', '    "uvicorn[standard]",', ']', '', '[tool.pytest.ini_options]', 'testpaths = ["tests"]'].join('\n');
+  const lock = ['[[package]]', 'name = "app"', 'source = { editable = "." }', '', '[package.dev-dependencies]', 'tests = [', '    { name = "pytest", version = "8.4.2", source = { registry = "x" }, marker = "python_full_version < \'3.10\'" },', '    { name = "pytest", version = "9.0.2", source = { registry = "x" }, marker = "python_full_version >= \'3.10\'" },', '    { name = "uvicorn" },', ']', '', '[[package]]', 'name = "uvicorn"', 'version = "0.30.1"'].join('\n');
+  const suggest = (texts, environments = [], platform = 'darwin', list = paths) => suggestTestCommands({ paths: list, texts: new Map(Object.entries(texts)), environments, platform });
+  assert.deepEqual(suggest({ 'pyproject.toml': pyproject }, ['venv/bin/python']), ['venv/bin/python -m pytest tests'], 'An existing environment is used as is.');
+  assert.deepEqual(suggest({ 'pyproject.toml': pyproject }), ['python3 -m venv .venv', '.venv/bin/python -m pip install -e . "pytest" "uvicorn[standard]"', '.venv/bin/python -m pytest tests'], 'The group that holds pytest is installed by name; an extra inside it does not end the list.');
+  assert.equal(suggest({ 'pyproject.toml': pyproject, 'uv.lock': lock })[1], '.venv/bin/python -m pip install -e . "pytest==8.4.2; python_full_version < \'3.10\'" "pytest==9.0.2; python_full_version >= \'3.10\'" "uvicorn==0.30.1"', 'uv.lock pins versions with their markers.');
+  assert.deepEqual(suggest({ 'pyproject.toml': pyproject }, [], 'win32').slice(0, 2), ['py -m venv .venv', '.venv\\Scripts\\python.exe -m pip install -e . "pytest" "uvicorn[standard]"']);
+  assert.equal(suggest({ 'pyproject.toml': '[project.optional-dependencies]\ntest = ["pytest"]' })[1], '.venv/bin/python -m pip install -e ".[test]"');
+  assert.equal(suggest({}, [], 'darwin', ['requirements-dev.txt', 'tests/test_x.py'])[1], '.venv/bin/python -m pip install -r requirements-dev.txt');
+  assert.deepEqual(suggest({ 'package.json': JSON.stringify({ scripts: { test: 'vitest run' } }) }, [], 'darwin', ['package.json', 'pnpm-lock.yaml']), ['pnpm test']);
+  assert.deepEqual(suggest({ 'package.json': JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }) }, [], 'darwin', ['package.json', 'Cargo.toml']), ['cargo test'], 'npm\'s placeholder test script is not a test command.');
+  assert.deepEqual(suggest({}, [], 'darwin', ['README.md']), [], 'No test setup, no suggestion.');
 });

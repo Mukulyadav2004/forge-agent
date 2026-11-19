@@ -5,7 +5,7 @@ import { z } from 'zod';
 
 const CommandSchema = z.object({
   command: z.string(), cwd: z.string(), exit_code: z.number().nullable(), signal: z.string().nullable(), timed_out: z.boolean(), cancelled: z.boolean(),
-  duration_ms: z.number(), output: z.string(), output_truncated: z.boolean(), total_output_characters: z.number(), context_budget: z.object({ used: z.number(), limit: z.number() }),
+  duration_ms: z.number(), output: z.string(), output_truncated: z.boolean(), total_output_characters: z.number(), hint: z.string().optional(), context_budget: z.object({ used: z.number(), limit: z.number() }),
 });
 
 /** run_command through the real MCP server: exit codes, cwd containment, timeout and bounded output. */
@@ -29,7 +29,10 @@ export async function checkCommand(options: { client: Client; frame: Frame }): P
   assert.match(long.output, /characters omitted[\s\S]*LAST-LINE/u, 'The end of the output, where errors usually are, is kept.');
   assert.ok(long.context_budget.used > 0);
   // failing, sleep and long output are three commands that ran (the refused cwd calls do not count); five more reach the limit of eight.
-  for (let index = 4; index <= 8; index += 1) assert.equal((await run({ command: `echo command ${index}` })).data?.exit_code, 0, `Command ${index} of 8 runs.`);
+  const missing = (await run({ command: 'forge-missing-tool-check' })).data;
+  assert.equal(missing?.exit_code, 127);
+  assert.match(missing?.hint ?? '', /^Hint: a program or module was not found and the workspace has no virtual environment\./u, 'A missing tool points at the overview setup instead of variants.');
+  for (let index = 5; index <= 8; index += 1) assert.equal((await run({ command: `echo command ${index}` })).data?.exit_code, 0, `Command ${index} of 8 runs.`);
   const ninth = await run({ command: 'echo one too many' });
   assert.equal(ninth.result.isError, true, 'A request runs at most eight commands.');
   assert.match(JSON.stringify(ninth.result.content), /already ran 8 commands, the limit per request/u);
