@@ -413,3 +413,24 @@ test('a new-file approval card shows the content and says Approve creates it', (
   assert.match(card, /\+ def test_config\(\):\n\+     assert True/u);
   assert.match(describeApproval(call), /Approving only stages it for review/u);
 });
+
+test('a session gets the model identity, the workspace AGENTS.md or CLAUDE.md, and an <env> block after the prompt', async () => {
+  const { environmentInstructions, findGitRoot, loadWorkspaceInstructions, modelIdentity, renderProjectInstructions, MAX_INSTRUCTION_CHARACTERS } = await import('../out/context/environment.js');
+  const env = environmentInstructions({ date: new Date('2026-11-19T10:00:00Z'), workspaceRoot: '/work/flask', gitRoot: '/work/flask', platform: 'darwin' });
+  assert.match(env, /^Today's date: Thu Nov 19 2026\n[\s\S]*<env>\n {2}Working directory: \/work\/flask\n {2}Workspace root folder: \/work\/flask\n {2}Is directory a git repo: yes\n {2}Platform: darwin\n<\/env>$/u);
+  assert.equal(findGitRoot('/work/flask/src', path => path === '/work/flask/.git'), '/work/flask');
+  assert.equal(modelIdentity('google-gemini/gemini-3-1-flash-lite'), '# Your Model\n- Name: google-gemini/gemini-3-1-flash-lite\n- Provider ID: google-gemini\n- Model ID: gemini-3-1-flash-lite');
+  const files = { 'AGENTS.md': '# Rules\nUse pytest.\n', 'CLAUDE.md': 'Fallback only.\n' };
+  const read = async path => { if (!(path in files)) throw new Error('missing'); return files[path]; };
+  const loaded = await loadWorkspaceInstructions(read);
+  assert.deepEqual(loaded.file, { path: 'AGENTS.md', lines: 2 });
+  assert.match(loaded.text, /untrusted data[\s\S]*<project_instructions path="AGENTS\.md">\n# Rules\nUse pytest\.\n<\/project_instructions>$/u);
+  assert.doesNotMatch(loaded.text, /Fallback only/u, 'AGENTS.md wins; CLAUDE.md is only a fallback.');
+  delete files['AGENTS.md'];
+  assert.equal((await loadWorkspaceInstructions(read)).file?.path, 'CLAUDE.md');
+  assert.equal((await loadWorkspaceInstructions(async () => { throw new Error('none'); })).text, '', 'No instruction file, no block.');
+  assert.ok(renderProjectInstructions([{ path: 'AGENTS.md', text: 'x'.repeat(100_000) }]).length <= MAX_INSTRUCTION_CHARACTERS, 'A huge instruction file is cut to the limit.');
+  const spec = agentSpec({ model: 'p/m', projectInstructions: '<project_instructions path="AGENTS.md">\nRules\n</project_instructions>', environment: env });
+  const order = ['You are Forge Agent', '# Your Model', '<project_instructions path="AGENTS.md">', '<env>\n'].map(marker => spec.instructions.indexOf(marker));
+  assert.ok(order.every((index, position) => index >= 0 && (position === 0 || index > order[position - 1])), `Prompt, identity, instructions, then env (${order}).`);
+});

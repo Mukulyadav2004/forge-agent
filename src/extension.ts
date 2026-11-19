@@ -40,6 +40,7 @@ export function activate(context: vscode.ExtensionContext): void {
     openFile: options => bridge.openFile(options),
     architectureContext: () => bridge.architectureContext(),
     projectOverview: () => bridge.projectOverview(),
+    projectInstructions: () => bridge.projectInstructions(),
     prepareEdit: (name, argumentsJson) => bridge.prepareEdit(name, argumentsJson),
     settleEdits: allow => bridge.settleEdits(allow),
     beginRequest: scope => bridge.beginRequest(scope),

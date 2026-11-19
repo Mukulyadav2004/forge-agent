@@ -2,6 +2,8 @@ import { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import { agentInstructions } from './instructions';
 import definition from './forge-agent.json';
+import { existsSync } from 'node:fs';
+import { environmentInstructions, findGitRoot, modelIdentity } from '../context/environment';
 import { SessionTrace } from '../observability/events';
 import type { SessionEvent } from '../observability/events';
 
@@ -18,13 +20,14 @@ export function classifyModelError(message: string): { transient: boolean; summa
 }
 
 /** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
-export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean }): TrueForgeApi.AgentSpec {
+export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean; projectInstructions?: string; environment?: string }): TrueForgeApi.AgentSpec {
   // forgeAgent.saveOnApprove (default on): TrueForge pauses on every propose_edit and write_file so the user reviews the diff before it is saved.
   // Off: propose_edit only stages a diff, and the user applies it later in Review changes.
   const editorServer = { ...definition.editorServer, requireApprovalForTools: definition.editorServer.requireApprovalForTools.filter(tool => options.approveEdits !== false || (tool !== 'propose_edit' && tool !== 'write_file')) };
   return {
     model: { name: options.model, ...(options.reasoningEffort ? { params: { reasoningEffort: options.reasoningEffort } } : {}) },
-    instructions: agentInstructions,
+    // Our prompt, then the model's identity, the workspace's AGENTS.md or CLAUDE.md, and the <env> block (opencode's order).
+    instructions: [agentInstructions, modelIdentity(options.model), options.projectInstructions?.trim(), options.environment?.trim()].filter(Boolean).join('\n\n'),
     // JSON imports widen literals such as "input_tokens" to string; TrueForge validates the spec when the session is created.
     config: definition.config as TrueForgeApi.RuntimeConfig,
     mcpServers: options.connector ? [{ name: options.connector, ...editorServer }] : [],
@@ -51,7 +54,7 @@ export class ForgeSession {
   private lastEventId: string | undefined;
   private paused = false;
   private cancelled = false;
-  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
+  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; workspaceRoot?: string; projectInstructions?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
     this.trace = new SessionTrace({ model: options.model, sink: event => ForgeSession.observe(event) });
     this.client = createClient(options.baseUrl);
     if (!/^[^/\s]+\/\S+$/u.test(options.model)) {
@@ -112,7 +115,14 @@ export class ForgeSession {
     this.options.model = model;
   }
   private spec(model: string): TrueForgeApi.AgentSpec {
-    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits });
+    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits, projectInstructions: this.options.projectInstructions, environment: this.environment() });
+  }
+  /** Date, working directory, git and platform, computed whenever the spec is sent (a new session or a model switch). */
+  private environment(): string {
+    const root = this.options.workspaceRoot;
+    let gitRoot: string | undefined;
+    try { gitRoot = root ? findGitRoot(root, existsSync) : undefined; } catch { gitRoot = undefined; }
+    return environmentInstructions({ date: new Date(), workspaceRoot: root, gitRoot, platform: process.platform });
   }
   private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], previousTurnId?: string): Promise<void> {
     this.cancelled = false;

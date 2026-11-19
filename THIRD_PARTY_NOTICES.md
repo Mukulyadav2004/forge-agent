@@ -58,6 +58,7 @@ The apply/undo transaction service and workspace guards are Forge Agent's implem
 - Upstream: https://github.com/anomalyco/opencode; reference checkout at commit `3aaac7731360a7be32cc69b65c95add4080f04a9`.
 - Copyright: 2025 opencode. License: MIT; the original licence and copyright notice are retained in `licenses/opencode-MIT.txt`.
 - Ported in: `src/edits/match.ts` from `packages/core/src/tool/plugin/edit.ts` (exact, typographic-variant and per-line trailing-whitespace matching; the closest-lines hint on a miss). Ported by the team on branch `context-pi-opencode-alignment`; brought to `main` unchanged.
+- Also ported: `src/context/environment.ts` from `packages/core/src/instructions/builtins.ts` and `plugin/identity.ts` (the date/`<env>` block and the model identity block); the `<project_instructions>` format for AGENTS.md/CLAUDE.md follows the same branch's port of opencode's instruction discovery. Forge reads only the workspace root's file, never global or parent-folder files.
 - Used by: the `old_text` path of `EditService.stageEdit`, which still requires exactly one match and applies it to the in-memory proposal; nothing is written until the user approves or applies it.
 
 ## jsdiff dependency

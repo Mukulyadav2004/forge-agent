@@ -140,7 +140,9 @@ src/tools/EditorBridge.ts      MCP tools: list_files, read_file,
 src/edits/review.ts            review schemas
 src/edits/EditService.ts       proposals, transactions, undo
 src/edits/lineChanges.ts       bounded local hunk computation
-src/context/projectContext.ts bounded architecture context
+src/context/projectContext.ts bounded architecture context, project overview
+src/context/environment.ts    <env> block, model identity, workspace AGENTS.md
+                               (ported from opencode via the team branch)
 src/workspace/WorkspaceFiles.ts workspace/file safety
 src/editor/ClineEditPreview.ts diff preview adapted from Cline (Apache-2.0)
 src/webview/ClineDiffLines.ts   review rows adapted from Cline

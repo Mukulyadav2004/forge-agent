@@ -80,6 +80,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
       projectOverview: () => Promise<string>;
+      projectInstructions: () => Promise<string>;
       prepareEdit: (name: 'propose_edit' | 'write_file', argumentsJson: string) => Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }>;
       settleEdits: (allow: boolean) => Promise<void>;
       /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
@@ -561,7 +562,10 @@ ${selectedText}`;
         if (!model) throw new Error("Model not configured. Set forgeAgent.model after adding a model in local TrueForge.");
         const connector = config.get<string>("connector", "forge-editor");
         const editorManifest = connector ? await this.actions.getEditorManifest(connector) : undefined;
-        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), onEvent: event => this.event(chat, event) });
+        // A new session gets the workspace's AGENTS.md or CLAUDE.md and an <env> block after the prompt (opencode's order).
+        const projectInstructions = await this.actions.projectInstructions().catch(() => '');
+        const workspaceRoot = vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme === 'file')?.uri.fsPath;
+        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), workspaceRoot, projectInstructions, onEvent: event => this.event(chat, event) });
       }
       chat.turnError = undefined;
       if (!approvals) chat.lastInput = preparedInput;

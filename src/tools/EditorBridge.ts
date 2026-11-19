@@ -12,6 +12,7 @@ import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
 import type { ActivityEntry } from '../shared/messages';
 import { buildProjectContext, buildProjectOverview, fileOutline } from '../context/projectContext';
+import { loadWorkspaceInstructions } from '../context/environment';
 import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
@@ -234,6 +235,15 @@ export class EditorBridge implements vscode.Disposable {
     return environment
       ? `Hint: a program or module was not found. The workspace has a virtual environment; run Python tools through it, for example ${environment} -m pytest, instead of retrying system commands.`
       : 'Hint: a program or module was not found and the workspace has no virtual environment. Use the setup commands from the project overview, or ask the user how they run tests. Do not retry variants of the same command.';
+  }
+  /** A new session's AGENTS.md or CLAUDE.md from the workspace root, read through the guarded reader, counted in the budget and shown in the activity. */
+  async projectInstructions(): Promise<string> {
+    if (!vscode.workspace.isTrusted) return '';
+    const loaded = await loadWorkspaceInstructions(async path => (await this.options.files.open(path)).getText());
+    if (!loaded.text || !loaded.file) return '';
+    this.budgetUsed += loaded.text.length;
+    this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: loaded.file.path, startLine: 1, endLine: loaded.file.lines });
+    return loaded.text;
   }
   /** First request of a chat: a depth-2 tree and the project's declared test setup, charged to the budget and shown in the activity. */
   async projectOverview(): Promise<string> {
