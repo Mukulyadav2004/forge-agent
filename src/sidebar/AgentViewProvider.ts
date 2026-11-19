@@ -334,6 +334,8 @@ ${selectedText}`;
     const chat = this.blankChat(`Chat ${this.chats.length + 1}`);
     this.chats.push(chat);
     this.bindChat(chat);
+    // A new chat starts without the review history of earlier chats (the single-chat New Task always cleared it).
+    this.reviewFeedback.clear();
     this.publish();
   }
   refreshReview(): void { this.publish(); }

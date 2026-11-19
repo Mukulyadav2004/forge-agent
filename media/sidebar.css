@@ -34,6 +34,8 @@ h1 {
 header { display: flex; align-items: center; flex-wrap: wrap; gap: 0.375rem; min-width: 0; }
 header h1 { flex: 1 1 auto; }
 #chat-list { display: flex; gap: 0.25rem; flex: 1 0 100%; min-width: 0; overflow: auto; }
+/* One chat needs no tab row: the + button opens another, and the row appears once there are two. */
+#chat-list:not(:has(> :nth-child(2))) { display: none; }
 #new-chat-button { flex: 0 0 auto; width: 1.5rem; height: 1.5rem; padding: 0; font-size: 1.125rem; line-height: 1; }
 button.chat-tab { display: inline-flex; align-items: center; gap: 0.25rem; flex: 0 0 auto; max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0.125rem 0.5rem; font-size: 0.6875rem; border-radius: 0.375rem; background: transparent; color: var(--vscode-descriptionForeground); border-color: transparent; }
 button.chat-tab[aria-selected="true"] { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); border-color: var(--vscode-panel-border); }
@@ -146,7 +148,9 @@ form > label { position: absolute; width: 0.0625rem; height: 0.0625rem; overflow
 .composer textarea { height: 2.5rem; min-height: 2.5rem; padding: 0.125rem 0.25rem; border: 0; background: transparent; }
 .composer textarea:focus-visible { outline: none; }
 /* Cursor-style toolbar: mode label and small pills on the left, one round send button on the right. */
-.composer-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; min-width: 0; }
+/* The mode buttons stay on one row beside Send; a very narrow panel scrolls them sideways instead of adding rows. */
+.composer-tools { display: flex; flex-wrap: nowrap; align-items: center; gap: 0.25rem; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.composer-tools > * { flex-shrink: 0; }
 .mode-pill { padding: 0.125rem 0.5rem; font-size: 0.6875rem; font-weight: 600; color: var(--vscode-foreground); border: 0.0625rem solid var(--vscode-panel-border); border-radius: 0.375rem; }
 button.pill { padding: 0.125rem 0.5rem; font-size: 0.6875rem; border-radius: 0.375rem; }
 .composer .send { width: 1.75rem; height: 1.75rem; padding: 0; border-radius: 50%; font-size: 0.9375rem; line-height: 1; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -179,7 +183,6 @@ textarea::placeholder {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  flex-wrap: wrap;
 }
 
 .composer-end { display: flex; align-items: center; gap: 0.375rem; margin-left: auto; }
@@ -190,6 +193,7 @@ textarea::placeholder {
 .meter-value { stroke-linecap: round; transform: rotate(-90deg); transform-origin: 8px 8px; stroke-dasharray: 37.7; stroke-dashoffset: 37.7; }
 
 .composer-actions button { padding: 0.25rem 0.625rem; font-size: 0.75rem; }
+.composer-actions button.pill { padding: 0.125rem 0.375rem; font-size: 0.6875rem; }
 
 .hint {
   font-size: 0.75rem;
