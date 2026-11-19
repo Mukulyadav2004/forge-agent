@@ -43,7 +43,12 @@ export function activate(context: vscode.ExtensionContext): void {
     projectInstructions: () => bridge.projectInstructions(),
     prepareEdit: (name, argumentsJson) => bridge.prepareEdit(name, argumentsJson),
     settleEdits: allow => bridge.settleEdits(allow),
-    beginRequest: scope => bridge.beginRequest(scope),
+    beginRequest: (scope, requestText) => bridge.beginRequest(scope, requestText),
+    finishChecklist: () => bridge.finishChecklist(),
+    openRequirements: () => bridge.openRequirements(),
+    lastCommandResult: () => bridge.lastCommandResult(),
+    commandsLeft: () => bridge.commandsLeft(),
+    guardDeny: (name, argumentsJson, reason) => bridge.guardDeny(name, argumentsJson, reason),
     edits,
   });
   context.subscriptions.push(bridge.onDidActivity(entry => provider.recordActivity(entry)));

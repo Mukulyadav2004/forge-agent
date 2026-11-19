@@ -297,7 +297,26 @@ function activityRow(entry: Exclude<ActivityEntry, { kind: 'request' }>, added: 
     case 'context':
       kind.textContent = 'Given';
       main = [sourceLink(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];
+      break;    case 'plan': {
+      // The agent's plan: each requirement in the user's words, the file it chose, and the existing code it copies.
+      kind.textContent = entry.stage === 'start' ? 'Plan' : 'Checklist';
+      const open = entry.items.filter(item => item.status === 'open').length;
+      main = [entry.stage === 'start' ? `${plural(entry.items.length, 'requirement')}, each with the file the agent chose` : open ? `${open} of ${entry.items.length} requirement(s) still without a change` : `all ${entry.items.length} requirement(s) done`];
+      if (entry.stage === 'end' && open) row.classList.add('activity-failed');
+      const list = document.createElement('ul');
+      list.className = 'plan-items';
+      for (const item of entry.items) {
+        const li = document.createElement('li');
+        li.className = `plan-item plan-${item.status}`;
+        const mark = { planned: '•', changed: '✓', skipped: '–', open: '○' }[item.status];
+        li.append(`${mark} "${item.quote}" → `, sourceLink(item.file, 1, item.file), item.sibling ? ` (like ${item.sibling})` : '', item.note ? ` — ${item.note}` : '');
+        list.append(li);
+      }
+      main.push(list);
+      // What the last command really returned, so the outcome is visible whatever the summary says.
+      if (entry.lastCommand) { notes.push(entry.lastCommand); if (!/→ exit 0$/u.test(entry.lastCommand)) row.classList.add('activity-failed'); }
       break;
+    }
   }
   if ('reason' in entry && entry.reason) notes.push(entry.reason);
   if (added > 0) main.push(` (+${size(added)} chars)`);

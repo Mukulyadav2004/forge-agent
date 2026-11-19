@@ -434,3 +434,63 @@ test('a session gets the model identity, the workspace AGENTS.md or CLAUDE.md, a
   const order = ['You are Forge Agent', '# Your Model', '<project_instructions path="AGENTS.md">', '<env>\n'].map(marker => spec.instructions.indexOf(marker));
   assert.ok(order.every((index, position) => index >= 0 && (position === 0 || index > order[position - 1])), `Prompt, identity, instructions, then env (${order}).`);
 });
+
+test('plan_task covers the user\'s words, the checklist tracks changed files, and repeated failures are recognised', async () => {
+  const { checkPlanCoverage, checklistLine, failureSignature, itemStatus } = await import('../out/context/plan.js');
+  const request = 'Add a new built-in CLI command flask config that prints the loaded application\'s configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as "***". It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands.';
+  const feature = { quote: 'Add a new built-in CLI command flask config that prints the loaded application\'s configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as "***"', change: 'Add config_command', file: 'src/flask/cli.py', sibling: 'routes_command' };
+  const help = { quote: 'It must appear in flask --help', change: 'Register it in FlaskGroup', file: 'src/flask/cli.py' };
+  const test = { quote: 'be covered by a test', change: 'Add a CLI test', file: 'tests/test_cli.py' };
+  const docs = { quote: 'be documented alongside the other built-in commands', change: 'Document it', file: 'docs/cli.rst' };
+  assert.deepEqual(checkPlanCoverage(request, [feature, help, test, docs]), { ok: true });
+  const missingDocs = checkPlanCoverage(request, [feature, help, test]);
+  assert.equal(missingDocs.ok, false);
+  assert.match(missingDocs.message, /not in your plan yet: "be documented alongside the other built-in commands\."/u, 'A forgotten part of the request is named in the user\'s words.');
+  assert.match(checkPlanCoverage(request, [{ ...docs, quote: 'write docs in docs/cli.rst' }, feature, help, test]).message, /not in the user's request/u, 'Quotes must be the user\'s words.');
+  assert.match(checkPlanCoverage(request, [{ ...feature, quote: request }]).message, /^Split the request/u, 'One requirement for the whole request is refused.');
+  assert.deepEqual(checkPlanCoverage('', [docs]), { ok: true }, 'Without request text there is nothing to compare.');
+  const plan = [feature, help, test, docs, { quote: 'covered by a test', change: 'none', file: 'tests/x.py', skip_reason: 'test_cli.py already covers it' }];
+  const changed = new Set(['src/flask/cli.py', 'tests/test_cli.py']);
+  assert.equal(itemStatus(docs, changed), 'open');
+  assert.equal(itemStatus(plan[4], changed), 'skipped');
+  assert.equal(checklistLine(plan, changed), 'Checklist: 4 of 5 requirement(s) have a change. Still open: "be documented alongside the other built-in commands" (planned: docs/cli.rst).');
+  assert.equal(checklistLine(plan, new Set([...changed, 'docs/cli.rst'])), 'Checklist: all 5 requirement(s) have a change or a stated reason.');
+  assert.equal(checklistLine(undefined, changed), '');
+  const first = "E   AssertionError: No such command 'config'.\n1 failed in 0.03s\n<Result at 0x10a1b2c3d>";
+  const second = "E   AssertionError: No such command 'config'.\n1 failed in 0.05s\n<Result at 0x99ffee00>";
+  assert.equal(failureSignature(first), failureSignature(second), 'Timings and addresses do not make two identical failures differ.');
+  assert.notEqual(failureSignature(first), failureSignature('E   TypeError: Object of type timedelta is not JSON serializable'));
+  assert.equal(failureSignature('3 passed in 0.02s'), '');
+});
+
+test('the setup command pins the project runtime packages from uv.lock too, so a fresh environment matches the lock', async () => {
+  const { suggestTestCommands } = await import('../out/context/projectContext.js');
+  const pyproject = ['[dependency-groups]', 'tests = ["pytest"]'].join('\n');
+  const lock = ['[[package]]', 'name = "app"', 'source = { editable = "." }', 'dependencies = [', '    { name = "werkzeug" },', '    { name = "click", version = "8.3.1", source = { registry = "x" }, marker = "python_full_version >= \'3.10\'" },', ']', '', '[package.dev-dependencies]', 'tests = [', '    { name = "pytest" },', ']', '', '[[package]]', 'name = "werkzeug"', 'version = "3.1.5"', '', '[[package]]', 'name = "pytest"', 'version = "9.0.2"'].join('\n');
+  const [, install] = suggestTestCommands({ paths: ['pyproject.toml', 'uv.lock', 'tests/test_x.py'], texts: new Map([['pyproject.toml', pyproject], ['uv.lock', lock]]), environments: [], platform: 'darwin' });
+  assert.equal(install, '.venv/bin/python -m pip install -e . "werkzeug==3.1.5" "click==8.3.1; python_full_version >= \'3.10\'" "pytest==9.0.2"');
+});
+
+test('the run guard follows Cline: a note at 3 identical calls, a stop at 5, a stop after 6 errors in a row, reset by success; stalls get a progress report', async () => {
+  const { RunGuard, progressReport, callSignature } = await import('../out/context/plan.js');
+  assert.equal(callSignature('read_file', { b: 1, a: 2 }), callSignature('read_file', { a: 2, b: 1 }), 'Key order does not matter.');
+  const guard = new RunGuard();
+  const call = { path: 'a.py', start_line: 1 };
+  assert.deepEqual([guard.call('read_file', call), guard.call('read_file', call)], [{}, {}]);
+  assert.match(guard.call('read_file', call).notice ?? '', /this exact read_file call 3 times in a row/u);
+  assert.deepEqual(guard.call('read_file', call), {});
+  assert.match(guard.call('read_file', call).stop ?? '', /same read_file call 5 times in a row/u);
+  assert.deepEqual(guard.call('read_file', { path: 'b.py' }), {}, 'A different call starts a new count.');
+  for (let index = 0; index < 5; index++) assert.deepEqual(guard.outcome(false, 'old_text was not found'), {});
+  assert.deepEqual(guard.outcome(true), {}, 'A success resets the error streak.');
+  for (let index = 0; index < 5; index++) guard.outcome(false, 'x');
+  assert.match(guard.outcome(false, 'old_text was not found').stop ?? '', /6 errors in a row \(latest: old_text was not found\)/u);
+  assert.deepEqual([guard.commandResult('pytest', 'E boom'), guard.commandResult('pytest', 'E boom'), guard.commandResult('pytest', 'E boom')], [1, 2, 3]);
+  assert.equal(guard.commandResult('pytest', ''), 0, 'A passing run clears the failure count.');
+  assert.equal(guard.commandResult('pytest', 'E boom'), 1);
+  for (let index = 0; index < 6; index++) guard.edited('src/cli_config.py');
+  assert.deepEqual(guard.topEdits(), [['src/cli_config.py', 6]]);
+  assert.deepEqual([guard.firstReport('fail:pytest'), guard.firstReport('fail:pytest')], [true, false], 'Each stall is reported once.');
+  const report = progressReport({ failing: { command: 'pytest tests/test_cli.py', count: 3, error: 'E   AssertionError: assert 1 == 0' }, edits: guard.topEdits(), open: [{ quote: 'be documented alongside the other built-in commands', change: '', file: 'docs/cli.rst' }], commandsLeft: 6, siblings: ['run_command'] });
+  assert.match(report, /^Progress check:\n- pytest tests\/test_cli\.py has failed 3 times in a row with the same error: E {3}AssertionError: assert 1 == 0\n- Edits since the plan: src\/cli_config\.py ×6\n- Still open: "be documented alongside the other built-in commands"\n- Commands left in this request: 6\nChoose one and say which: \(a\) step back and change approach, comparing with how run_command is defined, registered and tested; \(b\) ask the user with ask_user_question/u);
+});

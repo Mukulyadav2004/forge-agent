@@ -54,7 +54,17 @@ export type ActivityEntry = { at?: number } & (
   /** An editor tool refused or failed; `message` is what the agent was told. */
   | { kind: 'refused'; tool: string; message: string }
   /** TrueForge summarised the conversation: size that triggered it, the threshold, and the size of the next model call afterwards. */
-  | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number });
+  | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number }
+  /** The agent's plan (plan_task) when made, and the checklist when the turn ends: each requirement, its file and status. */
+  | { kind: 'plan'; stage: 'start' | 'end'; items: PlanRow[]; lastCommand?: string });
+
+export interface PlanRow { quote: string; file: string; sibling?: string; status: 'planned' | 'changed' | 'skipped' | 'open'; note?: string }
+const PLAN_STATUSES = new Set(['planned', 'changed', 'skipped', 'open']);
+function isPlanRow(value: unknown): value is PlanRow {
+  return isRecord(value) && typeof value.quote === 'string' && value.quote.length <= 400 && typeof value.file === 'string' && value.file.length <= 500
+    && (value.sibling === undefined || (typeof value.sibling === 'string' && value.sibling.length <= 200)) && typeof value.status === 'string' && PLAN_STATUSES.has(value.status)
+    && (value.note === undefined || (typeof value.note === 'string' && value.note.length <= 400));
+}
 
 function isActivityEntry(value: unknown): value is ActivityEntry {
   if (!isRecord(value) || (value.reason !== undefined && typeof value.reason !== 'string')) return false;
@@ -71,6 +81,7 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     case 'command': return text('command') && text('cwd') && (value.exitCode === null || count('exitCode')) && typeof value.timedOut === 'boolean' && typeof value.cancelled === 'boolean' && count('durationMs');
     case 'context': return text('path') && count('startLine') && count('endLine');
     case 'refused': return text('tool') && text('message');
+    case 'plan': return (value.stage === 'start' || value.stage === 'end') && Array.isArray(value.items) && value.items.length <= 12 && value.items.every(isPlanRow) && (value.lastCommand === undefined || (text('lastCommand') && String(value.lastCommand).length <= 300));
     case 'compaction': return count('contextTokens') && count('thresholdTokens') && typeof value.done === 'boolean' && (value.durationMs === undefined || count('durationMs')) && (value.afterTokens === undefined || count('afterTokens'));
     default: return false;
   }

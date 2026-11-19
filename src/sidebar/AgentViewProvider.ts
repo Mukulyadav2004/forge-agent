@@ -33,6 +33,8 @@ interface HeldChat {
   activity: ActivityEntry[];
   heldSelections: ComposerSelection[];
   questions: Array<AgentQuestion & { threadId: string }>;
+  /** The end-of-turn check was sent for the current request (reset only by a new message from the user). */
+  checkSent?: boolean;
 }
 
 export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
@@ -84,7 +86,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       prepareEdit: (name: 'propose_edit' | 'write_file', argumentsJson: string) => Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }>;
       settleEdits: (allow: boolean) => Promise<void>;
       /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
-      beginRequest: (scope?: string) => void;
+      beginRequest: (scope?: string, requestText?: string) => void;
+      finishChecklist: () => Array<{ quote: string; file: string }>;
+      openRequirements: () => Array<{ quote: string; file: string }>;
+      lastCommandResult: () => { command: string; exitCode: number | null } | undefined;
+      commandsLeft: () => number;
+      guardDeny: (name: string, argumentsJson: string, reason: string) => string;
       edits: EditService;
     },
   ) {
@@ -227,11 +234,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   }
 
   /** Runs this agent's turn when the editor is free. Other agents keep their own transcripts and wait. */
-  private enqueue(chat: HeldChat, input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], approvals?: TrueForgeApi.UserToolApprovalInputEvent[]): void {
+  private enqueue(chat: HeldChat, input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], approvals?: TrueForgeApi.UserToolApprovalInputEvent[], followUp = false): void {
     chat.cancellationRequested = false;
     chat.busy = true;
     chat.status = 'Waiting to start';
-    this.jobs.push(() => this.run(chat, input, approvals));
+    this.jobs.push(() => this.run(chat, input, approvals, followUp));
     this.show(chat);
     this.kick();
   }
@@ -331,6 +338,20 @@ ${selectedText}`;
   async newTask(): Promise<void> {
     this.sync();
     if (this.chats.length >= 8) { void vscode.window.showInformationMessage('Eight chats are open. That is the limit for now.'); return; }
+    // A chat that is still running or waiting for the user would keep its turn open and its pending edits in Review
+    // changes. Ask first; only on yes is it cancelled (pending edits discarded, approved files stay saved with Undo).
+    const current = this.activeChat();
+    if (current && (current.busy || current.approvals.length > 0 || current.questions.length > 0)) {
+      const waiting = current.approvals.length > 0 || current.questions.length > 0;
+      const stop = 'Cancel this chat and start a new one';
+      const choice = await vscode.window.showWarningMessage(
+        waiting ? `"${current.title}" is waiting for your answer.` : `"${current.title}" is still running.`,
+        { modal: true, detail: 'Starting a new chat cancels it first: its pending edits are discarded and nothing more is written. Files you already approved stay saved; Undo this request restores them.' },
+        stop,
+      );
+      if (choice !== stop) return;
+      await this.cancel();
+    }
     const chat = this.blankChat(`Chat ${this.chats.length + 1}`);
     this.chats.push(chat);
     this.bindChat(chat);
@@ -366,6 +387,8 @@ ${selectedText}`;
   recordActivity(entry: ActivityEntry): void {
     const chat = this.owner ?? this.activeChat();
     if (!chat) return;
+    // The guard (Cline's loop and error-streak limits) asks for a stop through a 'forge' refusal.
+    if (entry.kind === 'refused' && entry.tool === 'forge') this.stopLooping(chat, entry.message);
     if (entry.kind === 'open') {
       const path = entry.path;
       const search = [...chat.activity].reverse().find(item => item.kind === 'search' && item.files.includes(path));
@@ -417,12 +440,20 @@ ${selectedText}`;
    * When every waiting approval was decided without the user (Edit Selection or an invalid call), the turn resumes at once.
    */
   private async prepareApprovals(chat: HeldChat): Promise<void> {
+    // Commands beyond the per-request limit would only be refused after your approval: deny them without asking.
+    let commandsLeft = this.actions.commandsLeft();
+    for (const item of chat.approvals) {
+      if (this.approvalCalls.get(item.toolCallId)?.name !== 'run_command' || this.presetDecisions.has(item.toolCallId)) continue;
+      if (commandsLeft > 0) { commandsLeft--; continue; }
+      const capReason = 'This request already used its command limit, so Forge did not ask the user. Do not request more commands; write your summary, saying which checks did not run or still fail.';
+      this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: this.actions.guardDeny('run_command', this.approvalCalls.get(item.toolCallId)?.arguments ?? '', capReason) });
+    }
     for (const item of chat.approvals) {
       const call = this.approvalCalls.get(item.toolCallId);
       if ((call?.name !== 'propose_edit' && call?.name !== 'write_file') || this.presetDecisions.has(item.toolCallId)) continue;
       const prepared = await this.actions.prepareEdit(call.name, call.arguments);
       if (prepared.status === 'stage') this.presetDecisions.set(item.toolCallId, { status: 'allow' });
-      else if (prepared.status === 'invalid') this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: `The editor could not build this edit, so it was not shown to the user: ${prepared.message}` });
+      else if (prepared.status === 'invalid') this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: this.actions.guardDeny(call.name, call.arguments, `The editor could not build this edit, so it was not shown to the user: ${prepared.message}`) });
       else {
         this.presetDecisions.set(item.toolCallId, null);
         chat.messages.push({ id: randomUUID(), role: 'assistant', text: describeApproval(call, { saveOnApprove: true }) });
@@ -481,8 +512,23 @@ ${selectedText}`;
       this.kick();
     }
   }
-  private async cancel(): Promise<void> {
-    const chat = this.activeChat();
+  /** Why the end-of-turn check is needed: open requirements of the plan, or a last command that failed. */
+  private checkReasons(): string[] {
+    const open = this.actions.openRequirements();
+    const last = this.actions.lastCommandResult();
+    return [
+      open.length ? `These requirements from your plan have no change yet: ${open.map(item => `"${item.quote}" (planned: ${item.file})`).join('; ')}. Do them now, or call plan_task again with a skip_reason that says plainly why not.` : '',
+      last && last.exitCode !== 0 ? `The last command (${last.command.slice(0, 160)}) ended with exit ${last.exitCode ?? 'signal'}. Fix the cause, or say plainly in your summary that it still fails.` : '',
+    ].filter(Boolean);
+  }
+  /** A stop the guard asked for: say why in the conversation, then cancel like the Cancel button (saved files stay, with Undo). */
+  private stopLooping(chat: HeldChat, reason: string): void {
+    if (!chat.busy || chat.cancellationRequested) return;
+    chat.messages.push({ id: randomUUID(), role: 'assistant', text: `**Forge stopped this turn:** ${reason.replace(/^Forge stopped the turn: /u, '')} Nothing more was run or written. Files you approved stay saved (Undo this request restores them). Send a message with guidance to continue.` });
+    void this.cancel(chat);
+  }
+  private async cancel(target?: HeldChat): Promise<void> {
+    const chat = target ?? this.activeChat();
     if (!chat) return;
     chat.cancellationRequested = true;
     this.cancellationRequested = true;
@@ -531,7 +577,9 @@ ${selectedText}`;
       await chat.session.send(chat.lastInput, { retry: true });
     }
   }
-  private async run(chat: HeldChat, input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], approvals?: TrueForgeApi.UserToolApprovalInputEvent[]): Promise<void> {
+  /** followUp: the one automatic checklist message continues the same request (same plan, budget and saved files). */
+  private async run(chat: HeldChat, input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], approvals?: TrueForgeApi.UserToolApprovalInputEvent[], followUp = false): Promise<void> {
+    let nudge: string | undefined;
     if (chat.cancellationRequested && !approvals) { chat.busy = false; chat.status = 'Cancelled before this agent started.'; this.show(chat); return; }
     this.owner = chat;
     chat.cancellationRequested = false;
@@ -541,7 +589,17 @@ ${selectedText}`;
     try {
       this.actions.edits.beginTurn();
       const selectionScoped = Boolean(chat.editScope);
-      if (!approvals) { this.actions.beginRequest(chat.editScope); chat.editScope = undefined; }
+      // The request's own words (without attached selections) are what plan_task must cover.
+      const requestText = (input?.find(event => event.type === 'user.message')?.content ?? '').toString().split('\n\nFile: ')[0] ?? '';
+      if (!approvals && !followUp) { this.actions.beginRequest(chat.editScope, requestText); chat.editScope = undefined; chat.checkSent = false; }
+      // The automatic check goes out only if something is still open when its turn starts.
+      if (followUp) {
+        const reasons = this.checkReasons();
+        if (!reasons.length) { chat.status = 'Checklist complete.'; return; }
+        const text = `Forge check (sent automatically, once per request): ${reasons.join(' ')}`;
+        chat.messages.push({ id: randomUUID(), role: 'user', text });
+        input = [{ type: 'user.message', content: text }];
+      }
       // The first request of a chat gets the project overview (tree and test setup) once; Edit Selection stays on its selection.
       let overview = !approvals && !chat.session && !selectionScoped ? await this.actions.projectOverview() : '';
       const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
@@ -576,6 +634,12 @@ ${selectedText}`;
       await this.recover(chat);
       if (feedback && !chat.cancellationRequested) this.reviewFeedback.clear();
       await this.prepareApprovals(chat);
+      // The turn ended on its own: show the checklist, and once per request ask about requirements with no change yet.
+      // Only a turn that really ended: an approval Forge decided by itself resumes the same turn at once.
+      if (!chat.approvals.length && !chat.questions.length && !chat.turnError && !chat.cancellationRequested && !chat.session?.awaitingApproval) {
+        this.actions.finishChecklist();
+        if (this.checkReasons().length && !chat.checkSent) { chat.checkSent = true; nudge = 'check'; }
+      }
     } catch (error: unknown) {
       if (approvals && chat.session?.awaitingApproval && !chat.cancellationRequested) chat.approvals = approvals;
       // A failed create must not retain settings that the user has corrected.
@@ -589,6 +653,8 @@ ${selectedText}`;
       chat.busy = false;
       this.show(chat);
     }
+    // The message itself is built when it is sent, from a fresh check, so a stale one never goes out.
+    if (nudge && !chat.cancellationRequested) this.enqueue(chat, [], undefined, true);
   }
   private event(chat: HeldChat, event: TrueForgeApi.TurnStreamingEvent): void {
     chat.status = `Session ${chat.session?.id ?? "starting"} · ${event.type}`;

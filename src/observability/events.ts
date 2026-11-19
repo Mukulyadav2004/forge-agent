@@ -4,7 +4,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import { z } from 'zod';
 
-const ToolNameSchema = z.enum(['read_file', 'list_files', 'search_code', 'propose_edit', 'write_file', 'run_command']);
+const ToolNameSchema = z.enum(['read_file', 'list_files', 'search_code', 'propose_edit', 'write_file', 'run_command', 'plan_task']);
 export type ToolName = z.infer<typeof ToolNameSchema>;
 const ToolEventSchema = z.object({
   ts: z.iso.datetime(), taskId: z.null(), event: z.literal('tool.call'), name: ToolNameSchema,

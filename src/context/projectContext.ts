@@ -83,9 +83,12 @@ function tomlLists(text: string, table: string): Map<string, string[]> {
 }
 
 /** Pins for one dependency group of the workspace's own package in uv.lock, with the lock's environment markers ("pytest==9.0.2; python_full_version >= '3.10'"). */
-function lockedRequirements(lock: string, group: string): string[] | undefined {
+function lockedRequirements(lock: string, group: string | null): string[] | undefined {
   const own = lock.split(/^\[\[package\]\]$/mu).find(block => /^source = \{ editable = "\." \}$/mu.test(block));
-  const list = own && new RegExp(`^\\[package\\.dev-dependencies\\][\\s\\S]*?^${group.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')} = \\[([\\s\\S]*?)^\\]`, 'mu').exec(own)?.[1];
+  // group null: the project's own runtime dependencies (the block's top-level dependencies list), pinned like the test group so
+  // a fresh environment matches the lock (an unpinned newer werkzeug fails one of Flask 3.1.3's own tests).
+  const list = own && (group === null ? /^dependencies = \[([\s\S]*?)^\]/mu.exec(own.split(/^\[package\./mu)[0] ?? '')?.[1]
+    : new RegExp(`^\\[package\\.dev-dependencies\\][\\s\\S]*?^${group.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')} = \\[([\\s\\S]*?)^\\]`, 'mu').exec(own)?.[1]);
   if (!list) return undefined;
   const pins: string[] = [];
   for (const entry of list.matchAll(/\{ name = "([^"]+)"([^\n]*)\}/gu)) {
@@ -119,7 +122,8 @@ export function suggestTestCommands(options: { paths: string[]; texts: Map<strin
     const project = has('pyproject.toml') || has('setup.py') || has('setup.cfg');
     // Group packages are listed by name: pip only understands --group from 25.1, and a new venv may ship an older pip.
     // A uv.lock pins them; an unpinned newer pytest can break a project's fixtures (Flask 3.1.3 with pytest 9.2).
-    const packages = group ? (lockedRequirements(texts.get('uv.lock') ?? '', group[0]) ?? group[1]) : [];
+    const lock = texts.get('uv.lock') ?? '';
+    const packages = group ? [...(lockedRequirements(lock, null) ?? []), ...(lockedRequirements(lock, group[0]) ?? group[1])] : [];
     const install = extra ? `-e ".[${extra[0]}]"` : group ? `${project ? '-e . ' : ''}${packages.filter(item => !item.includes('"')).map(item => `"${item}"`).join(' ')}` : requirements ? `${project ? '-e . ' : ''}-r ${requirements}` : `${project ? '-e . ' : ''}pytest`;
     return [`${windows ? 'py' : 'python3'} -m venv .venv`, `${interpreter} -m pip install ${install}`, run(interpreter)];
   }

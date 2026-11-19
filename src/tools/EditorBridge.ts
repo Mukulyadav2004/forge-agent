@@ -17,6 +17,8 @@ import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
 import { savedExcerpt } from '../edits/lineChanges';
 import { describeProblems, newProblems } from '../edits/diagnostics';
+import { checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, PLAN_LIMITS, progressReport, RunGuard } from '../context/plan';
+import type { PlanItem } from '../context/plan';
 import type { Problem } from '../edits/diagnostics';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
 import type { ToolLog, ToolName } from '../observability/events';
@@ -90,7 +92,69 @@ export class EditorBridge implements vscode.Disposable {
     return unread + Math.max(0, total - next + 1);
   }
   /** Called once per user request (not for approvals or retries of it). */
-  beginRequest(scope?: string): void { this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest(); this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET }); }
+  beginRequest(scope?: string, requestText = ''): void {
+    this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest();
+    this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
+    this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET });
+  }
+  /** The user's words for this request, its plan (plan_task), files changed so far, and the last failure of each command. */
+  private requestText = '';
+  private plan: PlanItem[] | undefined;
+  private readonly changedPaths = new Set<string>();
+  /** Loops, error streaks and stalls in this request (see RunGuard). */
+  private readonly guard = new RunGuard();
+  /** Asks the sidebar to stop the running turn; shown in the activity as a Forge refusal. */
+  private stopTurn(reason: string): void { this.activityEvents.fire({ kind: 'refused', tool: 'forge', message: `Forge stopped the turn: ${reason}`.slice(0, 300) }); }
+  /** A call the sidebar denied without running it (an invalid edit, a command past the limit) counts like a refused call. */
+  guardDeny(name: string, argumentsJson: string, reason: string): string {
+    let input: unknown = argumentsJson;
+    try { input = JSON.parse(argumentsJson); } catch { /* compared as text */ }
+    const verdict = this.guard.call(name, input);
+    const outcome = this.guard.outcome(false, reason);
+    const stop = verdict.stop ?? outcome.stop;
+    if (stop) this.stopTurn(stop);
+    return verdict.notice ? `${reason}\n${verdict.notice}` : reason;
+  }
+  /** The progress report for a stall, with the facts the model needs to decide how to go on. */
+  private progress(failing?: { command: string; count: number; error: string }): string {
+    return progressReport({ ...(failing ? { failing } : {}), edits: this.guard.topEdits(), open: this.openRequirements(), commandsLeft: this.commandsLeft(), siblings: [...new Set((this.plan ?? []).flatMap(item => item.sibling ? [item.sibling] : []))] });
+  }
+  /** Counts an edit to a file; at the threshold, once per file, returns the progress report. */
+  private editedNote(path: string): string {
+    const count = this.guard.edited(path.replace(/^\.\//u, ''));
+    return count >= GUARD_LIMITS.file_edits_report && this.guard.firstReport(`edits:${path}`) ? `\n${this.progress()}` : '';
+  }
+  /** A missing path or a folder gets a plain answer instead of a file-system error. */
+  private async assertFile(path: string): Promise<void> {
+    const located = await this.options.files.locate(path);
+    if (located.kind === 'missing') throw new Error(`${path} does not exist. To create it, use write_file; otherwise check the path with list_files.`);
+    if (located.kind === 'directory') throw new Error(`${path} is a folder. Use list_files to see what is in it.`);
+  }
+  /** Identical refused calls in this request, and the last command that ran (shown in the end-of-turn checklist). */
+  private readonly refusals = new Map<string, number>();
+  private lastCommand: { command: string; exitCode: number | null } | undefined;
+  /** The checklist line; for a saved or staged file the plan does not name, a note so a wrong file is noticed early. */
+  private checklistNote(path?: string): string {
+    const line = checklistLine(this.plan, this.changedPaths);
+    const clean = path?.trim().replace(/\\/gu, '/').replace(/^\.\//u, '');
+    const unplanned = clean && this.plan?.length && !this.plan.some(item => item.file === clean)
+      ? `\n${clean} is not a file in your plan. If it replaces a planned file, call plan_task again with this file; otherwise check that it belongs to this task.` : '';
+    return `${line ? `\n${line}` : ''}${unplanned}`;
+  }
+  /** Commands this request may still run; approvals beyond it are denied without asking the user. */
+  commandsLeft(): number { return Math.max(0, COMMAND_LIMITS.per_request - this.commandsRun); }
+  /** Requirements of this request's plan that have no change and no stated reason. */
+  openRequirements(): PlanItem[] { return (this.plan ?? []).filter(item => itemStatus(item, this.changedPaths) === 'open'); }
+  /** The last command and its exit code, for the end-of-turn check. */
+  lastCommandResult(): { command: string; exitCode: number | null } | undefined { return this.lastCommand; }
+  /** When the turn ends: show the checklist and return requirements that have no change and no stated reason. */
+  finishChecklist(): PlanItem[] {
+    if (!this.plan?.length) return [];
+    const rows = this.plan.map(item => ({ quote: item.quote.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: itemStatus(item, this.changedPaths), ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) }));
+    const last = this.lastCommand ? `last command: ${this.lastCommand.command.slice(0, 160)} → exit ${this.lastCommand.exitCode ?? 'signal'}` : undefined;
+    this.activityEvents.fire({ kind: 'plan', stage: 'end', items: rows, ...(last ? { lastCommand: last } : {}) });
+    return this.openRequirements();
+  }
   private remaining(): number { return Math.max(0, CONTEXT_BUDGET - this.budgetUsed); }
   private budgetNote(): string { return `Context budget: ${this.budgetUsed.toLocaleString('en-US')} of ${CONTEXT_BUDGET.toLocaleString('en-US')} characters used for this request.`; }
   private budgetError(): Error { return new Error(`${this.budgetNote()} Too little remains for this call. Answer from the evidence you already have and label anything unverified, or ask the user to continue in a new message.`); }
@@ -148,6 +212,7 @@ export class EditorBridge implements vscode.Disposable {
   /** Checks and stages one propose_edit call; nothing is written. Used by the tool and when an edit waits for approval. */
   private async stageProposal(input: ProposeInput): Promise<{ id: string; combined: boolean; replaced: string[]; detail: string; ignored: string[] }> {
     const { path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line } = input;
+    await this.assertFile(path);
     if (this.editScope !== undefined && normalize(path).replace(/^\.\//u, '') !== this.editScope) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not stage changes to other files; mention any other change you think is needed in your reply instead.`);
     if (old_text === undefined && start_line === undefined && end_line === undefined && insert_line === undefined) {
       // Replacing a whole file the agent has not fully read silently drops the parts it never saw.
@@ -256,7 +321,8 @@ export class EditorBridge implements vscode.Disposable {
         state.revision ? `Use base_revision ${state.revision} for further edits to ${path}.` : '',
       ].filter(Boolean).join(' ') + (saved && state.excerpt ? `\nSaved lines of ${path}, numbered as the file is now:\n${state.excerpt}` : '')
         + (state.problems.length ? `\n${describeProblems(path, state.problems)}` : '');
-      this.reviewed.set(key, { message, saved, rejected: rejected.length, problems: state.problems.length, ...(state.revision ? { revision: state.revision } : {}) });
+      if (saved) this.changedPaths.add(path.replace(/^\.\//u, ''));
+      this.reviewed.set(key, { message: message + this.checklistNote(saved ? path : undefined) + (saved ? this.editedNote(path) : ''), saved, rejected: rejected.length, problems: state.problems.length, ...(state.revision ? { revision: state.revision } : {}) });
     }
     // Like Cline, the saved file opens in the editor at the change; focus stays in the sidebar so review continues there.
     if (shown) await this.showFile({ ...shown, preserveFocus: true }).catch(() => undefined);
@@ -374,13 +440,37 @@ export class EditorBridge implements vscode.Disposable {
     const register = <S extends z.ZodRawShape>(name: ToolName, config: { description: string; inputSchema: S; annotations: { readOnlyHint: boolean } }, handler: (input: z.output<z.ZodObject<S>>, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => Promise<CallToolResult>) => {
       const schema = z.object(config.inputSchema);
       return server.registerTool<z.ZodRawShape, typeof schema>(name, { ...config, inputSchema: schema }, (input, extra) => this.options.log.tool({ name, input, signal: extra.signal, run: async () => {
+        // Loops (Cline's model): the third identical call in a row gets a note, the fifth stops the turn.
+        const verdict = this.guard.call(name, input);
+        if (verdict.stop) { this.stopTurn(verdict.stop); throw new Error(`Stopped: ${verdict.stop} Write your summary instead of calling tools.`); }
         // A refused call is shown in the feed too; otherwise the user sees an approval and then nothing.
-        try { return await handler(input, extra); }
-        catch (error) { this.activityEvents.fire({ kind: 'refused', tool: name, message: (error instanceof Error ? error.message : 'The tool call failed.').slice(0, 300) }); throw error; }
+        try {
+          const result = await handler(input, extra);
+          this.guard.outcome(true);
+          if (!verdict.notice) return result;
+          // TrueForge may read only the structured result, so the note goes in both places.
+          const first = result.content[0];
+          return { ...result, content: first?.type === 'text' ? [{ ...first, text: `${first.text}\n${verdict.notice}` }, ...result.content.slice(1)] : result.content,
+            ...(result.structuredContent ? { structuredContent: { ...result.structuredContent, forge_notice: verdict.notice } } : {}) };
+        }
+        catch (error) {
+          const streak = this.guard.outcome(false, error instanceof Error ? error.message : '');
+          if (streak.stop) this.stopTurn(streak.stop);
+          // The same refused call again gets the same answer, so say so: models otherwise repeat it many times.
+          const key = `${name}\0${JSON.stringify(input)}`;
+          const times = (this.refusals.get(key) ?? 0) + 1;
+          this.refusals.set(key, times);
+          const message = error instanceof Error ? error.message : 'The tool call failed.';
+          this.activityEvents.fire({ kind: 'refused', tool: name, message: message.slice(0, 300) });
+          const notes = [times > 1 ? `This exact call was already refused ${times - 1} time(s) and will be refused again. Change the call, or stop and summarize what is done and what is not.` : '', verdict.notice ?? ''].filter(Boolean);
+          if (notes.length) throw new Error(`${message}\n${notes.join('\n')}`, { cause: error });
+          throw error;
+        }
       } }));
     };
     register('search_code', { description: 'Search saved workspace text. Returns hits grouped by file with line numbers, up to three excerpts per file, observed folder counts and a next-step hint. Run one focused search per fact you need (for example where a name is defined, then where it is registered, imported or called); a distinctive identifier finds far fewer, better hits than a common word. Literal and case-insensitive by default; set regex to true for patterns such as alternatives (name_a|name_b). Use glob to filter paths and narrow incomplete searches. Then open each relevant hit with read_file around its line number.', inputSchema: SearchInputSchema.shape, annotations: { readOnlyHint: true } }, async (input, extra) => this.searchCode({ ...input, signal: extra.signal }));
     register('read_file', { description: `Read numbered lines from a workspace file. Without end_line it returns up to ${READ_LIMITS.default_window_lines} lines from start_line; if the file is longer, it also returns an outline of the whole file (definitions or headings with line numbers). Use the outline or a search hit to read just the block you need with start_line and end_line (up to ${READ_LIMITS.lines_per_call} lines or ${READ_LIMITS.characters_per_call} characters per call). Returns the actual range, total_lines, whether more lines follow, and the base_revision that propose_edit needs.`, inputSchema: { path: z.string(), start_line: z.number().int().min(1).default(1), end_line: z.number().int().min(1).optional(), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') }, annotations: { readOnlyHint: true } }, async ({ path, start_line, end_line, reason }) => {
+      await this.assertFile(path);
       const { revision, file } = await this.options.edits.read(path);
       const lines = fileLines(file.text);
       if (start_line > lines.length || (end_line !== undefined && end_line < start_line)) throw new Error('Choose a line range inside this file.');
@@ -419,13 +509,24 @@ export class EditorBridge implements vscode.Disposable {
       if (!(await stat(folder)).isDirectory()) throw new Error('cwd must be a folder.');
       const outputCharacters = Math.min(COMMAND_LIMITS.output_characters, this.remaining());
       if (outputCharacters < 1000) throw this.budgetError();
+      this.lastCommand = undefined;
       this.commandsRun++; // counted only once it actually runs; refused calls do not use the budget
       const result = await runCommand({ command, cwd: folder, timeoutSeconds: timeout_seconds, outputCharacters, signal: extra.signal });
       this.budgetUsed += result.output.length;
       const where = relative(rootPath, folder) || '.';
       this.activityEvents.fire({ kind: 'command', used: this.budgetUsed, command, cwd: where, exitCode: result.exit_code, timedOut: result.timed_out, cancelled: result.cancelled, durationMs: result.duration_ms, ...(reason ? { reason } : {}) });
       const ended = result.cancelled ? 'cancelled' : result.timed_out ? `stopped at the ${timeout_seconds} s timeout` : `exit code ${result.exit_code ?? result.signal}`;
-      const hint = await this.missingToolHint(result.output, result.exit_code);
+      this.lastCommand = { command, exitCode: result.exit_code };
+      const missing = await this.missingToolHint(result.output, result.exit_code);
+      // The same failure twice in a row means the last change did not touch the cause: point at the code to compare with.
+      const signature = result.exit_code ? failureSignature(result.output) : '';
+      const failedInARow = this.guard.commandResult(command, signature);
+      const repeated = failedInARow === 2;
+      const siblings = [...new Set((this.plan ?? []).flatMap(item => item.sibling ? [item.sibling] : []))];
+      // From the third identical failure on, once per command: the facts and three ways on, for the model to choose.
+      const stalled = failedInARow >= GUARD_LIMITS.same_failure_report && this.guard.firstReport(`fail:${command}`) ? this.progress({ command, count: failedInARow, error: signature }) : '';
+      const same = stalled ? stalled : repeated ? `Same failure as the previous run of this command, so the last change did not reach the cause. Before editing the test again, compare your code with how ${siblings.length ? siblings.join(', ') : 'the existing similar code'} is defined, registered and tested, or run a small probe to see the actual state.` : '';
+      const hint = [missing, same].filter(Boolean).join('\n') + (this.plan ? checklistLine(this.plan, this.changedPaths) ? `\n${checklistLine(this.plan, this.changedPaths)}` : '' : '');
       const structured = { command, cwd: where, ...result, ...(hint ? { hint } : {}), context_budget: this.budget };
       return { content: [{ type: 'text', text: `$ ${command}\n(cwd ${where}) ${ended} after ${(result.duration_ms / 1000).toFixed(1)} s${result.output_truncated ? `; output shortened from ${result.total_output_characters} characters` : ''}\n${result.output}\n${hint ? `${hint}\n` : ''}${this.budgetNote()}` }], structuredContent: structured };
     });
@@ -439,6 +540,35 @@ export class EditorBridge implements vscode.Disposable {
       this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob, count: files.length });
       return { content: [{ type: 'text', text: `${listed}${found.length > 100 ? '\nMore files match; narrow the glob to see them.' : ''}\n${this.budgetNote()}` }] };
     });
+    register('plan_task', { description: `Start every coding task (add, change or fix) with this, before any edit. List one requirement per thing the user's request asks for: quote the user's own words for it, say what will change, name the file you will change, and name an existing similar thing in this project to copy (for example a sibling function, command, route, test or docs section). The plan is checked against the request: a part of the request with no requirement is reported back. For each sibling the result shows every place it appears (where it is defined, registered, tested and documented), so your change can follow the same path. Call it again to update the plan; give skip_reason for a requirement that needs no change. Up to ${PLAN_LIMITS.max_items} requirements.`, inputSchema: {
+      requirements: z.array(z.object({
+        quote: z.string().min(1).max(PLAN_LIMITS.quote_characters).describe("The user's own words for this requirement, copied from the request."),
+        change: z.string().min(1).max(300).describe('What will change for it, in one short sentence.'),
+        file: z.string().min(1).max(400).describe('Workspace-relative path of the file you will change or create for it.'),
+        sibling: z.string().max(120).optional().describe('The name of an existing similar function, class, command, route or test in this project to copy (a code name, not a file path).'),
+        skip_reason: z.string().max(300).optional().describe('Only if this requirement needs no change: why, in plain words.'),
+      })).min(1).max(PLAN_LIMITS.max_items),
+    }, annotations: { readOnlyHint: true } }, async ({ requirements }, extra) => {
+      const coverage = checkPlanCoverage(this.requestText, requirements);
+      if (!coverage.ok) throw new Error(coverage.message);
+      this.plan = requirements.map(item => ({ ...item, file: item.file.trim().replace(/\\/gu, '/').replace(/^\.\//u, '') }));
+      this.activityEvents.fire({ kind: 'plan', stage: 'start', items: this.plan.map(item => ({ quote: item.quote.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: item.skip_reason ? 'skipped' : 'planned', ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) })) });
+      // The sibling's footprint: every place an existing similar thing appears, so a weak model sees where to register, test and document.
+      const footprints: string[] = [];
+      for (const named of [...new Set(this.plan.flatMap(item => item.sibling?.trim() ? [item.sibling.trim()] : []))].slice(0, 4)) {
+        // A dotted name (module.path.name) is searched by its last part, which is how code mentions it; a file path is not a sibling.
+        if (/[\\/]/u.test(named) || /\.(?:py|pyi|ts|tsx|js|jsx|mjs|rst|md|txt|json|toml|cfg|ini|ya?ml|html|css|go|rs|java|rb)$/iu.test(named)) { footprints.push(`${named} is a file, not a sibling: name an existing function, class, command, route or test in it instead.`); continue; }
+        const sibling = named.includes('.') ? named.split('.').pop() ?? named : named;
+        try {
+          const found = await this.searchCode({ query: sibling, glob: '**/*', regex: false, case_sensitive: true, max_results: 40, reason: `Footprint of ${sibling} for the plan.`, signal: extra.signal });
+          const files = ((found.structuredContent as { files?: { path: string; match_count: number; matches: { line: number; text: string }[] }[] } | undefined)?.files ?? []);
+          footprints.push(files.length ? `${sibling} appears in:\n${files.slice(0, 12).map(file => file.matches.map(match => `  ${file.path}:${match.line}  ${match.text.trim().slice(0, 140)}`).join('\n')).join('\n')}` : `${sibling} does not appear in the workspace; name an existing similar thing instead.`);
+        } catch (error) { footprints.push(`${sibling}: the footprint search failed (${error instanceof Error ? error.message.slice(0, 120) : 'error'}).`); }
+      }
+      const message = [`Plan recorded: ${this.plan.length} requirement(s). Each saved change is matched to its file; the checklist in later results shows what is still open.`,
+        ...footprints, footprints.length ? 'Follow the sibling: define, register, test and document your change where it does.' : ''].filter(Boolean).join('\n');
+      return { content: [{ type: 'text', text: message }], structuredContent: { status: 'recorded', requirements: this.plan.length, message } };
+    });
     register('write_file', { description: 'Create a new file with its complete content, for example a new module or test file; folders are created as needed. The path must not exist: to change an existing file, read it and use propose_edit. The user reviews the new file like an edit; depending on a setting it is saved when they approve it, or staged for them to apply later, and the result says which.', inputSchema: WRITE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
       const key = writeKey(input);
       const reviewed = this.reviewed.get(key);
@@ -450,7 +580,8 @@ export class EditorBridge implements vscode.Disposable {
       }
       const { id } = await this.stageWrite(input);
       this.activityEvents.fire({ kind: 'propose', path: input.path, detail: 'new file', reason: input.explanation.slice(0, 300) });
-      const message = `Proposal ${id} stages the new file ${input.path}. No files changed. To create it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all.`;
+      this.changedPaths.add(input.path.replace(/^\.\//u, ''));
+      const message = `Proposal ${id} stages the new file ${input.path}. No files changed. To create it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all.${this.checklistNote(input.path)}`;
       return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path: input.path, message } };
     });
     register('propose_edit', { description: 'Propose an edit for the user to review. Depending on a setting, the user approves the diff and the accepted hunks are saved before this call returns, or the edit is staged for them to apply later; the result says which. Pass base_revision from read_file (it may be omitted with old_text). Locate the change in exactly one way: (1) old_text, the current text to replace, which must appear once in the file (include enough surrounding lines to make it unique; any line numbers sent with it are ignored; differences only in typographic quotes, dashes or trailing spaces still match, and when nothing matches the error shows the closest numbered lines to copy from); (2) start_line and end_line, to replace those inclusive complete lines; (3) insert_line, to insert new_text before that line (line count + 1 appends); (4) none of these, so new_text replaces the whole file. Line numbers refer to the file as read_file returned it. Several edits to one file combine into a single pending review; a whole-file edit replaces earlier pending changes.', inputSchema: PROPOSE_SHAPE, annotations: { readOnlyHint: true } }, async input => {
@@ -471,7 +602,9 @@ export class EditorBridge implements vscode.Disposable {
         : replaced.length ? ` It replaced an earlier pending proposal for ${path} that could not be combined; include every change this file still needs.` : '';
       this.activityEvents.fire({ kind: 'propose', path, detail: `${detail}${combined ? ', combined with earlier changes' : replaced.length ? ', replaced an earlier proposal' : ''}`, reason: explanation.slice(0, 300) });
       const hint = ignored.length ? ` Ignored ${ignored.join(', ')} because old_text already locates the change.` : '';
-      const message = `Proposal ${id} is staged for ${path}.${note}${hint} No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.`;
+      this.changedPaths.add(path.replace(/^\.\//u, ''));
+      const editNote = this.editedNote(path);
+      const message = `Proposal ${id} is staged for ${path}.${note}${hint} No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.${this.checklistNote(path)}${editNote}`;
       return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path, combined, replaced_proposal_ids: replaced, message } };
     });
     return server;

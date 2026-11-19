@@ -140,7 +140,7 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const client = new Client({ name: "forge-smoke", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(connection.url), { requestInit: { headers: { Authorization: connection.headers.Authorization } } }));
   const listed = await client.listTools();
-  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'propose_edit', 'read_file', 'run_command', 'search_code', 'write_file']);
+  assert.deepEqual(listed.tools.map(tool => tool.name).sort(), ['list_files', 'plan_task', 'propose_edit', 'read_file', 'run_command', 'search_code', 'write_file']);
   await checkSearch({ client, extensionUri: extension.extensionUri });
   await checkCommand({ client, frame: restoredFrame });
   // write_file through the real editor and MCP: staging writes nothing, Apply creates the file and its folder, Undo removes it.
@@ -173,8 +173,23 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   const readData: unknown = read.structuredContent;
   if (typeof readData !== 'object' || readData === null || !('base_revision' in readData) || typeof readData.base_revision !== 'string') throw new Error('read_file must return a base revision.');
   const baseRevision = readData.base_revision;
+  // plan_task through real MCP: the plan is recorded with its sibling's footprint, and the next result carries the checklist.
+  // A sidebar message starts a request with these words (no model is set yet, so it stops right after); plan_task must quote them.
+  await restoredFrame.getByRole('textbox', { name: 'Message', exact: true }).fill('Please change the example, then document it.');
+  await restoredFrame.getByRole('button', { name: 'Send', exact: true }).click();
+  await restoredFrame.getByRole('log').getByText('Model not configured. Set forgeAgent.model after adding a model in local TrueForge.', { exact: true }).last().waitFor();
+  const uncovered = await client.callTool({ name: 'plan_task', arguments: { requirements: [{ quote: 'change the example', change: 'Rewrite example.txt', file: 'example.txt' }] } });
+  assert.match(JSON.stringify(uncovered.content), /not in your plan yet: \\"then document it\.\\"/u, 'A part of the request with no requirement is named back to the agent.');
+  const planned = await client.callTool({ name: 'plan_task', arguments: { requirements: [{ quote: 'change the example', change: 'Rewrite example.txt', file: 'example.txt', sibling: 'original text' }, { quote: 'document it', change: 'Add notes', file: 'notes.md' }] } });
+  assert.equal(planned.isError, undefined, JSON.stringify(planned.content));
+  // The same refused call again says so, so a model does not repeat it many times.
+  const missingRead = { name: 'read_file', arguments: { path: 'no-such-file.txt' } };
+  assert.match(JSON.stringify((await client.callTool(missingRead)).content), /no-such-file\.txt does not exist\. To create it, use write_file/u, 'A missing file gets a plain answer.');
+  assert.match(JSON.stringify((await client.callTool(missingRead)).content), /This exact call was already refused 1 time\(s\)/u, 'A repeated refused call is named as a repeat.');
+  assert.match(JSON.stringify(planned.content), /Plan recorded: 2 requirement\(s\)[\s\S]*original text appears in:[\s\S]*example\.txt:1/u, 'The sibling footprint lists where it appears.');
   const proposal = await client.callTool({ name: "propose_edit", arguments: { path: "example.txt", base_revision: baseRevision, new_text: "proposed text", explanation: "Smoke test" } });
   assert.equal(proposal.isError, undefined);
+  assert.match(JSON.stringify(proposal.content), /Checklist: 1 of 2 requirement\(s\) have a change\. Still open: \\"document it\\" \(planned: notes\.md\)/u, 'A staged change updates the checklist in the tool result.');
   const folder = vscode.workspace.workspaceFolders?.[0];
   assert.ok(folder);
   assert.equal(new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder.uri, "example.txt"))), "original text\n");
