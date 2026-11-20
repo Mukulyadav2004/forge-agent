@@ -121,7 +121,7 @@ export class EditorBridge implements vscode.Disposable {
   beginRequest(scope?: string, requestText = ''): void {
     this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest();
     this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
-    this.textAtStart.clear(); this.textSaved.clear(); this.problemsAtStart.clear(); this.commandResults.clear();
+    this.textAtStart.clear(); this.textSaved.clear(); this.problemsAtStart.clear(); this.commandResults.clear(); this.seenPaths.clear();
     this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET });
   }
   /**
@@ -130,6 +130,9 @@ export class EditorBridge implements vscode.Disposable {
    * disk is compared with both and the checklist follows the disk, not the history of saves.
    */
   private readonly textAtStart = new Map<string, string>();
+  /** Files the agent has looked at in this request: read, found by a search, mentioned by the user, or edited. A plan may only name these (or new files). */
+  private readonly seenPaths = new Set<string>();
+  private markSeen(path: string): void { this.seenPaths.add(normalize(path).replace(/\\/gu, '/').replace(/^\.\//u, '')); }
   private readonly textSaved = new Map<string, string>();
   /** VS Code's errors in each file before the agent's first save to it in this request: later saves report every error added since, until it is fixed. */
   private readonly problemsAtStart = new Map<string, Problem[]>();
@@ -322,6 +325,7 @@ export class EditorBridge implements vscode.Disposable {
     const key = this.coverageKey(path, file.text);
     this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), [start, last]]);
     this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path, startLine: start, endLine: last });
+    this.markSeen(path);
     const more = last < lines.length && start === 1 ? ` The file has ${lines.length} lines; read_file shows the rest.` : '';
     return `File: ${path} (${label}), lines ${start}-${last}, base_revision ${revision}.${more}\n${output.join('\n')}`;
   }
@@ -584,6 +588,7 @@ export class EditorBridge implements vscode.Disposable {
       const found = await searchWithRipgrep({ ...options, paths, signal, output_characters: outputCharacters });
       const coverageLimited = skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files;
       const truncated = found.truncated || coverageLimited;
+      for (const file of found.files) this.markSeen(file.path);
       const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, next_step: `${found.returned_matches} of ${found.observed_matches} observed matching lines shown.${truncated ? ' Results or coverage are incomplete: narrow the query or glob path filter using folder_counts, then search again.' : ''} Open relevant ranges with read_file before answering each requested part.`, candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, non_text_files: nonText, eligible_files: paths.size, inspected_bytes: bytes, coverage: 'Saved UTF-8 text only. Counts refer to observed matching lines, not occurrences or all workspace files. Dirty, secret, unavailable, binary and oversized files are excluded. Omitted folder counts are aggregated separately. Use read_file for current editor text and an edit revision.', limits: SEARCH_LIMITS };
       this.budgetUsed += JSON.stringify(result).length;
       this.activityEvents.fire({ kind: 'search', used: this.budgetUsed, query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || coverageLimited, ...(options.reason ? { reason: options.reason } : {}) });
@@ -649,6 +654,7 @@ export class EditorBridge implements vscode.Disposable {
       this.budgetUsed += text.length + outline.length;
       const key = this.coverageKey(path, file.text);
       this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), [start_line, actualEnd]]);
+      this.markSeen(path);
       this.activityEvents.fire({ kind: 'open', used: this.budgetUsed, path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       // TrueForge prefers structured MCP results, so the source must be present there too.
       const outlineText = outline ? `\n\nOutline of ${path} (${lines.length} lines; read a block with start_line and end_line):\n${outline}` : '';
@@ -698,7 +704,7 @@ export class EditorBridge implements vscode.Disposable {
       this.activityEvents.fire({ kind: 'list', used: this.budgetUsed, glob, count: files.length });
       return { content: [{ type: 'text', text: `${listed}${found.length > 100 ? '\nMore files match; narrow the glob to see them.' : ''}\n${this.budgetNote()}` }] };
     });
-    register('plan_task', { description: `Start every coding task (add, change or fix) with this, before any edit. List one requirement per thing the user's request asks for: quote the user's own words for it, say what will change, name the file you will change, and name an existing similar thing in this project to copy (for example a sibling function, command, route, test or docs section). The plan is checked against the request: a part of the request with no requirement is reported back. For each sibling the result shows every place it appears (where it is defined, registered, tested and documented), so your change can follow the same path. Call it again to update the plan; give skip_reason for a requirement that needs no change. Up to ${PLAN_LIMITS.max_items} requirements.`, inputSchema: {
+    register('plan_task', { description: `Call this in every coding task (add, change or fix) after you have located the code and before any edit. Each existing file you name must be one you have read or found by a search in this request (a new file to create is fine), and each sibling must exist. List one requirement per thing the user's request asks for: quote the user's own words for it, say what will change, name the file you will change, and name an existing similar thing in this project to copy (for example a sibling function, command, route, test or docs section). The plan is checked against the request: a part of the request with no requirement is reported back. For each sibling the result shows every place it appears (where it is defined, registered, tested and documented), so your change can follow the same path. Call it again to update the plan; give skip_reason for a requirement that needs no change. Up to ${PLAN_LIMITS.max_items} requirements.`, inputSchema: {
       requirements: z.array(z.object({
         quote: z.string().min(1).max(PLAN_LIMITS.quote_characters).describe("The user's own words for this requirement, copied from the request."),
         change: z.string().min(1).max(300).describe('What will change for it, in one short sentence.'),
@@ -709,20 +715,34 @@ export class EditorBridge implements vscode.Disposable {
     }, annotations: { readOnlyHint: true } }, async ({ requirements }, extra) => {
       const coverage = checkPlanCoverage(this.requestText, requirements);
       if (!coverage.ok) throw new Error(coverage.message);
-      this.plan = requirements.map(item => ({ ...item, file: item.file.trim().replace(/\\/gu, '/').replace(/^\.\//u, '') }));
-      this.activityEvents.fire({ kind: 'plan', stage: 'start', items: this.plan.map(item => ({ quote: item.quote.slice(0, 300), change: item.change.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: item.skip_reason ? 'skipped' : 'planned', ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) })) });
+      const items = requirements.map(item => ({ ...item, file: item.file.trim().replace(/\\/gu, '/').replace(/^\.\//u, '') }));
+      // A plan comes from evidence: each existing file it names must have been read, found by a search or mentioned in this
+      // request (a file to create is fine), and each sibling must exist. Otherwise it is a guess, and is sent back.
+      const unseen: string[] = [];
+      for (const item of items) {
+        if (item.skip_reason?.trim() || this.seenPaths.has(item.file) || unseen.includes(item.file)) continue;
+        const located = await this.options.files.locate(item.file).catch(() => undefined);
+        if (located?.kind === 'directory') throw new Error(`${item.file} is a folder. Name the file you will change or create.`);
+        if (located?.kind === 'file') unseen.push(item.file);
+      }
+      if (unseen.length) throw new Error(`Plan from evidence: you have not looked at ${unseen.join(', ')} in this request. First search for the closest existing feature and read where it is defined, registered, tested and documented, including these files; then call plan_task again with what you found.`);
       // The sibling's footprint: every place an existing similar thing appears, so a weak model sees where to register, test and document.
       const footprints: string[] = [];
-      for (const named of [...new Set(this.plan.flatMap(item => item.sibling?.trim() ? [item.sibling.trim()] : []))].slice(0, 4)) {
+      const missing: string[] = [];
+      for (const named of [...new Set(items.flatMap(item => item.sibling?.trim() ? [item.sibling.trim()] : []))].slice(0, 4)) {
         // A dotted name (module.path.name) is searched by its last part, which is how code mentions it; a file path is not a sibling.
-        if (/[\\/]/u.test(named) || /\.(?:py|pyi|ts|tsx|js|jsx|mjs|rst|md|txt|json|toml|cfg|ini|ya?ml|html|css|go|rs|java|rb)$/iu.test(named)) { footprints.push(`${named} is a file, not a sibling: name an existing function, class, command, route or test in it instead.`); continue; }
+        if (/[\\/]/u.test(named) || /\.(?:py|pyi|ts|tsx|js|jsx|mjs|rst|md|txt|json|toml|cfg|ini|ya?ml|html|css|go|rs|java|rb)$/iu.test(named)) { footprints.push(`${named} is a file, not a sibling: name an existing function, class, command, route or test instead.`); continue; }
         const sibling = named.includes('.') ? named.split('.').pop() ?? named : named;
         try {
           const found = await this.searchCode({ query: sibling, glob: '**/*', regex: false, case_sensitive: true, max_results: 40, reason: `Footprint of ${sibling} for the plan.`, signal: extra.signal });
           const files = ((found.structuredContent as { files?: { path: string; match_count: number; matches: { line: number; text: string }[] }[] } | undefined)?.files ?? []);
-          footprints.push(files.length ? `${sibling} appears in:\n${files.slice(0, 12).map(file => file.matches.map(match => `  ${file.path}:${match.line}  ${match.text.trim().slice(0, 140)}`).join('\n')).join('\n')}` : `${sibling} does not appear in the workspace; name an existing similar thing instead.`);
+          if (!files.length) { missing.push(sibling); continue; }
+          footprints.push(`${sibling} appears in:\n${files.slice(0, 12).map(file => file.matches.map(match => `  ${file.path}:${match.line}  ${match.text.trim().slice(0, 140)}`).join('\n')).join('\n')}`);
         } catch (error) { footprints.push(`${sibling}: the footprint search failed (${error instanceof Error ? error.message.slice(0, 120) : 'error'}).`); }
       }
+      if (missing.length) throw new Error(`${missing.join(', ')} ${missing.length === 1 ? 'does' : 'do'} not appear in the workspace, so ${missing.length === 1 ? 'it is not a sibling' : 'they are not siblings'}. Name an existing function, class, command, route or test you have seen (search for it first), or leave sibling out.`);
+      this.plan = items;
+      this.activityEvents.fire({ kind: 'plan', stage: 'start', items: this.plan.map(item => ({ quote: item.quote.slice(0, 300), change: item.change.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: item.skip_reason ? 'skipped' : 'planned', ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) })) });
       const message = [`Plan recorded: ${this.plan.length} requirement(s). Each saved change is matched to its file; the checklist in later results shows what is still open.`,
         ...footprints, footprints.length ? 'Follow the sibling: define, register, test and document your change where it does.' : ''].filter(Boolean).join('\n');
       return { content: [{ type: 'text', text: message }], structuredContent: { status: 'recorded', requirements: this.plan.length, message } };
