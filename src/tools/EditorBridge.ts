@@ -714,6 +714,12 @@ export class EditorBridge implements vscode.Disposable {
         skip_reason: z.string().max(300).optional().describe('Only if this requirement needs no change: why, in plain words.'),
       })).min(1).max(PLAN_LIMITS.max_items),
     }, annotations: { readOnlyHint: true } }, async ({ requirements }, extra) => {
+      // Edit Selection changes one selected block: no plan, checklist or end-of-turn check is needed (or wanted: a plan
+      // could name other files, which this request may not change). The agent is told to edit the selection directly.
+      if (this.editScope !== undefined) {
+        const message = `This is an inline edit of the selected code in ${this.editScope}; no plan is needed. Propose the change to the selection now with propose_edit.`;
+        return { content: [{ type: 'text', text: message }], structuredContent: { status: 'not_needed', message } };
+      }
       const coverage = checkPlanCoverage(this.requestText, requirements);
       if (!coverage.ok) throw new Error(coverage.message);
       const items = requirements.map(item => ({ ...item, file: item.file.trim().replace(/\\/gu, '/').replace(/^\.\//u, '') }));
