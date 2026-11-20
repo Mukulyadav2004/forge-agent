@@ -298,10 +298,11 @@ function activityRow(entry: Exclude<ActivityEntry, { kind: 'request' }>, added: 
       kind.textContent = 'Given';
       main = [sourceLink(entry.path, entry.startLine, `${entry.path}:${entry.startLine}-${entry.endLine}`), ' with your request'];
       break;    case 'plan': {
-      // The agent's plan: each requirement in the user's words, the file it chose, and the existing code it copies.
-      kind.textContent = entry.stage === 'start' ? 'Plan' : 'Checklist';
+      // The agent's plan in its own words: what it will change, in which file, copying which existing code; under each
+      // row, the part of the user's request it answers. Forge only checks that the plan covers the whole request.
+      kind.textContent = entry.stage === 'start' ? "Agent's plan" : 'Checklist';
       const open = entry.items.filter(item => item.status === 'open').length;
-      main = [entry.stage === 'start' ? `${plural(entry.items.length, 'requirement')}, each with the file the agent chose` : open ? `${open} of ${entry.items.length} requirement(s) still without a change` : `all ${entry.items.length} requirement(s) done`];
+      main = [entry.stage === 'start' ? `${plural(entry.items.length, 'step')}, written by the model; Forge checks they cover every part of your request` : open ? `${open} of ${entry.items.length} step(s) still without a change` : `all ${entry.items.length} step(s) done`];
       if (entry.stage === 'end' && open) row.classList.add('activity-failed');
       const list = document.createElement('ul');
       list.className = 'plan-items';
@@ -309,7 +310,10 @@ function activityRow(entry: Exclude<ActivityEntry, { kind: 'request' }>, added: 
         const li = document.createElement('li');
         li.className = `plan-item plan-${item.status}`;
         const mark = { planned: '•', changed: '✓', skipped: '–', open: '○' }[item.status];
-        li.append(`${mark} "${item.quote}" → `, sourceLink(item.file, 1, item.file), item.sibling ? ` (like ${item.sibling})` : '', item.note ? ` — ${item.note}` : '');
+        const quote = document.createElement('span');
+        quote.className = 'plan-quote';
+        quote.textContent = `for: "${item.quote}"`;
+        li.append(`${mark} ${item.change ?? `"${item.quote}"`} → `, sourceLink(item.file, 1, item.file), item.sibling ? ` (like ${item.sibling})` : '', item.note ? ` — ${item.note}` : '', ...(item.change ? [quote] : []));
         list.append(li);
       }
       main.push(list);

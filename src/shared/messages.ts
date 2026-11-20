@@ -58,10 +58,10 @@ export type ActivityEntry = { at?: number } & (
   /** The agent's plan (plan_task) when made, and the checklist when the turn ends: each requirement, its file and status. */
   | { kind: 'plan'; stage: 'start' | 'end'; items: PlanRow[]; lastCommand?: string });
 
-export interface PlanRow { quote: string; file: string; sibling?: string; status: 'planned' | 'changed' | 'skipped' | 'open'; note?: string }
+export interface PlanRow { quote: string; change?: string; file: string; sibling?: string; status: 'planned' | 'changed' | 'skipped' | 'open'; note?: string }
 const PLAN_STATUSES = new Set(['planned', 'changed', 'skipped', 'open']);
 function isPlanRow(value: unknown): value is PlanRow {
-  return isRecord(value) && typeof value.quote === 'string' && value.quote.length <= 400 && typeof value.file === 'string' && value.file.length <= 500
+  return isRecord(value) && typeof value.quote === 'string' && value.quote.length <= 400 && (value.change === undefined || (typeof value.change === 'string' && value.change.length <= 400)) && typeof value.file === 'string' && value.file.length <= 500
     && (value.sibling === undefined || (typeof value.sibling === 'string' && value.sibling.length <= 200)) && typeof value.status === 'string' && PLAN_STATUSES.has(value.status)
     && (value.note === undefined || (typeof value.note === 'string' && value.note.length <= 400));
 }

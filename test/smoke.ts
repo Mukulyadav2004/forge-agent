@@ -183,6 +183,11 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   assert.match(JSON.stringify(uncovered.content), /not in your plan yet: \\"then document it\.\\"/u, 'A part of the request with no requirement is named back to the agent.');
   const planned = await client.callTool({ name: 'plan_task', arguments: { requirements: [{ quote: 'change the example', change: 'Rewrite example.txt', file: 'example.txt', sibling: 'original text' }, { quote: 'document it', change: 'Add notes', file: 'notes.md' }] } });
   assert.equal(planned.isError, undefined, JSON.stringify(planned.content));
+  // The feed shows the plan in the agent's words, with the part of the request each step answers under it.
+  const planRow = restoredFrame.locator('#messages .plan-item').filter({ hasText: 'Rewrite example.txt' }).last();
+  await planRow.waitFor();
+  assert.match(await planRow.innerText(), /^• Rewrite example\.txt → example\.txt \(like original text\)\s*for: "change the example"$/u);
+  assert.match(await restoredFrame.locator('#messages').innerText(), /Agent's plan\s*2 steps, written by the model; Forge checks they cover every part of your request/u);
   // The same refused call again says so, so a model does not repeat it many times.
   const missingRead = { name: 'read_file', arguments: { path: 'no-such-file.txt' } };
   assert.match(JSON.stringify((await client.callTool(missingRead)).content), /no-such-file\.txt does not exist\. To create it, use write_file/u, 'A missing file gets a plain answer.');

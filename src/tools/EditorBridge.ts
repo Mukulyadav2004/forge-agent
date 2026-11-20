@@ -201,7 +201,7 @@ export class EditorBridge implements vscode.Disposable {
   /** When the turn ends: show the checklist and return requirements that have no change and no stated reason. */
   finishChecklist(): PlanItem[] {
     if (!this.plan?.length) return [];
-    const rows = this.plan.map(item => ({ quote: item.quote.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: itemStatus(item, this.changedPaths), ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) }));
+    const rows = this.plan.map(item => ({ quote: item.quote.slice(0, 300), change: item.change.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: itemStatus(item, this.changedPaths), ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) }));
     const last = this.lastCommand ? `last command: ${this.lastCommand.command.slice(0, 160)} → exit ${this.lastCommand.exitCode ?? 'signal'}` : undefined;
     this.activityEvents.fire({ kind: 'plan', stage: 'end', items: rows, ...(last ? { lastCommand: last } : {}) });
     return this.openRequirements();
@@ -681,7 +681,7 @@ export class EditorBridge implements vscode.Disposable {
       const coverage = checkPlanCoverage(this.requestText, requirements);
       if (!coverage.ok) throw new Error(coverage.message);
       this.plan = requirements.map(item => ({ ...item, file: item.file.trim().replace(/\\/gu, '/').replace(/^\.\//u, '') }));
-      this.activityEvents.fire({ kind: 'plan', stage: 'start', items: this.plan.map(item => ({ quote: item.quote.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: item.skip_reason ? 'skipped' : 'planned', ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) })) });
+      this.activityEvents.fire({ kind: 'plan', stage: 'start', items: this.plan.map(item => ({ quote: item.quote.slice(0, 300), change: item.change.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: item.skip_reason ? 'skipped' : 'planned', ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) })) });
       // The sibling's footprint: every place an existing similar thing appears, so a weak model sees where to register, test and document.
       const footprints: string[] = [];
       for (const named of [...new Set(this.plan.flatMap(item => item.sibling?.trim() ? [item.sibling.trim()] : []))].slice(0, 4)) {
