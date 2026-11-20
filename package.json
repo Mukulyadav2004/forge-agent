@@ -106,6 +106,12 @@
           "default": "",
           "description": "Optional second provider/model name. If a turn fails on forgeAgent.model (after two retries for temporary errors), the session continues on this model automatically. Use a model from a different provider or key so it survives the same failure."
         },
+        "forgeAgent.compactionTokens": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "description": "Input tokens at which TrueForge compacts the conversation. 0 uses TrueForge's default: 80% of the configured model's context window (50,000 tokens if unknown). A low fixed value, such as 40000, makes compaction happen in shorter tasks."
+        },
         "forgeAgent.reasoningEffort": {
           "type": "string",
           "enum": [

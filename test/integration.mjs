@@ -108,7 +108,9 @@ test('the agent definition file is what TrueForge receives', () => {
   assert.ok(spec.instructions.startsWith('You are Forge Agent'));
   assert.deepEqual(definition.editorServer.requireApprovalForTools, ['run_command', 'propose_edit', 'write_file'], 'Commands and edits need approval: an edit or new file is reviewed and saved when approved.');
   assert.deepEqual(agentSpec({ model: 'test/model', connector: 'c', approveEdits: false }).mcpServers[0].requireApprovalForTools, ['run_command'], 'With forgeAgent.saveOnApprove off, propose_edit and write_file only stage a diff for Review changes.');
-  assert.deepEqual(definition.config.contextManagement.compaction, { enabled: true, trigger: { type: 'input_tokens', value: 100000 } }, 'Compaction is for long conversations: below 100k tokens a coding task keeps every file it read. TrueForge\'s default (80% of a 1M window) would rarely fire.');
+  assert.deepEqual(definition.config.contextManagement.compaction, { enabled: true }, 'By default TrueForge compacts at 80% of the configured model\'s context window, so it adapts to each model.');
+  assert.deepEqual(agentSpec({ model: 'test/model', compactionTokens: 40000 }).config.contextManagement.compaction, { enabled: true, trigger: { type: 'input_tokens', value: 40000 } }, 'forgeAgent.compactionTokens sets a fixed trigger, for example to show compaction in a short demo task.');
+  assert.deepEqual(agentSpec({ model: 'test/model', compactionTokens: 0 }).config, definition.config, '0 keeps TrueForge\'s default.');
   assert.deepEqual(agentSpec({ model: 'test/model' }).mcpServers, []);
 });
 

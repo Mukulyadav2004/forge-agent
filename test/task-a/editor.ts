@@ -9,7 +9,7 @@ import type { Frame } from 'playwright-core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-function configuration(): { instruction: string; workspace: string; python: string; commit: string; model?: string; reasoningEffort?: string; baseUrl: string; resultFile: string; verifier: string } {
+function configuration(): { instruction: string; workspace: string; python: string; commit: string; model?: string; fallbackModel?: string; reasoningEffort?: string; baseUrl: string; resultFile: string; verifier: string } {
   const path = process.env.FORGE_TASK_A_CONFIG;
   if (!path) throw new Error('Use pnpm run test:task-a.');
   const data: unknown = JSON.parse(readFileSync(path, 'utf8'));
@@ -19,7 +19,8 @@ function configuration(): { instruction: string; workspace: string; python: stri
     || !('resultFile' in data) || typeof data.resultFile !== 'string' || !('verifier' in data) || typeof data.verifier !== 'string') throw new Error('Invalid Task A test configuration.');
   const model = 'model' in data && typeof data.model === 'string' ? data.model : undefined;
   const reasoningEffort = 'reasoningEffort' in data && typeof data.reasoningEffort === 'string' ? data.reasoningEffort : undefined;
-  return { instruction: data.instruction, workspace: data.workspace, python: data.python, commit: data.commit, baseUrl: data.baseUrl, resultFile: data.resultFile, verifier: data.verifier, ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) };
+  const fallbackModel = 'fallbackModel' in data && typeof data.fallbackModel === 'string' ? data.fallbackModel : undefined;
+  return { instruction: data.instruction, workspace: data.workspace, python: data.python, commit: data.commit, baseUrl: data.baseUrl, resultFile: data.resultFile, verifier: data.verifier, ...(model ? { model } : {}), ...(fallbackModel ? { fallbackModel } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) };
 }
 function runPython(options: { python: string; workspace: string; source: string; debug?: string }): string {
   const result = spawnSync(options.python, ['-c', options.source], { cwd: options.workspace, env: { ...process.env, FLASK_DEBUG: options.debug ?? '' }, encoding: 'utf8', timeout: 30_000 });
@@ -40,6 +41,8 @@ export async function run(): Promise<void> {
     await settings.update('baseUrl', config.baseUrl, vscode.ConfigurationTarget.Global);
     if (config.model) await settings.update('model', config.model, vscode.ConfigurationTarget.Global);
     if (config.reasoningEffort) await settings.update('reasoningEffort', config.reasoningEffort, vscode.ConfigurationTarget.Global);
+    // Task C: the main model is broken on purpose; the fallback must take over with no user action.
+    if (config.fallbackModel) { await settings.update('fallbackModel', config.fallbackModel, vscode.ConfigurationTarget.Global); report.fallback_model = config.fallbackModel; }
     await vscode.commands.executeCommand('forgeAgent.open');
     const browser = await chromium.connectOverCDP(`http://127.0.0.1:${process.env.FORGE_SMOKE_CDP_PORT}`);
     const deadline = Date.now() + 20_000;
@@ -109,11 +112,20 @@ export async function run(): Promise<void> {
         const status = await frame.locator('#status').innerText();
         const sessionId = /Session ([^\s]+)/.exec(status)?.[1];
         if (sessionId) report.session_id = sessionId;
-        if (/quota|429|RESOURCE_EXHAUSTED|invalid|Unauthorized|not found|Unprocessable|error|failed|timed out/i.test(status)) throw new Error(status);
+        if (config.fallbackModel && !report.fallback_switched && await frame.getByRole('log').getByText(/Switching to the fallback model/u).count()) {
+          report.fallback_switched = true;
+          report.fallback_message = (await frame.getByRole('log').getByText(/Switching to the fallback model/u).first().locator('xpath=ancestor::article[1]').innerText()).slice(0, 600);
+          report.git_status_at_switch = spawnSync('git', ['status', '--porcelain'], { cwd: config.workspace, encoding: 'utf8' }).stdout.trim();
+          assert.equal(report.git_status_at_switch, '', 'The failed model changed files.');
+          await frame.locator('body').screenshot({ path: join(config.workspace, '..', 'task-c-fallback.png') });
+        }
+        // Before the fallback takes over, the broken main model's errors are expected.
+        if ((!config.fallbackModel || report.fallback_switched) && /quota|429|RESOURCE_EXHAUSTED|invalid|Unauthorized|not found|Unprocessable|error|failed|timed out/i.test(status)) throw new Error(status);
         await setTimeout(200);
       }
       await inline;
       assert.ok(await review.locator('[data-hunk-id]').count() > 0, 'The real model did not produce a proposal.');
+      if (config.fallbackModel) assert.equal(report.fallback_switched, true, 'The fallback model did not take over.');
       const ready = Date.now() + 30_000;
       while (await frame.locator('#cancel-button').isEnabled() && Date.now() < ready) await setTimeout(100);
       report.trueforge_status = await frame.locator('#status').innerText();

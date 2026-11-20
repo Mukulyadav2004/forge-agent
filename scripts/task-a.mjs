@@ -13,7 +13,7 @@ const workspace = join(output, 'flask');
 const python = join(output, 'venv', 'bin', 'python');
 const commit = '22d924701a6ae2e4cd01e9a15bbaf3946094af65';
 const instruction = "Treat the values 'off' and 'n' as false as well, case-insensitively, and update the docstring to list every value that is treated as false.";
-const { positionals, values } = parseArgs({ allowPositionals: true, options: { model: { type: 'string' }, 'reasoning-effort': { type: 'string' }, 'base-url': { type: 'string', default: 'http://127.0.0.1:8790' } } });
+const { positionals, values } = parseArgs({ allowPositionals: true, options: { model: { type: 'string' }, 'reasoning-effort': { type: 'string' }, 'fallback-model': { type: 'string' }, 'base-url': { type: 'string', default: 'http://127.0.0.1:8790' } } });
 if (values['reasoning-effort'] && !['minimal', 'low', 'medium', 'high'].includes(values['reasoning-effort'])) throw new Error('Choose minimal, low, medium or high reasoning effort.');
 const action = positionals[0];
 function run(command, args, options = {}) {
@@ -51,9 +51,9 @@ if (action === 'prepare') {
   pinned();
   if (run('git', ['status', '--porcelain'])) throw new Error('The rehearsal checkout must be clean before the automated Task A run.');
   const profile = mkdtempSync(join(tmpdir(), 'forge-task-a-'));
-  const resultFile = join(output, values.model ? 'live-result.json' : 'editor-result.json');
+  const resultFile = join(output, values['fallback-model'] ? 'task-c-result.json' : values.model ? 'live-result.json' : 'editor-result.json');
   rmSync(resultFile, { force: true });
-  writeFileSync(join(output, 'config.json'), JSON.stringify({ instruction, workspace, python, commit, model: values.model, reasoningEffort: values['reasoning-effort'], baseUrl: values['base-url'], resultFile, verifier: join(extension, 'test', 'task-a', 'verify.py') }));
+  writeFileSync(join(output, 'config.json'), JSON.stringify({ instruction, workspace, python, commit, model: values.model, fallbackModel: values['fallback-model'], reasoningEffort: values['reasoning-effort'], baseUrl: values['base-url'], resultFile, verifier: join(extension, 'test', 'task-a', 'verify.py') }));
   const server = createServer().listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();

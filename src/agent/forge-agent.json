@@ -7,7 +7,7 @@
     "sandbox": { "enabled": false },
     "webSearch": { "enabled": false },
     "iterationLimit": 64,
-    "contextManagement": { "compaction": { "enabled": true, "trigger": { "type": "input_tokens", "value": 100000 } } }
+    "contextManagement": { "compaction": { "enabled": true } }
   },
   "editorServer": {
     "preload": true,
