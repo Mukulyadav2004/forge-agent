@@ -1,4 +1,5 @@
 import type { FileEvidence } from '../shared/messages';
+import { diffLines } from 'diff';
 
 const MAX_CONTEXT_CHARACTERS = 64000;
 const MAX_FILES = 7;
@@ -292,4 +293,42 @@ export function definitionBlock(lines: string[], start: number): [number, number
     last = index + 1;
   }
   return [first, last];
+}
+
+// Code the request did not ask to touch. Cline (7a7878cb) has no such check: its editor only requires old_text to match
+// once and relies on review and checkpoints. Forge's own rule: an edit may not delete definitions that existed when the
+// request started unless the request names them, and removing lines inside such a definition is flagged for review.
+const NAMED_DEFINITION = /^\s*(?:(?:export|default|async|public|private|protected|static|abstract|pub)\s+)*(?:def|class|function|interface|struct|enum|trait|fn|func|type|impl)\s+([A-Za-z_$][\w$]*)|^\s*(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\(|function)/u;
+export function definitionName(line: string): string | undefined { const match = NAMED_DEFINITION.exec(line); return match?.[1] ?? match?.[2]; }
+export function definitionNames(text: string): Set<string> { return new Set(text.split('\n').flatMap(line => definitionName(line) ?? [])); }
+/** Prose files have headings, not definitions; the check applies to code. */
+export const isDocumentPath = (path: string) => /\.(?:md|markdown|rst|txt|adoc)$/iu.test(path);
+
+/**
+ * What an edit removes from code the request does not mention: whole definitions that existed when the request started
+ * (`existing`) and are gone afterwards, and counts of non-blank lines removed inside such definitions. A name the
+ * request mentions is the user's to change; a definition that moves keeps its name and is not reported.
+ */
+export function codeRemovedOutsideRequest(options: { before: string; after: string; existing: ReadonlySet<string>; request: string }): { definitions: string[]; inside: Array<{ name: string; lines: number }> } {
+  const asked = new Set(options.request.match(/[A-Za-z_$][\w$]*/gu) ?? []);
+  const protectedName = (name: string) => options.existing.has(name) && !asked.has(name);
+  const remaining = definitionNames(options.after);
+  const definitions = [...definitionNames(options.before)].filter(name => protectedName(name) && !remaining.has(name));
+  const lines = options.before.split('\n');
+  const blocks = lines.flatMap((line, index) => { const name = definitionName(line); return name ? [{ name, line: index + 1, range: definitionBlock(lines, index + 1) }] : []; });
+  const inside = new Map<string, number>();
+  let oldLine = 1;
+  for (const change of diffLines(options.before, options.after)) {
+    const count = change.count ?? 0;
+    if (change.removed) {
+      for (let line = oldLine; line < oldLine + count; line++) {
+        if (!lines[line - 1]?.trim()) continue;
+        // The innermost definition around the removed line; its own first line is a rename or a move, covered above.
+        const owner = blocks.filter(block => block.range[0] <= line && line <= block.range[1] && block.line !== line).at(-1);
+        if (owner && protectedName(owner.name) && !definitions.includes(owner.name)) inside.set(owner.name, (inside.get(owner.name) ?? 0) + 1);
+      }
+    }
+    if (!change.added) oldLine += count;
+  }
+  return { definitions, inside: [...inside].map(([name, count]) => ({ name, lines: count })) };
 }

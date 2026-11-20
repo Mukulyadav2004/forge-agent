@@ -116,10 +116,22 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.equal(readInsert.isError, undefined, `An insert at read lines needs no base_revision: ${JSON.stringify(readInsert.content)}`);
   await vscode.commands.executeCommand('forgeAgent.rejectAll');
   await vscode.workspace.fs.delete(placementUri);
+  // Untouched code: deleting a function the request does not name is refused; removing lines inside one is flagged.
+  const guardUri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0]!.uri, 'guard_probe.py');
+  await vscode.workspace.fs.writeFile(guardUri, new TextEncoder().encode('def keep_me():\n    first = 1\n    second = 2\n    return first + second\n\n\ndef other():\n    return 0\n'));
+  await client.callTool({ name: 'read_file', arguments: { path: 'guard_probe.py' } });
+  const deleting = await client.callTool({ name: 'propose_edit', arguments: { path: 'guard_probe.py', old_text: 'def keep_me():\n    first = 1\n    second = 2\n    return first + second\n', new_text: 'def added():\n    return 1\n', explanation: 'Anchor not repeated' } });
+  assert.equal(deleting.isError, true, 'Deleting an existing function the request does not name is refused.');
+  assert.match(JSON.stringify(deleting.content), /would delete existing code that the request does not mention: keep_me\. Leave it in place\./u);
+  const trimming = await client.callTool({ name: 'propose_edit', arguments: { path: 'guard_probe.py', old_text: '    first = 1\n    second = 2\n', new_text: '    first = 1\n', explanation: 'Remove a line inside keep_me' } });
+  assert.equal(trimming.isError, undefined, JSON.stringify(trimming.content));
+  assert.match(JSON.stringify(trimming.content), /This edit removes 1 line\(s\) inside keep_me, which the request does not mention\. Check that this is intended\./u);
+  await vscode.commands.executeCommand('forgeAgent.rejectAll');
+  await vscode.workspace.fs.delete(guardUri);
   const proposals = (await feed()).activity.filter(entry => entry.kind === 'propose' && entry.reason === 'MCP combine check').map(entry => entry.detail);
   assert.deepEqual(proposals, ['lines 2–2', 'insert at line 4, combined with earlier changes', 'replace matched text, combined with earlier changes']);
   const activityRows = frame.locator('#messages .activity-row');
-  await activityRows.filter({ hasText: 'replace matched text' }).waitFor();
+  await activityRows.filter({ hasText: 'replace matched text' }).filter({ hasText: 'example.txt' }).first().waitFor();
   const rendered = await activityRows.allInnerTexts();
   assert.ok(rendered.some(text => text.includes('Searched') && text.includes('"separator" in example.txt: 1 match in 1 file') && text.includes('Find the separator line')), `Search row missing: ${rendered.join(' | ')}`);
   const searchGroup = frame.locator('#messages .activity-group').filter({ has: frame.locator('.activity-search', { hasText: '"separator" in example.txt' }) }).last();

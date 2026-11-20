@@ -520,3 +520,24 @@ test('@-mentions: paths and names are found, e-mail addresses and trailing punct
   assert.match('    def routes_command(self):', new RegExp(definitionPattern('routes_command')));
   assert.doesNotMatch('    self.add_command(routes_command)', new RegExp(definitionPattern('routes_command')), 'A use is not a definition.');
 });
+
+test('untouched code: deleting a definition the request does not name is found, lines removed inside one are counted, moves and named changes are allowed', async () => {
+  const { codeRemovedOutsideRequest, definitionNames } = await import('../out/context/projectContext.js');
+  const before = ['@click.command("routes")', 'def routes_command():', '    rows = []', '    rows.insert(0, headers)', '    widths = [1]', '    echo(rows)', '', '', 'class TestRoutes:', '    def test_simple(self):', '        assert 1', '', '    def test_sort(self):', '        assert 2', ''].join('\n');
+  const existing = definitionNames(before);
+  const request = 'Add a new built-in CLI command flask config that prints the configuration as JSON.';
+  // The live run's two mistakes: old_text used as an anchor and not repeated, so the anchor lines were deleted.
+  const anchor = before.replace('    rows.insert(0, headers)\n    widths = [1]\n', 'def config_command():\n    echo(config)\n');
+  assert.deepEqual(codeRemovedOutsideRequest({ before, after: anchor, existing, request }), { definitions: [], inside: [{ name: 'routes_command', lines: 2 }] });
+  const header = before.replace('class TestRoutes:\n', 'class TestConfig:\n    def test_config(self):\n        assert 3\n');
+  assert.deepEqual(codeRemovedOutsideRequest({ before, after: header, existing, request }).definitions, ['TestRoutes']);
+  const gone = before.replace('    def test_simple(self):\n        assert 1\n\n', '');
+  assert.deepEqual(codeRemovedOutsideRequest({ before, after: gone, existing, request }).definitions, ['test_simple']);
+  // Allowed: adding next to existing code, moving a definition, changing what the request names, removing the agent's own code.
+  const added = before.replace('    echo(rows)\n', '    echo(rows)\n\n\ndef config_command():\n    echo(config)\n');
+  assert.deepEqual(codeRemovedOutsideRequest({ before, after: added, existing, request }), { definitions: [], inside: [] });
+  const moved = ['class TestRoutes:', '    def test_simple(self):', '        assert 1', '', '    def test_sort(self):', '        assert 2', '', '', '@click.command("routes")', 'def routes_command():', '    rows = []', '    rows.insert(0, headers)', '    widths = [1]', '    echo(rows)', ''].join('\n');
+  assert.deepEqual(codeRemovedOutsideRequest({ before, after: moved, existing, request }).definitions, []);
+  assert.deepEqual(codeRemovedOutsideRequest({ before, after: gone, existing, request: 'Remove test_simple, it is obsolete.' }).definitions, [], 'A definition the request names may be removed.');
+  assert.deepEqual(codeRemovedOutsideRequest({ before, after: gone, existing: new Set(['routes_command', 'TestRoutes']), request }).definitions, [], 'Code the agent added in this request is its own to remove.');
+});

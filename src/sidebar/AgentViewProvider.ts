@@ -84,7 +84,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       resolveMentions: (text: string) => Promise<string>;
       projectOverview: () => Promise<string>;
       projectInstructions: () => Promise<string>;
-      prepareEdit: (name: 'propose_edit' | 'write_file', argumentsJson: string) => Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }>;
+      prepareEdit: (name: 'propose_edit' | 'write_file', argumentsJson: string) => Promise<{ status: 'review'; warning?: string } | { status: 'stage' } | { status: 'invalid'; message: string }>;
       settleEdits: (allow: boolean) => Promise<void>;
       /** Starts a fresh context budget for a new user request; `scope` limits staged edits to one file (Edit Selection). */
       beginRequest: (scope?: string, requestText?: string) => void;
@@ -457,7 +457,8 @@ ${selectedText}`;
       else if (prepared.status === 'invalid') this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: this.actions.guardDeny(call.name, call.arguments, `The editor could not build this edit, so it was not shown to the user: ${prepared.message}`) });
       else {
         this.presetDecisions.set(item.toolCallId, null);
-        chat.messages.push({ id: randomUUID(), role: 'assistant', text: describeApproval(call, { saveOnApprove: true }) });
+        // A warning from Forge's untouched-code check comes first, so the reviewer reads it before the diff.
+        chat.messages.push({ id: randomUUID(), role: 'assistant', text: `${prepared.warning ? `**⚠ ${prepared.warning}**\n\n` : ''}${describeApproval(call, { saveOnApprove: true })}` });
       }
     }
     if (chat.approvals.length && chat.approvals.every(item => this.presetDecisions.get(item.toolCallId))) this.queueDecision(chat, true);

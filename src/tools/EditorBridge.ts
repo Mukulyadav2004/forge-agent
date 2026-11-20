@@ -11,10 +11,10 @@ import { z } from 'zod';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
 import type { ActivityEntry } from '../shared/messages';
-import { buildProjectContext, buildProjectOverview, definitionBlock, definitionPattern, fileOutline, looksLikePath, MENTION_LIMITS, parseMentions } from '../context/projectContext';
+import { buildProjectContext, buildProjectOverview, codeRemovedOutsideRequest, definitionBlock, definitionNames, definitionPattern, fileOutline, isDocumentPath, looksLikePath, MENTION_LIMITS, parseMentions } from '../context/projectContext';
 import { loadWorkspaceInstructions } from '../context/environment';
 import type { EditService } from '../edits/EditService';
-import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
+import { MAX_EDIT_CHARACTERS, replaceMatched } from '../edits/EditService';
 import { savedExcerpt } from '../edits/lineChanges';
 import { describeProblems, newProblems } from '../edits/diagnostics';
 import { checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, placeholderLine, PLAN_LIMITS, progressReport, RunGuard } from '../context/plan';
@@ -57,6 +57,15 @@ const WriteInputSchema = z.object(WRITE_SHAPE);
 type WriteInput = z.infer<typeof WriteInputSchema>;
 function writeKey(input: WriteInput): string { return JSON.stringify(['write_file', input.path, input.content, input.explanation]); }
 /** Identifies one propose_edit call by its arguments, so the tool call after an approval finds the result the user already decided. */
+/** The file text an edit would produce on its own (without other pending changes), or undefined when it cannot be located. */
+function previewEdit(text: string, input: ProposeInput): string | undefined {
+  if (input.old_text !== undefined) { const matched = replaceMatched({ source: text, oldText: input.old_text, newText: input.new_text }); return matched.ok ? matched.text : undefined; }
+  const lines = text.split('\n');
+  const inserted = input.new_text.replace(/\n$/u, '').split('\n');
+  if (input.start_line !== undefined && input.end_line !== undefined) { lines.splice(input.start_line - 1, input.end_line - input.start_line + 1, ...(input.new_text ? inserted : [])); return lines.join('\n'); }
+  if (input.insert_line !== undefined) { lines.splice(input.insert_line - 1, 0, ...inserted); return lines.join('\n'); }
+  return input.new_text;
+}
 function editKey(input: ProposeInput): string {
   return JSON.stringify([input.path, input.base_revision, input.new_text, input.explanation, input.old_text ?? null, input.start_line ?? null, input.end_line ?? null, input.insert_line ?? null]);
 }
@@ -313,7 +322,7 @@ export class EditorBridge implements vscode.Disposable {
     return `File: ${path} (${label}), lines ${start}-${last}, base_revision ${revision}.${more}\n${output.join('\n')}`;
   }
   /** Checks and stages one propose_edit call; nothing is written. Used by the tool and when an edit waits for approval. */
-  private async stageProposal(input: ProposeInput): Promise<{ id: string; combined: boolean; replaced: string[]; detail: string; ignored: string[] }> {
+  private async stageProposal(input: ProposeInput): Promise<{ id: string; combined: boolean; replaced: string[]; detail: string; ignored: string[]; warning?: string }> {
     const { path, base_revision, new_text, explanation, old_text, start_line, end_line, insert_line } = input;
     await this.assertFile(path);
     if (this.editScope !== undefined && normalize(path).replace(/^\.\//u, '') !== this.editScope) throw new Error(`This request is limited to ${this.editScope}, the file the user selected. Do not stage changes to other files; mention any other change you think is needed in your reply instead.`);
@@ -340,12 +349,27 @@ export class EditorBridge implements vscode.Disposable {
       // The read proves the numbers refer to the current file, so a missing base_revision is filled in from it.
       revision ??= current.revision;
     } else if (old_text === undefined && revision === undefined && this.unreadLines(path, current.file.text) === 0) revision = current.revision;
+    const warning = this.untouchedCodeCheck(path, current.file.text, input);
     const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined });
     const detail = old_text !== undefined ? 'replace matched text' : range ? `lines ${range.startLine}–${range.endLine}` : insert_line !== undefined ? `insert at line ${insert_line}` : 'whole file';
-    return { id, combined, replaced, detail, ignored };
+    return { id, combined, replaced, detail, ignored, ...(warning ? { warning } : {}) };
+  }
+  /**
+   * Code the request did not ask to touch: refuse an edit that deletes definitions which existed when the request
+   * started and which the request does not name; return a warning when it removes lines inside one. Edit Selection
+   * changes the selected code on purpose, and prose files have no definitions, so both are left out.
+   */
+  private untouchedCodeCheck(path: string, text: string, input: ProposeInput): string | undefined {
+    if (this.editScope !== undefined || isDocumentPath(path)) return undefined;
+    const after = previewEdit(text, input);
+    if (after === undefined) return undefined;
+    const start = this.textAtStart.get(normalize(path).replace(/^\.\//u, '')) ?? text;
+    const found = codeRemovedOutsideRequest({ before: text, after, existing: definitionNames(start), request: this.requestText });
+    if (found.definitions.length) throw new Error(`This edit would delete existing code that the request does not mention: ${found.definitions.slice(0, 8).join(', ')}${found.definitions.length > 8 ? ', …' : ''}. Leave it in place. To add code next to existing code, use insert_line at a line you have read, or repeat old_text unchanged in new_text and add your lines before or after it.`);
+    return found.inside.length ? `This edit removes ${found.inside.slice(0, 5).map(item => `${item.lines} line(s) inside ${item.name}`).join(', ')}, which the request does not mention. Check that this is intended.` : undefined;
   }
   /** Edits staged while TrueForge waits for the user's approval, by call; and the results the following tool calls return. */
-  private readonly awaitingReview = new Map<string, { path: string }>();
+  private readonly awaitingReview = new Map<string, { path: string; warning?: string }>();
   private readonly reviewed = new Map<string, { message: string; saved: number; rejected: number; revision?: string; error?: string; problems?: number }>();
   /** How long a save waits for VS Code to re-check the file; a language server usually answers within a second. */
   private static readonly DIAGNOSTICS_WAIT_MS = 2500;
@@ -354,12 +378,12 @@ export class EditorBridge implements vscode.Disposable {
    * user reviews it hunk by hunk before deciding. Edit Selection keeps the staged review ('stage'); a call that cannot
    * be staged is returned with its error ('invalid') so the agent can correct it without asking the user.
    */
-  async prepareEdit(name: 'propose_edit' | 'write_file', argumentsJson: string): Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }> {
+  async prepareEdit(name: 'propose_edit' | 'write_file', argumentsJson: string): Promise<{ status: 'review'; warning?: string } | { status: 'stage' } | { status: 'invalid'; message: string }> {
     if (this.editScope !== undefined) return { status: 'stage' };
     let parsed: unknown;
     try { parsed = JSON.parse(argumentsJson); } catch { return { status: 'invalid', message: `The ${name} arguments could not be read. Send the call again with valid arguments.` }; }
     try {
-      let key: string, path: string, explanation: string, detail: string, id: string;
+      let key: string, path: string, explanation: string, detail: string, id: string, warning: string | undefined;
       if (name === 'write_file') {
         const input = WriteInputSchema.parse(parsed);
         ({ id } = await this.stageWrite(input));
@@ -367,12 +391,12 @@ export class EditorBridge implements vscode.Disposable {
       } else {
         const input = ProposeInputSchema.parse(parsed);
         const staged = await this.stageProposal(input);
-        [key, path, explanation, detail, id] = [editKey(input), input.path, input.explanation, staged.detail, staged.id];
+        [key, path, explanation, detail, id, warning] = [editKey(input), input.path, input.explanation, staged.detail, staged.id, staged.warning];
       }
-      this.awaitingReview.set(key, { path });
+      this.awaitingReview.set(key, { path, ...(warning ? { warning } : {}) });
       this.activityEvents.fire({ kind: 'propose', path, detail: `${detail} · waiting for your review`, reason: explanation.slice(0, 300) });
       await this.options.edits.preview(id).catch(() => undefined);
-      return { status: 'review' };
+      return { status: 'review', ...(warning ? { warning } : {}) };
     } catch (error) {
       const message = error instanceof z.ZodError ? `The ${name} arguments are invalid: ${error.issues.map(issue => issue.message.startsWith(String(issue.path[0] ?? '')) ? issue.message : `${issue.path.join('.')} ${issue.message}`).join('; ')}` : error instanceof Error ? error.message : 'The edit could not be prepared.';
       this.activityEvents.fire({ kind: 'refused', tool: name, message });
@@ -418,7 +442,7 @@ export class EditorBridge implements vscode.Disposable {
     await rechecked;
     const afterSave = new Map<string, { revision?: string; excerpt: string; firstLine?: number; problems: Problem[]; text?: string }>();
     let shown: { path: string; line: number } | undefined;
-    for (const [key, { path }] of waiting) {
+    for (const [key, { path, warning }] of waiting) {
       if (this.reviewed.has(key)) continue;
       const hunks = latest(path)?.hunks ?? [];
       const saved = hunks.filter(hunk => hunk.status === 'applied').length;
@@ -441,7 +465,7 @@ export class EditorBridge implements vscode.Disposable {
         rejected.length ? `The user rejected the hunk(s) at original line(s) ${rejected.map(hunk => hunk.oldStart).join(', ')}; they were not saved. Do not propose them again unless the user asks.` : '',
         state.revision ? `Use base_revision ${state.revision} for further edits to ${path}.` : '',
       ].filter(Boolean).join(' ') + (saved && state.excerpt ? `\nSaved lines of ${path}, numbered as the file is now:\n${state.excerpt}` : '')
-        + (state.problems.length ? `\n${describeProblems(path, state.problems)}` : '');
+        + (state.problems.length ? `\n${describeProblems(path, state.problems)}` : '') + (saved && warning ? `\n${warning}` : '');
       if (saved) {
         const clean = path.replace(/^\.\//u, '');
         this.changedPaths.add(clean);
@@ -726,14 +750,14 @@ export class EditorBridge implements vscode.Disposable {
         return { content: [{ type: 'text', text: reviewed.message }], structuredContent: { status: reviewed.saved ? 'saved' : 'rejected', path: input.path, saved_hunks: reviewed.saved, rejected_hunks: reviewed.rejected, ...(reviewed.revision ? { base_revision: reviewed.revision } : {}), message: reviewed.message } };
       }
       const { path, explanation } = input;
-      const { id, combined, replaced, detail, ignored } = await this.stageProposal(input);
+      const { id, combined, replaced, detail, ignored, warning } = await this.stageProposal(input);
       const note = combined ? ` It includes your earlier pending changes to ${path}; all of them are reviewed together.`
         : replaced.length ? ` It replaced an earlier pending proposal for ${path} that could not be combined; include every change this file still needs.` : '';
       this.activityEvents.fire({ kind: 'propose', path, detail: `${detail}${combined ? ', combined with earlier changes' : replaced.length ? ', replaced an earlier proposal' : ''}`, reason: explanation.slice(0, 300) });
       const hint = ignored.length ? ` Ignored ${ignored.join(', ')} because old_text already locates the change.` : '';
       this.changedPaths.add(path.replace(/^\.\//u, ''));
       const editNote = this.editedNote(path);
-      const message = `Proposal ${id} is staged for ${path}.${note}${hint} No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.${this.checklistNote(path)}${editNote}`;
+      const message = `Proposal ${id} is staged for ${path}.${note}${hint} No files changed. To save it, the user must open Review changes in the Forge sidebar and click Accept hunk, Apply file or Apply all. The Command Palette also offers Forge: Apply All Proposed Changes. Chat approval alone does not write files. Do not ask the user to retype the changes manually.${warning ? `\n${warning}` : ''}${this.checklistNote(path)}${editNote}`;
       return { content: [{ type: 'text', text: message }], structuredContent: { proposal_id: id, status: 'staged', path, combined, replaced_proposal_ids: replaced, message } };
     });
     return server;
