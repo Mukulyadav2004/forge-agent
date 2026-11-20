@@ -44,7 +44,7 @@ export interface ComposerSelection {
  * `used` is the request's context budget spent after this call; a `request` entry marks a new user request and its budget.
  * `at` is how many chat messages existed when it happened, so the sidebar can place it in the conversation. */
 export type ActivityEntry = { at?: number } & (
-  | { kind: 'request'; limit: number }
+  | { kind: 'request'; limit: number; inputTokens?: number }
   | { kind: 'search'; query: string; glob: string; matches: number; fileCount: number; files: string[]; truncated: boolean; reason?: string; used?: number }
   | { kind: 'open'; path: string; startLine: number; endLine: number; reason?: string; foundBy?: string; used?: number }
   | { kind: 'propose'; path: string; detail: string; reason?: string }
@@ -73,7 +73,7 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
   const text = (key: string) => typeof value[key] === 'string';
   const count = (key: string) => typeof value[key] === 'number' && Number.isSafeInteger(value[key]);
   switch (value.kind) {
-    case 'request': return count('limit');
+    case 'request': return count('limit') && (value.inputTokens === undefined || count('inputTokens'));
     case 'search': return text('query') && text('glob') && count('matches') && count('fileCount') && typeof value.truncated === 'boolean' && Array.isArray(value.files) && value.files.every(file => typeof file === 'string');
     case 'open': return text('path') && count('startLine') && count('endLine') && (value.foundBy === undefined || text('foundBy'));
     case 'propose': return text('path') && text('detail');

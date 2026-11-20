@@ -414,7 +414,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.getByRole('log').getByText(/Switching to the fallback model/).waitFor();
     assert.equal(await frame.locator('#messages .activity-request').count(), 1, 'A new request starts a fresh context budget in the feed.');
-    assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request · context [\d.]+k? of 350k chars$/u, 'The first request of a chat counts the project overview in its budget.');
+    assert.match(await frame.locator('#messages .activity-request').innerText(), /^New request · context [\d.]+k? of 350k chars \(≈ [\d.]+k? tokens\)$/u, 'The first request of a chat counts the project overview in its budget, with an estimate in tokens.');
     await frame.getByRole('log').getByText('Recovered with the corrected model.', { exact: true }).waitFor();
     const thought = frame.locator('#messages .message-assistant details.thinking').last();
     assert.equal(await thought.locator('summary').innerText(), 'Thinking');
@@ -430,6 +430,7 @@ async function checkModelRecovery(browser: Browser): Promise<void> {
     await frame.getByText('Continued after compaction.', { exact: true }).waitFor();
     const compacted = frame.locator('#messages .activity-compaction');
     await compacted.filter({ hasText: 'summarised it to' }).waitFor();
+    assert.match(await frame.locator('#messages .activity-request').last().innerText(), / · model input 5\.1k tokens$/u, 'The request row shows the input tokens TrueForge reported for the latest model call.');
     assert.match(await compacted.innerText(), /Compacted context 41k tokens reached the 32k-token threshold; TrueForge summarised it to 5.1k tokens in 2\.1 s[\s\S]*re-reads what it still needs/u);
     await frame.locator('#messages').screenshot({ path: vscode.Uri.joinPath(vscode.extensions.getExtension('mukulkumar.forge-agent')?.extensionUri ?? vscode.Uri.file('.'), 'out-test', 'compaction-feed.png').fsPath });
     await input.fill('Diff render check');

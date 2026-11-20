@@ -361,7 +361,11 @@ function renderTimeline(options: { messages: ChatMessage[]; activity: ActivityEn
       group = undefined; previousUsed = 0;
       const line = document.createElement('div');
       line.className = 'activity-request';
-      line.textContent = `New request · context ${size(spent.get(index) ?? 0)} of ${size(entry.limit)} chars`;
+      // The budget is enforced in characters (the same for every model); tokens are shown beside it: an estimate
+      // (characters ÷ 4) and, once known, the input tokens TrueForge reported for the latest model call.
+      const chars = spent.get(index) ?? 0;
+      line.textContent = `New request · context ${size(chars)} of ${size(entry.limit)} chars${chars ? ` (≈ ${size(Math.round(chars / 4))} tokens)` : ''}${entry.inputTokens ? ` · model input ${size(entry.inputTokens)} tokens` : ''}`;
+      line.title = 'Characters that Forge\'s tools returned in this request; the budget is enforced in characters, the same for every model. ≈ tokens is characters ÷ 4. Model input is the token count TrueForge reported for the latest model call.';
       place(at, line);
       return;
     }

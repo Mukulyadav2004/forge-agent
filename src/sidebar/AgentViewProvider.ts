@@ -670,6 +670,10 @@ ${selectedText}`;
     if (event.type === 'thread.context_compaction_finished' && compaction?.kind === 'compaction' && !compaction.done) { compaction.done = true; compaction.durationMs = Math.round(event.durationMs); }
     if (event.type === 'model.message.delta' && event.usage && compaction?.kind === 'compaction' && compaction.done && compaction.afterTokens === undefined) compaction.afterTokens = event.usage.inputTokens;
     if (event.type === "model.message" && event.toolCalls) chat.toolCalls.remember(event.id, event.toolCalls);
+    // The request row also shows the input tokens TrueForge reports for the latest model call (the real, provider-counted size).
+    const usage = event.type === 'model.message' || event.type === 'model.message.delta' ? event.usage : undefined;
+    const request = usage ? [...chat.activity].reverse().find(entry => entry.kind === 'request') : undefined;
+    if (usage && request?.kind === 'request' && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0) request.inputTokens = usage.inputTokens;
     if (event.type === "model.message" && event.threadId === "main" && typeof event.content === "string" && event.content) {
       const existing = chat.messages.find(message => message.id === event.id && message.role === "assistant");
       if (existing) existing.text = event.content;
