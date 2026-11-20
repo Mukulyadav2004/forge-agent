@@ -104,7 +104,7 @@ test('the agent definition file is what TrueForge receives', () => {
   const spec = agentSpec({ model: 'test/model', connector: 'forge-editor-abc', reasoningEffort: 'low' });
   assert.deepEqual(spec.config, definition.config);
   assert.deepEqual(spec.mcpServers, [{ name: 'forge-editor-abc', ...definition.editorServer }]);
-  assert.deepEqual(spec.model, { name: 'test/model', params: { reasoningEffort: 'low' } });
+  assert.deepEqual(spec.model, { name: 'test/model', params: { parallelToolCalls: true, reasoningEffort: 'low' } }, 'Several tool calls may come in one response, so independent reads take one round trip.');
   assert.ok(spec.instructions.startsWith('You are Forge Agent'));
   assert.deepEqual(definition.editorServer.requireApprovalForTools, ['run_command', 'propose_edit', 'write_file'], 'Commands and edits need approval: an edit or new file is reviewed and saved when approved.');
   assert.deepEqual(agentSpec({ model: 'test/model', connector: 'c', approveEdits: false }).mcpServers[0].requireApprovalForTools, ['run_command'], 'With forgeAgent.saveOnApprove off, propose_edit and write_file only stage a diff for Review changes.');
@@ -447,7 +447,11 @@ test('plan_task covers the user\'s words, the checklist tracks changed files, an
   assert.deepEqual(checkPlanCoverage(request, [feature, help, test, docs]), { ok: true });
   const missingDocs = checkPlanCoverage(request, [feature, help, test]);
   assert.equal(missingDocs.ok, false);
-  assert.match(missingDocs.message, /not in your plan yet: "be documented alongside the other built-in commands\."/u, 'A forgotten part of the request is named in the user\'s words.');
+  assert.match(missingDocs.message, /does not yet cover these words of the request: documented, alongside, commands \(in: "It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands\."\)\./u, 'A forgotten part is named as its words, with the whole sentence, never comma fragments.');
+  // The live failure: a quote with one extra comma ("TOKEN, or KEY") is still the user's words.
+  assert.deepEqual(checkPlanCoverage(request, [{ ...feature, quote: 'Add a new built-in CLI command flask config that prints the loaded application\'s configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN, or KEY as \u201c***\u201d' }, help, test, docs]), { ok: true }, 'Punctuation and quote marks do not change the words.');
+  const fragments = checkPlanCoverage(request, [help, test, docs]);
+  assert.ok(!fragments.ok && !/"PASSWORD"|; "TOKEN/u.test(fragments.message) && fragments.message.includes('SECRET, PASSWORD, TOKEN'), 'A list in the request is reported whole, not split at its commas.');
   assert.match(checkPlanCoverage(request, [{ ...docs, quote: 'write docs in docs/cli.rst' }, feature, help, test]).message, /not in the user's request/u, 'Quotes must be the user\'s words.');
   assert.match(checkPlanCoverage(request, [{ ...feature, quote: request }]).message, /^Split the request/u, 'One requirement for the whole request is refused.');
   assert.deepEqual(checkPlanCoverage('', [docs]), { ok: true }, 'Without request text there is nothing to compare.');

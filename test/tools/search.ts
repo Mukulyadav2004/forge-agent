@@ -8,10 +8,11 @@ import { z } from 'zod';
 
 const ResultSchema = z.object({
   files: z.array(z.object({ path: z.string(), match_count: z.number(), matches: z.array(z.object({ line: z.number(), text: z.string(), line_truncated: z.boolean() })) })),
-  folder_counts: z.record(z.string(), z.number()), omitted_folder_matches: z.number(), observed_matches: z.number(), returned_matches: z.number(), counts_complete: z.boolean(), path_filter: z.string(), next_step: z.string(),
+  folder_counts: z.record(z.string(), z.number()), omitted_folder_matches: z.number(), observed_matches: z.number(), returned_matches: z.number(), counts_complete: z.boolean(), path_filter: z.string(), next_step: z.string().optional(),
   truncated: z.boolean(), candidate_limit_reached: z.boolean(), skipped_files: z.number(), non_text_files: z.number(), eligible_files: z.number(), inspected_bytes: z.number(),
-  limits: z.object({ candidate_files: z.number(), file_bytes: z.number(), total_bytes: z.number(), output_characters: z.number(), matches_per_file: z.number() }),
 });
+// Search limits (EditorBridge SEARCH_LIMITS); results no longer repeat them, since every result stays in the conversation.
+const LIMITS = { candidate_files: 1000, total_bytes: 8388608, output_characters: 20000, matches_per_file: 3 };
 
 export async function checkSearch(options: { client: Client; extensionUri: vscode.Uri }): Promise<void> {
   const root = vscode.workspace.workspaceFolders?.[0];
@@ -41,12 +42,14 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
     assert.ok(Array.isArray(content));
     assert.equal(content[0]?.type, 'text');
     if (content[0]?.type === 'text') assert.deepEqual(JSON.parse(content[0].text), response.structuredContent);
-    assert.ok(JSON.stringify(response.structuredContent).length <= result.limits.output_characters);
+    assert.ok(JSON.stringify(response.structuredContent).length <= LIMITS.output_characters);
     const matches = result.files.flatMap(file => file.matches.map(match => ({ ...match, path: file.path })));
     assert.equal(result.returned_matches, matches.length);
-    assert.ok(result.files.every(file => file.matches.length <= result.limits.matches_per_file && file.match_count >= file.matches.length));
+    assert.ok(result.files.every(file => file.matches.length <= LIMITS.matches_per_file && file.match_count >= file.matches.length));
     assert.equal(Object.values(result.folder_counts).reduce((sum, count) => sum + count, result.omitted_folder_matches), result.observed_matches);
-    if (result.truncated) assert.ok(result.next_step.includes('narrow the query or glob'));
+    if (result.truncated) assert.ok(result.next_step?.includes('narrow the query or the glob'));
+    else assert.equal(result.next_step, undefined, 'A complete result carries no next-step text.');
+    assert.equal(JSON.stringify(response.structuredContent).includes('context_budget'), false, 'Search results do not repeat the budget; the feed shows it.');
     return { ...result, matches };
   };
   try {
@@ -137,7 +140,7 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
     await mkdir(join(folder, 'budget'));
     await Promise.all(Array.from({ length: 40 }, (_, index) => writeFile(join(folder, 'budget', `${index}.txt`), `${'b'.repeat(240000)}\n`)));
     const bytes = await search({ query: 'not-present', glob: 'search-fixtures/budget/**' });
-    assert.ok(bytes.inspected_bytes <= bytes.limits.total_bytes);
+    assert.ok(bytes.inspected_bytes <= LIMITS.total_bytes);
     assert.ok(bytes.skipped_files > 0);
     assert.equal(bytes.truncated, true);
     await rm(join(folder, 'budget'), { recursive: true });
@@ -145,7 +148,7 @@ export async function checkSearch(options: { client: Client; extensionUri: vscod
     await Promise.all(Array.from({ length: 1005 }, (_, index) => writeFile(join(folder, 'candidates', `${index}.txt`), 'candidate-search-needle\n')));
     const candidates = await search({ query: 'not-present', glob: 'search-fixtures/candidates/**' });
     assert.equal(candidates.candidate_limit_reached, true);
-    assert.ok(candidates.eligible_files <= candidates.limits.candidate_files);
+    assert.ok(candidates.eligible_files <= LIMITS.candidate_files);
     const abort = new AbortController();
     const cancelled = options.client.callTool({ name: 'search_code', arguments: { query: 'candidate-search-needle', glob: 'search-fixtures/candidates/**' } }, undefined, { signal: abort.signal });
     abort.abort();

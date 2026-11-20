@@ -180,7 +180,13 @@ async function runSidebarChecks(extension: vscode.Extension<unknown>): Promise<v
   await restoredFrame.getByRole('button', { name: 'Send', exact: true }).click();
   await restoredFrame.getByRole('log').getByText('Model not configured. Set forgeAgent.model after adding a model in local TrueForge.', { exact: true }).last().waitFor();
   const uncovered = await client.callTool({ name: 'plan_task', arguments: { requirements: [{ quote: 'change the example', change: 'Rewrite example.txt', file: 'example.txt' }] } });
-  assert.match(JSON.stringify(uncovered.content), /not in your plan yet: \\"then document it\.\\"/u, 'A part of the request with no requirement is named back to the agent.');
+  assert.match(JSON.stringify(uncovered.content), /does not yet cover these words of the request: document \(in: \\"Please change the example, then document it\.\\"\)/u, 'A part of the request with no requirement is named back to the agent.');
+  // A plan comes from evidence: an existing file it names must have been looked at in this request, and a sibling must exist.
+  const guessed = await client.callTool({ name: 'plan_task', arguments: { requirements: [{ quote: 'change the example', change: 'Rewrite example.txt', file: 'example.txt' }, { quote: 'document it', change: 'Add notes', file: 'notes.md' }] } });
+  assert.match(JSON.stringify(guessed.content), /Plan from evidence: you have not looked at example\.txt in this request\./u, 'A plan naming an unread existing file is sent back; a new file (notes.md) is fine.');
+  await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
+  const madeUp = await client.callTool({ name: 'plan_task', arguments: { requirements: [{ quote: 'change the example', change: 'Rewrite example.txt', file: 'example.txt', sibling: 'no_such_sibling_xyz' }, { quote: 'document it', change: 'Add notes', file: 'notes.md' }] } });
+  assert.match(JSON.stringify(madeUp.content), /no_such_sibling_xyz does not appear in the workspace, so it is not a sibling\./u, 'A sibling that does not exist is sent back.');
   const planned = await client.callTool({ name: 'plan_task', arguments: { requirements: [{ quote: 'change the example', change: 'Rewrite example.txt', file: 'example.txt', sibling: 'original text' }, { quote: 'document it', change: 'Add notes', file: 'notes.md' }] } });
   assert.equal(planned.isError, undefined, JSON.stringify(planned.content));
   // The feed shows the plan in the agent's words, with the part of the request each step answers under it.
