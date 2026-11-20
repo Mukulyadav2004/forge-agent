@@ -91,6 +91,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       finishChecklist: () => Array<{ quote: string; file: string }>;
       openRequirements: () => Array<{ quote: string; file: string }>;
       lastCommandResult: () => { command: string; exitCode: number | null; savedAfter?: string } | undefined;
+      failingCommands: () => Array<{ command: string; exitCode: number | null }>;
       commandsLeft: () => number;
       guardDeny: (name: string, argumentsJson: string, reason: string) => string;
       edits: EditService;
@@ -518,9 +519,10 @@ ${selectedText}`;
   private checkReasons(): string[] {
     const open = this.actions.openRequirements();
     const last = this.actions.lastCommandResult();
+    const failing = this.actions.failingCommands();
     return [
       open.length ? `These requirements from your plan have no change yet: ${open.map(item => `"${item.quote}" (planned: ${item.file})`).join('; ')}. Do them now, or call plan_task again with a skip_reason that says plainly why not.` : '',
-      last && last.exitCode !== 0 ? `The last command (${last.command.slice(0, 160)}) ended with exit ${last.exitCode ?? 'signal'}. Fix the cause, or say plainly in your summary that it still fails.` : '',
+      failing.length ? `${failing.length === 1 ? 'This command' : 'These commands'} failed and ${failing.length === 1 ? 'was' : 'were'} not run again successfully: ${failing.slice(0, 5).map(item => `${item.command.slice(0, 160)} (exit ${item.exitCode ?? 'signal'})`).join('; ')}. A different or narrower command passing does not show ${failing.length === 1 ? 'it passes' : 'they pass'}. Fix the cause and run ${failing.length === 1 ? 'it' : 'them'} again, or say plainly in your summary which still fail.` : '',
       last?.exitCode === 0 && last.savedAfter ? `${last.savedAfter} was saved after the last passing command (${last.command.slice(0, 160)}), so that run did not test it. Run the tests again before you summarize.` : '',
     ].filter(Boolean);
   }

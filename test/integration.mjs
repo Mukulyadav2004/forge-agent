@@ -541,3 +541,13 @@ test('untouched code: deleting a definition the request does not name is found, 
   assert.deepEqual(codeRemovedOutsideRequest({ before, after: gone, existing, request: 'Remove test_simple, it is obsolete.' }).definitions, [], 'A definition the request names may be removed.');
   assert.deepEqual(codeRemovedOutsideRequest({ before, after: gone, existing: new Set(['routes_command', 'TestRoutes']), request }).definitions, [], 'Code the agent added in this request is its own to remove.');
 });
+
+test('a failing command stays unresolved until the same command passes; a narrower command passing does not clear it', async () => {
+  const { unresolvedFailures } = await import('../out/context/plan.js');
+  // The live run: bare pytest not found, the full file failing, then only "-k config" run and passing.
+  const results = new Map([['pytest tests/test_cli.py', 127], ['.venv/bin/pytest tests/test_cli.py', 1], ['.venv/bin/pytest tests/test_cli.py -k config', 0]]);
+  assert.deepEqual(unresolvedFailures(results, '.venv/bin/pytest tests/test_cli.py -k config'), [{ command: '.venv/bin/pytest tests/test_cli.py', exitCode: 1 }]);
+  results.delete('.venv/bin/pytest tests/test_cli.py'); results.set('.venv/bin/pytest tests/test_cli.py', 0);
+  assert.deepEqual(unresolvedFailures(results, '.venv/bin/pytest tests/test_cli.py'), [], 'Running the same command again and passing clears it.');
+  assert.deepEqual(unresolvedFailures(new Map([['pytest', 127]]), 'pytest'), [{ command: 'pytest', exitCode: 127 }], 'A last command that was not found still counts: nothing was checked.');
+});

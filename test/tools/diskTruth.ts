@@ -24,11 +24,12 @@ export async function checkDiskTruth(options: { client: Client; frame: Frame }):
   const editArguments = JSON.stringify({ path, base_revision: revision, start_line: 1, end_line: 1, new_text: 'after\n', explanation: 'Disk truth check' });
   let decisions: unknown[] = [];
   let sent = '';
+  let turnsStarted = 0;
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { manifest?: { name: string }; events?: unknown[]; input?: { content?: unknown }[] };
-    if (Array.isArray(body.input)) sent += body.input.map(event => String(event.content ?? '')).join('\n');
+    if (Array.isArray(body.input)) sent += `${body.input.map(event => String(event.content ?? '')).join('\n')}\n`;
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/api/v1/settings/mcp-servers') { response.end(JSON.stringify({ data: { name: body.manifest?.name, manifest: body.manifest, auth_status: { status: 'authenticated' } } })); return; }
     if (request.url === '/api/v1/sessions') { response.end(JSON.stringify({ data: { id: 'disk-truth-session' } })); return; }
@@ -44,7 +45,13 @@ export async function checkDiskTruth(options: { client: Client; frame: Frame }):
       write({ type: 'turn.done', id: 'done', thread_id: null, state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] } });
       response.end(); return;
     }
-    write({ type: 'turn.created', id: 'created', turn_id: 'disk-truth-turn', previous_turn_id: null, thread_id: null, state: { status: 'running' } });
+    write({ type: 'turn.created', id: `created-${++turnsStarted}`, turn_id: `disk-truth-turn-${turnsStarted}`, previous_turn_id: null, thread_id: null, state: { status: 'running' } });
+    // A later turn is Forge's automatic end-of-turn check: answer it and finish.
+    if (turnsStarted > 1) {
+      write({ type: 'model.message.delta', id: `check-${turnsStarted}`, content: 'Checked again' });
+      write({ type: 'turn.done', id: `done-${turnsStarted}`, thread_id: null, state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] } });
+      response.end(); return;
+    }
     write({ type: 'model.message', id: 'model-edit', tool_calls: [{ id: 'edit-1', type: 'function', function: { name: 'propose_edit', arguments: editArguments }, tool_info: { type: 'mcp', name: 'propose_edit', server_id: 'editor', server_name: 'editor' } }] });
     write({ type: 'tool.approval_required', id: 'ask-edit', tool_calls: [{ id: 'edit-1', source_event_id: 'model-edit' }] });
     write({ type: 'turn.update', id: 'paused', state: { status: 'paused' } });
@@ -61,13 +68,17 @@ export async function checkDiskTruth(options: { client: Client; frame: Frame }):
     await frame.getByRole('textbox', { name: 'Message', exact: true }).fill('Disk truth check with @disk-truth.txt and @mention_target, not a@b.com');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.locator('#approve-button:not([disabled])').waitFor();
+    // While the turn waits for approval, a check fails and only a narrower one passes: the end-of-turn check must name it.
+    for (const command of ['exit 3', 'true']) await client.callTool({ name: 'run_command', arguments: { command, reason: 'Disk truth check' } });
     await frame.locator('#approve-button').click();
     await frame.getByRole('log').getByText('Disk truth resumed', { exact: true }).waitFor();
+    await frame.getByRole('log').getByText('Checked again', { exact: true }).waitFor();
+    assert.match(sent, /Forge check \(sent automatically, once per request\): This command failed and was not run again successfully: exit 3 \(exit 3\)\. A different or narrower command passing does not show it passes\./u);
     await frame.locator('#message-input:not([disabled])').waitFor();
     assert.equal(await text(), 'after\n', 'Approve saved the reviewed edit.');
     // @-mentions: the file and the definition were attached to the request and shown in the feed.
     assert.match(sent, /Mentioned by the user \(attached by Forge\):\n\nFile: disk-truth\.txt \(@disk-truth\.txt\), lines 1-1, base_revision [\w-]+\.\n1: before/u);
-    assert.match(sent, /File: mention_probe\.py \(@mention_target\), lines 3-5, base_revision [\w-]+\.\n3: @decorated\n4: def mention_target\(value\):\n5:     return value$/u);
+    assert.match(sent, /File: mention_probe\.py \(@mention_target\), lines 3-5, base_revision [\w-]+\.\n3: @decorated\n4: def mention_target\(value\):\n5:     return value(?:\n|$)/u);
     assert.doesNotMatch(sent, /@b\.com:/u, 'An e-mail address is not a mention.');
     await frame.locator('#messages').getByText('mention_probe.py:3-5', { exact: true }).first().waitFor();
     // The saved lines shown in the result count as read, so the next line edit needs no new read and no base_revision.

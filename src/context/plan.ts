@@ -135,3 +135,12 @@ export function placeholderLine(newText: string, currentText: string): { line: n
   const index = lines.findIndex(line => /^\s*(?:#|\/\/|\/\*|<!--|--|;|\*)\s*(?:\.{3}|…)/u.test(line) && !existing.has(line.trim()));
   return index < 0 ? undefined : { line: index + 1, text: (lines[index] ?? '').trim().slice(0, 120) };
 }
+
+/**
+ * Commands whose latest run in this request failed. A different or narrower command passing later does not clear one;
+ * only running the same command again does. "Command not found" (126/127) is a wrong path to retry, not a failing check,
+ * unless it was the last command.
+ */
+export function unresolvedFailures(results: ReadonlyMap<string, number | null>, last?: string): Array<{ command: string; exitCode: number | null }> {
+  return [...results].filter(([command, code]) => code !== 0 && (command === last || (code !== 126 && code !== 127))).map(([command, exitCode]) => ({ command, exitCode }));
+}

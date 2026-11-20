@@ -48,6 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
     finishChecklist: () => bridge.finishChecklist(),
     openRequirements: () => bridge.openRequirements(),
     lastCommandResult: () => bridge.lastCommandResult(),
+    failingCommands: () => bridge.failingCommands(),
     commandsLeft: () => bridge.commandsLeft(),
     guardDeny: (name, argumentsJson, reason) => bridge.guardDeny(name, argumentsJson, reason),
     edits,

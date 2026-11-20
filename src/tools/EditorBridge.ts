@@ -17,7 +17,7 @@ import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS, replaceMatched } from '../edits/EditService';
 import { savedExcerpt } from '../edits/lineChanges';
 import { describeProblems, newProblems } from '../edits/diagnostics';
-import { checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, placeholderLine, PLAN_LIMITS, progressReport, RunGuard } from '../context/plan';
+import { checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, placeholderLine, PLAN_LIMITS, progressReport, RunGuard, unresolvedFailures } from '../context/plan';
 import type { PlanItem } from '../context/plan';
 import type { Problem } from '../edits/diagnostics';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
@@ -121,7 +121,7 @@ export class EditorBridge implements vscode.Disposable {
   beginRequest(scope?: string, requestText = ''): void {
     this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest();
     this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
-    this.textAtStart.clear(); this.textSaved.clear(); this.problemsAtStart.clear();
+    this.textAtStart.clear(); this.textSaved.clear(); this.problemsAtStart.clear(); this.commandResults.clear();
     this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET });
   }
   /**
@@ -193,6 +193,10 @@ export class EditorBridge implements vscode.Disposable {
   /** Identical refused calls in this request, and the last command that ran (shown in the end-of-turn checklist). */
   private readonly refusals = new Map<string, number>();
   private lastCommand: { command: string; exitCode: number | null; savedAfter?: string } | undefined;
+  /** The latest exit code of each command run in this request, in the order they last ran. */
+  private readonly commandResults = new Map<string, number | null>();
+  /** Commands whose latest run failed (see unresolvedFailures), for the end-of-turn check. */
+  failingCommands(): Array<{ command: string; exitCode: number | null }> { return unresolvedFailures(this.commandResults, this.lastCommand?.command); }
   /** The checklist line; for a saved or staged file the plan does not name, a note so a wrong file is noticed early. */
   private checklistNote(path?: string): string {
     const line = checklistLine(this.plan, this.changedPaths);
@@ -669,6 +673,7 @@ export class EditorBridge implements vscode.Disposable {
       this.activityEvents.fire({ kind: 'command', used: this.budgetUsed, command, cwd: where, exitCode: result.exit_code, timedOut: result.timed_out, cancelled: result.cancelled, durationMs: result.duration_ms, ...(reason ? { reason } : {}) });
       const ended = result.cancelled ? 'cancelled' : result.timed_out ? `stopped at the ${timeout_seconds} s timeout` : `exit code ${result.exit_code ?? result.signal}`;
       this.lastCommand = { command, exitCode: result.exit_code };
+      if (!result.cancelled) { this.commandResults.delete(command); this.commandResults.set(command, result.exit_code); }
       const changedByCommand = await this.checkSavedFiles(rootPath, command);
       const missing = await this.missingToolHint(result.output, result.exit_code);
       // The same failure twice in a row means the last change did not touch the cause: point at the code to compare with.
