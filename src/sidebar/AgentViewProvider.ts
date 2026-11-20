@@ -81,6 +81,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       getEditorManifest: (namePrefix: string) => Promise<TrueForgeApi.RemoteMcpServerManifest>;
       openFile: (options: { path: string; line: number }) => Promise<void>;
       architectureContext: () => Promise<string>;
+      resolveMentions: (text: string) => Promise<string>;
       projectOverview: () => Promise<string>;
       projectInstructions: () => Promise<string>;
       prepareEdit: (name: 'propose_edit' | 'write_file', argumentsJson: string) => Promise<{ status: 'review' | 'stage' } | { status: 'invalid'; message: string }>;
@@ -603,6 +604,9 @@ ${selectedText}`;
       }
       // The first request of a chat gets the project overview (tree and test setup) once; Edit Selection stays on its selection.
       let overview = !approvals && !chat.session && !selectionScoped ? await this.actions.projectOverview() : '';
+      // @file and @symbol mentions in a new request are attached after it starts, so they count in its budget and feed.
+      const mentioned = !approvals && !followUp && !selectionScoped ? await this.actions.resolveMentions(requestText) : '';
+      if (mentioned) overview = [overview, mentioned].filter(Boolean).join('\n\n');
       const preparedInput: TrueForgeApi.CreateTurnSessionsStreamRequest['input'] = [];
       const feedback = input?.length && input.every(event => event.type === 'user.message') ? this.reviewFeedback.message() : undefined;
       if (feedback) preparedInput.push({ type: 'user.message', content: feedback });

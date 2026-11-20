@@ -136,7 +136,9 @@ export async function run(): Promise<void> {
     report.workspace_hash_after = digest(); assert.equal(report.workspace_hash_after, before);
     await frame.locator('body').screenshot({ path: join(config.directory, 'cancelled.png') });
     await vscode.commands.executeCommand('forgeAgent.newTask');
-    await frame.locator('#status').filter({ hasText: 'New task ready' }).waitFor(); report.new_task_ready = true;
+    // New Task opens a fresh chat: no messages yet and the composer ready.
+    await frame.locator('#message-input:not([disabled])').waitFor();
+    assert.equal(await frame.locator('#messages .message-user, #messages .message-assistant').count(), 0); report.new_task_ready = true;
     report.passed = true;
   } catch (error) {
     report.error = error instanceof Error ? error.message : String(error);

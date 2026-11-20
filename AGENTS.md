@@ -167,7 +167,7 @@ diff-row presentation changes passed native editor regressions, but the
 full live Task A was not rerun after that presentation adaptation.
 See docs/TASK-A.md and its recorded evidence; one pass is not a reliability rate.
 
-Not built: search/symbol tools, @file/@symbol mentions, query-driven
+Built 20 Nov: @file and @symbol mentions (definition search, not a language server). Not built: query-driven
 retrieval with selection reasons/token accounting, command execution,
 file delete/rename (create exists: write_file), automatic model fallback, scout subagents,
 persistent conversation/undo history. Not verified end to end: Tasks B/C,

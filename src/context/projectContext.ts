@@ -256,3 +256,40 @@ export async function buildProjectContext(options: {
   }
   return { text: blocks.length ? `${CONTEXT_HEADER}${blocks.join('\n')}` : '', files };
 }
+
+// @-mentions. The syntax follows Cline's (src/shared/context-mentions.ts at 7a7878cb52fc33967d8b464b3e3d899beac42d4d,
+// Apache-2.0): @path, or @"path with spaces". Forge adds @symbol, a definition found by name. Forge's own code.
+export const MENTION_LIMITS = { mentions: 6, file_lines: 400, characters: 16000, symbol_lines: 150, symbol_matches: 2 };
+
+/** Mentions in a message: an @ at the start or after a space (so e-mail addresses do not count), without trailing punctuation. */
+export function parseMentions(text: string): string[] {
+  const found = [...text.matchAll(/(?:^|\s)@(?:"([^"\n]+)"|([\w./\\-]*[\w/]))/gu)].map(match => (match[1] ?? match[2] ?? '').replace(/^[/\\]+/u, ''));
+  return [...new Set(found.filter(Boolean))].slice(0, MENTION_LIMITS.mentions);
+}
+
+/** A file path rather than a name: it has a folder separator or a file extension. */
+export function looksLikePath(token: string): boolean { return /[/\\]/u.test(token) || /\.[A-Za-z0-9]{1,8}$/u.test(token); }
+
+/** A line that defines `name` in common languages (def, class, function, const, type, struct, fn, func ...), as a ripgrep regex. */
+export function definitionPattern(name: string): string {
+  return `^\\s*(?:(?:export|default|public|private|protected|static|async|abstract|pub)\\s+)*(?:def|class|function|interface|type|enum|struct|trait|fn|func|const|let|var)\\s+${name}\\b`;
+}
+
+/**
+ * The lines of the definition starting at line `start` (1-based): decorators directly above it, then every following
+ * line indented deeper (blank lines included), plus a closing bracket at the same indent. Returns 1-based [first, last].
+ */
+export function definitionBlock(lines: string[], start: number): [number, number] {
+  const indent = (line: string) => line.length - line.trimStart().length;
+  const base = indent(lines[start - 1] ?? '');
+  let first = start;
+  while (first > 1 && /^\s*@/u.test(lines[first - 2] ?? '') && indent(lines[first - 2] ?? '') === base) first--;
+  let last = start;
+  for (let index = start; index < lines.length && index - start < MENTION_LIMITS.symbol_lines; index++) {
+    const line = lines[index] ?? '';
+    if (!line.trim()) continue;
+    if (indent(line) <= base) { if (/^\s*[}\])]/u.test(line)) last = index + 1; break; }
+    last = index + 1;
+  }
+  return [first, last];
+}

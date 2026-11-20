@@ -17,14 +17,18 @@ export async function checkDiskTruth(options: { client: Client; frame: Frame }):
   const uri = vscode.Uri.joinPath(root.uri, path);
   const text = async () => new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
   await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode('before\n'));
+  const probe = vscode.Uri.joinPath(root.uri, 'mention_probe.py');
+  await vscode.workspace.fs.writeFile(probe, new TextEncoder().encode('import os\n\n@decorated\ndef mention_target(value):\n    return value\n\n\nother = 1\n'));
   const read = await client.callTool({ name: 'read_file', arguments: { path } });
   const revision = (read.structuredContent as { base_revision: string }).base_revision;
   const editArguments = JSON.stringify({ path, base_revision: revision, start_line: 1, end_line: 1, new_text: 'after\n', explanation: 'Disk truth check' });
   let decisions: unknown[] = [];
+  let sent = '';
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { manifest?: { name: string }; events?: unknown[] };
+    const body = JSON.parse(Buffer.concat(chunks).toString() || '{}') as { manifest?: { name: string }; events?: unknown[]; input?: { content?: unknown }[] };
+    if (Array.isArray(body.input)) sent += body.input.map(event => String(event.content ?? '')).join('\n');
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/api/v1/settings/mcp-servers') { response.end(JSON.stringify({ data: { name: body.manifest?.name, manifest: body.manifest, auth_status: { status: 'authenticated' } } })); return; }
     if (request.url === '/api/v1/sessions') { response.end(JSON.stringify({ data: { id: 'disk-truth-session' } })); return; }
@@ -54,13 +58,18 @@ export async function checkDiskTruth(options: { client: Client; frame: Frame }):
     await config.update('baseUrl', `http://127.0.0.1:${address.port}`, vscode.ConfigurationTarget.Workspace);
     await config.update('model', 'test/disk-truth', vscode.ConfigurationTarget.Workspace);
     await vscode.commands.executeCommand('forgeAgent.newTask');
-    await frame.getByRole('textbox', { name: 'Message', exact: true }).fill('Disk truth check');
+    await frame.getByRole('textbox', { name: 'Message', exact: true }).fill('Disk truth check with @disk-truth.txt and @mention_target, not a@b.com');
     await frame.getByRole('button', { name: 'Send', exact: true }).click();
     await frame.locator('#approve-button:not([disabled])').waitFor();
     await frame.locator('#approve-button').click();
     await frame.getByRole('log').getByText('Disk truth resumed', { exact: true }).waitFor();
     await frame.locator('#message-input:not([disabled])').waitFor();
     assert.equal(await text(), 'after\n', 'Approve saved the reviewed edit.');
+    // @-mentions: the file and the definition were attached to the request and shown in the feed.
+    assert.match(sent, /Mentioned by the user \(attached by Forge\):\n\nFile: disk-truth\.txt \(@disk-truth\.txt\), lines 1-1, base_revision [\w-]+\.\n1: before/u);
+    assert.match(sent, /File: mention_probe\.py \(@mention_target\), lines 3-5, base_revision [\w-]+\.\n3: @decorated\n4: def mention_target\(value\):\n5:     return value$/u);
+    assert.doesNotMatch(sent, /@b\.com:/u, 'An e-mail address is not a mention.');
+    await frame.locator('#messages').getByText('mention_probe.py:3-5', { exact: true }).first().waitFor();
     // The saved lines shown in the result count as read, so the next line edit needs no new read and no base_revision.
     const next = await client.callTool({ name: 'propose_edit', arguments: { path, insert_line: 2, new_text: 'tail\n', explanation: 'Edit after a save' } });
     assert.equal(next.isError, undefined, `Lines shown after a save count as read: ${JSON.stringify(next.content)}`);
@@ -82,6 +91,7 @@ export async function checkDiskTruth(options: { client: Client; frame: Frame }):
     await config.update('baseUrl', previous.baseUrl, vscode.ConfigurationTarget.Workspace);
     await config.update('model', previous.model, vscode.ConfigurationTarget.Workspace);
     await vscode.workspace.fs.delete(uri).then(undefined, () => undefined);
+    await vscode.workspace.fs.delete(probe).then(undefined, () => undefined);
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }

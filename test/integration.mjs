@@ -506,3 +506,15 @@ test('placeholder comments for left-out code are found in any comment style, but
   const refused = checkPlanCoverage('Add a command.\nIt\nmust appear in help', [{ quote: 'Add a command', change: 'add', file: 'a.py' }]);
   assert.ok(!refused.ok && refused.message.includes('"It must appear in help"'), 'Line breaks in the request are shown as spaces, so the model can copy the words.');
 });
+
+test('@-mentions: paths and names are found, e-mail addresses and trailing punctuation are not; a definition block covers decorators and its body', async () => {
+  const { parseMentions, looksLikePath, definitionBlock, definitionPattern } = await import('../out/context/projectContext.js');
+  assert.deepEqual(parseMentions('Look at @src/flask/cli.py, then @routes_command. Mail a@b.com or @"docs/my file.rst" and @/tests/test_cli.py!'), ['src/flask/cli.py', 'routes_command', 'docs/my file.rst', 'tests/test_cli.py']);
+  assert.deepEqual([looksLikePath('src/flask/cli.py'), looksLikePath('README.md'), looksLikePath('routes_command'), looksLikePath('FlaskGroup.make_context')], [true, true, false, false]);
+  const python = ['import x', '', '@click.command("routes")', '@with_appcontext', 'def routes_command():', '    """Show routes."""', '', '    for row in rows:', '        echo(row)', '', '', 'cli = FlaskGroup()'];
+  assert.deepEqual(definitionBlock(python, 5), [3, 9], 'Decorators above and the indented body below, not the next top-level statement.');
+  const js = ['export function load(a) {', '  return a;', '}', 'const other = 1;'];
+  assert.deepEqual(definitionBlock(js, 1), [1, 3], 'The closing brace belongs to the block.');
+  assert.match('    def routes_command(self):', new RegExp(definitionPattern('routes_command')));
+  assert.doesNotMatch('    self.add_command(routes_command)', new RegExp(definitionPattern('routes_command')), 'A use is not a definition.');
+});

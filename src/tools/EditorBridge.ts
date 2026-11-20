@@ -11,7 +11,7 @@ import { z } from 'zod';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import * as vscode from 'vscode';
 import type { ActivityEntry } from '../shared/messages';
-import { buildProjectContext, buildProjectOverview, fileOutline } from '../context/projectContext';
+import { buildProjectContext, buildProjectOverview, definitionBlock, definitionPattern, fileOutline, looksLikePath, MENTION_LIMITS, parseMentions } from '../context/projectContext';
 import { loadWorkspaceInstructions } from '../context/environment';
 import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS } from '../edits/EditService';
@@ -259,6 +259,58 @@ export class EditorBridge implements vscode.Disposable {
     this.budgetUsed += context.text.length;
     for (const file of context.files) this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: file.path, startLine: file.startLine, endLine: file.endLine });
     return context.text;
+  }
+  /**
+   * The user's @-mentions, attached to their request within the context budget: @path gives the file (up to
+   * MENTION_LIMITS.file_lines lines), @name the definition of that name, found by a definition search. Each attached
+   * range is shown in the feed and counts as read. Returns '' when the message mentions nothing.
+   */
+  async resolveMentions(text: string): Promise<string> {
+    const blocks: string[] = [];
+    for (const token of parseMentions(text)) {
+      try { blocks.push(await this.mentionBlock(token)); }
+      catch (error) { blocks.push(`@${token}: ${error instanceof Error ? error.message : 'could not be attached.'}`); }
+    }
+    return blocks.length ? `Mentioned by the user (attached by Forge):\n\n${blocks.join('\n\n')}` : '';
+  }
+  private async mentionBlock(token: string): Promise<string> {
+    if (looksLikePath(token)) {
+      const located = await this.options.files.locate(token).catch(() => undefined);
+      if (located?.kind === 'directory') return `@${token} is a folder; use list_files to see what is in it.`;
+      if (located?.kind === 'file') return this.mentionRange(token, 1, MENTION_LIMITS.file_lines, `@${token}`);
+    }
+    const name = token.split(/[./\\]/u).filter(Boolean).pop() ?? '';
+    if (!/^[A-Za-z_$][\w$]*$/u.test(name)) throw new Error('no such file in the workspace.');
+    const found = await this.searchCode({ query: definitionPattern(name), glob: '**/*', regex: true, case_sensitive: true, max_results: 10, reason: `Where @${token} is defined; the user mentioned it.`, signal: AbortSignal.timeout(15_000) });
+    const hits = ((found.structuredContent as { files?: SearchFile[] } | undefined)?.files ?? []).flatMap(file => file.matches.map(match => ({ path: file.path, line: match.line }))).slice(0, MENTION_LIMITS.symbol_matches);
+    if (!hits.length) throw new Error(`no file or definition named ${name} was found in the workspace.`);
+    const parts: string[] = [];
+    for (const hit of hits) {
+      const { file } = await this.options.edits.read(hit.path);
+      const [first, last] = definitionBlock(fileLines(file.text), hit.line);
+      parts.push(await this.mentionRange(hit.path, first, last, `@${token}`));
+    }
+    return parts.join('\n\n');
+  }
+  private async mentionRange(path: string, start: number, end: number, label: string): Promise<string> {
+    const { revision, file } = await this.options.edits.read(path);
+    const lines = fileLines(file.text);
+    const allowance = Math.min(MENTION_LIMITS.characters, this.remaining());
+    const output: string[] = [];
+    let length = 0;
+    for (let index = start - 1; index < Math.min(end, lines.length); index++) {
+      const numbered = `${index + 1}: ${lines[index]}`;
+      if (length + numbered.length + 1 > allowance) break;
+      output.push(numbered); length += numbered.length + 1;
+    }
+    if (!output.length) throw this.budgetError();
+    const last = start + output.length - 1;
+    this.budgetUsed += length;
+    const key = this.coverageKey(path, file.text);
+    this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), [start, last]]);
+    this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path, startLine: start, endLine: last });
+    const more = last < lines.length && start === 1 ? ` The file has ${lines.length} lines; read_file shows the rest.` : '';
+    return `File: ${path} (${label}), lines ${start}-${last}, base_revision ${revision}.${more}\n${output.join('\n')}`;
   }
   /** Checks and stages one propose_edit call; nothing is written. Used by the tool and when an edit waits for approval. */
   private async stageProposal(input: ProposeInput): Promise<{ id: string; combined: boolean; replaced: string[]; detail: string; ignored: string[] }> {
