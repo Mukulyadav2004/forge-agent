@@ -25,7 +25,8 @@ export function agentSpec(options: { model: string; connector?: string; reasonin
   // Off: propose_edit only stages a diff, and the user applies it later in Review changes.
   const editorServer = { ...definition.editorServer, requireApprovalForTools: definition.editorServer.requireApprovalForTools.filter(tool => options.approveEdits !== false || (tool !== 'propose_edit' && tool !== 'write_file')) };
   return {
-    model: { name: options.model, ...(options.reasoningEffort ? { params: { reasoningEffort: options.reasoningEffort } } : {}) },
+    // parallelToolCalls: the model may request several independent reads and searches in one response (one round trip).
+    model: { name: options.model, params: { parallelToolCalls: true, ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}) } },
     // Our prompt, then the model's identity, the workspace's AGENTS.md or CLAUDE.md, and the <env> block (opencode's order).
     instructions: [agentInstructions, modelIdentity(options.model), options.projectInstructions?.trim(), options.environment?.trim()].filter(Boolean).join('\n\n'),
     // JSON imports widen literals such as "input_tokens" to string; TrueForge validates the spec when the session is created.

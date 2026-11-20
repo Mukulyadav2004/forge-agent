@@ -15,19 +15,24 @@ const STOPWORDS = new Set(['that', 'this', 'with', 'from', 'into', 'must', 'shou
 const oneLine = (text: string) => text.replace(/\s+/gu, ' ').trim();
 const normalize = (text: string) => text.toLowerCase().replace(/[“”"'`]/gu, '').replace(/\s+/gu, ' ').trim();
 const words = (text: string) => normalize(text).match(/[\p{L}\p{N}_-]{4,}/gu)?.filter(word => !STOPWORDS.has(word)) ?? [];
-/** The request split into its parts: sentences, then comma-separated clauses. */
-const clauses = (request: string) => request.split(/(?<=[.!?;])\s+|,\s+/u).map(part => part.trim().replace(/^(?:and|or|but)\s+/iu, '')).filter(part => words(part).length > 0);
+/** The request split into its sentences (a comma does not end a part, so a list such as "A, B or C" stays whole). */
+const clauses = (request: string) => request.split(/(?<=[.!?;])\s+/u).map(part => part.trim().replace(/^(?:and|or|but)\s+/iu, '')).filter(part => words(part).length > 0);
+/** A text as its words only, so punctuation and spacing differences ("TOKEN, or KEY" / "TOKEN or KEY") do not matter. */
+const wordKey = (text: string) => ` ${(normalize(text).match(/[\p{L}\p{N}_]+/gu) ?? []).join(' ')} `;
 
 /**
- * The plan must cover the user's own words: each quote is part of the request, no quote takes over most of it, and
- * every requirement word of the request appears in some quote. A missing part is named so the model can add it.
+ * The plan must cover the user's own words: each quote is part of the request (word for word, punctuation aside), no
+ * quote takes over most of it, and every requirement word of the request appears in some quote. What is missing is
+ * named as words, with the sentence they are in, so the model can add a requirement for that part.
  */
 export function checkPlanCoverage(request: string, items: PlanItem[]): { ok: true } | { ok: false; message: string } {
   const text = normalize(request);
   if (!text) return { ok: true };
+  const requestKey = wordKey(request);
   for (const [index, item] of items.entries()) {
     const quote = normalize(item.quote);
-    if (!quote || !text.includes(quote)) return { ok: false, message: `Requirement ${index + 1} quotes words that are not in the user's request: "${oneLine(item.quote).slice(0, 120)}". Quote the user's own words for each requirement.` };
+    const key = wordKey(item.quote);
+    if (!key.trim() || !requestKey.includes(key)) return { ok: false, message: `Requirement ${index + 1} quotes words that are not in the user's request: "${oneLine(item.quote).slice(0, 120)}". Copy the user's words for that part.` };
     if (items.length === 1 && clauses(request).length > 1 && quote.length > text.length * PLAN_LIMITS.max_quote_share) {
       return { ok: false, message: 'Split the request into one requirement per thing it asks for (for example the feature, its test and its documentation), each quoting the user\'s words for that part.' };
     }
@@ -35,8 +40,11 @@ export function checkPlanCoverage(request: string, items: PlanItem[]): { ok: tru
   const covered = new Set(items.flatMap(item => words(item.quote)));
   const missing = new Set(words(request).filter(word => !covered.has(word)));
   if (!missing.size) return { ok: true };
-  const parts = clauses(request).filter(part => words(part).some(word => missing.has(word)));
-  return { ok: false, message: `These parts of the request are not in your plan yet: ${parts.map(part => `"${oneLine(part).slice(0, 160)}"`).join('; ')}. Add a requirement for each, quoting those words, with the file you will change (or a skip_reason if nothing needs to change).` };
+  const parts = clauses(request).flatMap(part => {
+    const named = [...new Set((oneLine(part).match(/[\p{L}\p{N}_-]{4,}/gu) ?? []).filter(word => missing.has(word.toLowerCase())))];
+    return named.length ? [`${named.join(', ')} (in: "${oneLine(part).slice(0, 200)}")`] : [];
+  });
+  return { ok: false, message: `Your plan does not yet cover these words of the request: ${parts.join('; ')}. Add a requirement for that part, quoting the user's words, with the file you will change (or a skip_reason if nothing needs to change).` };
 }
 
 const cleanPath = (path: string) => path.trim().replace(/\\/gu, '/').replace(/^\.\//u, '');

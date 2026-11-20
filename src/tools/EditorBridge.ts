@@ -69,7 +69,7 @@ function previewEdit(text: string, input: ProposeInput): string | undefined {
 function editKey(input: ProposeInput): string {
   return JSON.stringify([input.path, input.base_revision, input.new_text, input.explanation, input.old_text ?? null, input.start_line ?? null, input.end_line ?? null, input.insert_line ?? null]);
 }
-const SEARCH_EXCLUDE = '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage}/**';
+const SEARCH_EXCLUDE = '**/{node_modules,.git,.env*,out,dist,build,.venv,venv,__pycache__,coverage,.pytest_cache,.mypy_cache,.ruff_cache,.tox,.nox}/**';
 const SearchInputSchema = z.object({ query: z.string().min(1).max(500), glob: z.string().min(1).max(200).default('**/*').describe('Workspace-relative path filter. Narrow to a folder or extension when results are incomplete.'), regex: z.boolean().default(false), case_sensitive: z.boolean().default(false), max_results: z.number().int().min(1).max(100).default(40), reason: z.string().max(300).optional().describe('Optional: one short sentence telling the user why, shown in the editor activity feed.') });
 type SearchInput = z.infer<typeof SearchInputSchema>;
 const SearchMatchEventSchema = z.object({ type: z.literal('match'), data: z.object({ path: z.object({ text: z.string() }), line_number: z.number().int().positive(), lines: z.object({ text: z.string() }), submatches: z.array(z.object({ start: z.number().int().nonnegative() })) }) });
@@ -589,11 +589,12 @@ export class EditorBridge implements vscode.Disposable {
       const coverageLimited = skipped > 0 || candidates.length > SEARCH_LIMITS.candidate_files;
       const truncated = found.truncated || coverageLimited;
       for (const file of found.files) this.markSeen(file.path);
-      const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, next_step: `${found.returned_matches} of ${found.observed_matches} observed matching lines shown.${truncated ? ' Results or coverage are incomplete: narrow the query or glob path filter using folder_counts, then search again.' : ''} Open relevant ranges with read_file before answering each requested part.`, candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, non_text_files: nonText, eligible_files: paths.size, inspected_bytes: bytes, coverage: 'Saved UTF-8 text only. Counts refer to observed matching lines, not occurrences or all workspace files. Dirty, secret, unavailable, binary and oversized files are excluded. Omitted folder counts are aggregated separately. Use read_file for current editor text and an edit revision.', limits: SEARCH_LIMITS };
+      // Lean results: every tool result stays in the conversation and is re-sent with each later model call, so only
+      // what the agent acts on is returned. The limits and the scope note live in the tool description; the budget is in the feed.
+      const result = { ...found, truncated, counts_complete: found.counts_complete && !coverageLimited, path_filter: options.glob, ...(truncated ? { next_step: 'Results are incomplete: narrow the query or the glob path filter using folder_counts, then search again.' } : {}), candidate_limit_reached: candidates.length > SEARCH_LIMITS.candidate_files, skipped_files: skipped, non_text_files: nonText, eligible_files: paths.size, inspected_bytes: bytes };
       this.budgetUsed += JSON.stringify(result).length;
       this.activityEvents.fire({ kind: 'search', used: this.budgetUsed, query: options.query, glob: options.glob, matches: found.returned_matches, fileCount: found.files.length, files: found.files.slice(0, 20).map(file => file.path), truncated: found.truncated || coverageLimited, ...(options.reason ? { reason: options.reason } : {}) });
-      const budgeted = { ...result, context_budget: this.budget };
-      return { content: [{ type: 'text', text: JSON.stringify(budgeted) }], structuredContent: budgeted };
+      return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result };
     } finally { signal.removeEventListener('abort', abort); cancellation.dispose(); }
   }
   private makeServer(): McpServer {
@@ -696,7 +697,7 @@ export class EditorBridge implements vscode.Disposable {
     });
     register('list_files', { description: 'List up to 100 workspace file paths matching a glob, to get oriented when you do not yet know where relevant code lives. Narrow the glob to a folder or extension when the list is incomplete. A listing shows names only; read files before making claims about them.', inputSchema: { glob: z.string().max(200).default('**/*') }, annotations: { readOnlyHint: true } }, async ({ glob }) => {
       if (!vscode.workspace.isTrusted) throw new Error('Workspace trust is required.');
-      const found = await vscode.workspace.findFiles(glob, '**/{node_modules,.git,.env*,out,dist}/**', 101);
+      const found = await vscode.workspace.findFiles(glob, '**/{node_modules,.git,.env*,out,dist,.venv,venv,__pycache__,.pytest_cache,.mypy_cache,.ruff_cache,.tox,.nox}/**', 101);
       const files = found.slice(0, 100);
       const listed = files.map(uri => vscode.workspace.asRelativePath(uri)).join('\n');
       if (listed.length > this.remaining()) throw this.budgetError();
