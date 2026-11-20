@@ -595,7 +595,7 @@ ${selectedText}`;
       this.actions.edits.beginTurn();
       const selectionScoped = Boolean(chat.editScope);
       // The request's own words (without attached selections) are what plan_task must cover.
-      const requestText = (input?.find(event => event.type === 'user.message')?.content ?? '').toString().split('\n\nFile: ')[0] ?? '';
+      const requestText = (input?.find(event => event.type === 'user.message')?.content ?? '').toString().split(/\n+File: /u)[0] ?? '';
       if (!approvals && !followUp) { this.actions.beginRequest(chat.editScope, requestText); chat.editScope = undefined; chat.checkSent = false; }
       // The automatic check goes out only if something is still open when its turn starts.
       if (followUp) {
