@@ -3,6 +3,20 @@ import { diffLines } from 'diff';
 /** A tool call as the model sent it, remembered so its approval prompt can say exactly what it will do. */
 export interface PendingToolCall { name: string; arguments: string }
 
+/**
+ * With deferred tool loading the model reaches an editor tool through TrueForge's call_tool, whose arguments are
+ * { mcp_server, tool_name, input }. Approvals and edit staging read the underlying tool's name and arguments.
+ */
+export function unwrapDeferredCall(call: PendingToolCall): PendingToolCall {
+  if (call.name !== 'call_tool') return call;
+  let parsed: unknown;
+  try { parsed = JSON.parse(call.arguments); } catch { return call; }
+  if (typeof parsed !== 'object' || parsed === null) return call;
+  const { tool_name: name, input } = parsed as { tool_name?: unknown; input?: unknown };
+  if (typeof name !== 'string' || !name || (input !== undefined && (typeof input !== 'object' || input === null || Array.isArray(input)))) return call;
+  return { name, arguments: JSON.stringify(input ?? {}) };
+}
+
 /** Rebuilds streamed tool calls: TrueForge sends a call as deltas, the first naming it and later ones adding argument text by index. */
 export class StreamedToolCalls {
   private readonly calls = new Map<string, PendingToolCall & { id?: string }>();
@@ -25,8 +39,8 @@ export class StreamedToolCalls {
   /** An approval names the call id and the message that produced it. */
   find(sourceEventId: string, id: string): PendingToolCall | undefined {
     const finished = this.complete.get(`${sourceEventId}:${id}`);
-    if (finished) return finished;
-    for (const [key, call] of this.calls) if (key.startsWith(`${sourceEventId}:`) && call.id === id) return { name: call.name, arguments: call.arguments };
+    if (finished) return unwrapDeferredCall(finished);
+    for (const [key, call] of this.calls) if (key.startsWith(`${sourceEventId}:`) && call.id === id) return unwrapDeferredCall({ name: call.name, arguments: call.arguments });
     return undefined;
   }
   clear(): void { this.calls.clear(); this.complete.clear(); }

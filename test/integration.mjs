@@ -76,6 +76,23 @@ test('streamed tool call deltas are rebuilt for the approval that names them', (
   assert.equal(calls.find('msg-1', 'call_1'), undefined);
 });
 
+test('deferred tool loading keeps the core editor tools eager and approvals name the tool behind call_tool', () => {
+  const definition = JSON.parse(readFileSync(new URL('../src/agent/forge-agent.json', import.meta.url), 'utf8'));
+  const [server] = agentSpec({ model: 'test/model', connector: 'c', deferTools: true }).mcpServers;
+  assert.equal(server.preload, false);
+  assert.deepEqual(server.preloadTools, definition.deferredTools.preloadTools);
+  assert.ok(!server.preloadTools.includes('run_command') && !server.preloadTools.includes('write_file'), 'Rarely used tools are looked up when needed.');
+  assert.deepEqual(server.requireApprovalForTools, definition.editorServer.requireApprovalForTools, 'Deferred tools keep their approvals.');
+  assert.equal(agentSpec({ model: 'test/model', connector: 'c' }).mcpServers[0].preload, true, 'Off by default: every editor tool is sent with each request.');
+  const calls = new StreamedToolCalls();
+  const wrapped = { mcp_server: 'c', tool_name: 'run_command', input: { command: 'pytest -q', reason: 'Run the tests' } };
+  calls.remember('msg-1', [{ id: 'call_1', function: { name: 'call_tool', arguments: JSON.stringify(wrapped) }, toolInfo: { type: 'mcp', name: 'call_tool' } }]);
+  assert.deepEqual(calls.find('msg-1', 'call_1'), { name: 'run_command', arguments: JSON.stringify(wrapped.input) });
+  assert.match(describeApproval(calls.find('msg-1', 'call_1')), /Approve running a command\?[\s\S]*pytest -q/u);
+  calls.add('msg-2', [{ index: 0, id: 'call_2', function: { name: 'call_tool', arguments: '{"mcp_server":"c","tool_name":"list_tools"' } }]);
+  assert.deepEqual(calls.find('msg-2', 'call_2'), { name: 'call_tool', arguments: '{"mcp_server":"c","tool_name":"list_tools"' }, 'Incomplete arguments stay as they arrived.');
+});
+
 test('session evaluation flags refused approvals, failed commands, repeats and turn errors', () => {
   // Event shapes as stored by TrueForge 0.185.1 (snake_case, tool results as JSON strings).
   const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: JSON.stringify(args) } });

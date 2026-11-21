@@ -20,10 +20,15 @@ export function classifyModelError(message: string): { transient: boolean; summa
 }
 
 /** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
-export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean; projectInstructions?: string; environment?: string; compactionTokens?: number }): TrueForgeApi.AgentSpec {
+export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; projectInstructions?: string; environment?: string; compactionTokens?: number }): TrueForgeApi.AgentSpec {
   // forgeAgent.saveOnApprove (default on): TrueForge pauses on every propose_edit and write_file so the user reviews the diff before it is saved.
   // Off: propose_edit only stages a diff, and the user applies it later in Review changes.
-  const editorServer = { ...definition.editorServer, requireApprovalForTools: definition.editorServer.requireApprovalForTools.filter(tool => options.approveEdits !== false || (tool !== 'propose_edit' && tool !== 'write_file')) };
+  const editorServer = {
+    ...definition.editorServer,
+    requireApprovalForTools: definition.editorServer.requireApprovalForTools.filter(tool => options.approveEdits !== false || (tool !== 'propose_edit' && tool !== 'write_file')),
+    // forgeAgent.deferTools: TrueForge deferred tool loading. Approvals still apply to tools reached through call_tool.
+    ...(options.deferTools ? { preload: false, preloadTools: definition.deferredTools.preloadTools } : {}),
+  };
   return {
     // parallelToolCalls: the model may request several independent reads and searches in one response (one round trip).
     model: { name: options.model, params: { parallelToolCalls: true, ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}) } },
@@ -59,7 +64,7 @@ export class ForgeSession {
   private lastEventId: string | undefined;
   private paused = false;
   private cancelled = false;
-  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; compactionTokens?: number; workspaceRoot?: string; projectInstructions?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
+  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; compactionTokens?: number; workspaceRoot?: string; projectInstructions?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
     this.trace = new SessionTrace({ model: options.model, sink: event => ForgeSession.observe(event) });
     this.client = createClient(options.baseUrl);
     if (!/^[^/\s]+\/\S+$/u.test(options.model)) {
@@ -120,7 +125,7 @@ export class ForgeSession {
     this.options.model = model;
   }
   private spec(model: string): TrueForgeApi.AgentSpec {
-    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits, compactionTokens: this.options.compactionTokens, projectInstructions: this.options.projectInstructions, environment: this.environment() });
+    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits, deferTools: this.options.deferTools, compactionTokens: this.options.compactionTokens, projectInstructions: this.options.projectInstructions, environment: this.environment() });
   }
   /** Date, working directory, git and platform, computed whenever the spec is sent (a new session or a model switch). */
   private environment(): string {

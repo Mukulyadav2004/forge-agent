@@ -633,7 +633,7 @@ ${selectedText}`;
         // A new session gets the workspace's AGENTS.md or CLAUDE.md and an <env> block after the prompt (opencode's order).
         const projectInstructions = await this.actions.projectInstructions().catch(() => '');
         const workspaceRoot = vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme === 'file')?.uri.fsPath;
-        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), compactionTokens: config.get<number>('compactionTokens', 0), workspaceRoot, projectInstructions, onEvent: event => this.event(chat, event) });
+        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), deferTools: config.get<boolean>('deferTools', false), compactionTokens: config.get<number>('compactionTokens', 0), workspaceRoot, projectInstructions, onEvent: event => this.event(chat, event) });
       }
       chat.turnError = undefined;
       if (!approvals) chat.lastInput = preparedInput;

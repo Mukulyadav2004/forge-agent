@@ -128,6 +128,11 @@
           "type": "string",
           "default": "forge-editor",
           "description": "Name prefix for this window's automatically registered editor MCP connector. Leave empty to disable editor tools."
+        },
+        "forgeAgent.deferTools": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use TrueForge deferred tool loading for the editor tools. plan_task, read_file, search_code, list_files and propose_edit are sent with every request; the agent looks up the rest (write_file, run_command) with list_tools and get_tool_info and calls them through call_tool. Approvals work the same. Applies to new chats."
         }
       }
     },

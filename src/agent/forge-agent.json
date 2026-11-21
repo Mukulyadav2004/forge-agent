@@ -13,5 +13,9 @@
     "preload": true,
     "enableTools": ["plan_task", "read_file", "list_files", "search_code", "propose_edit", "write_file", "run_command"],
     "requireApprovalForTools": ["run_command", "propose_edit", "write_file"]
+  },
+  "deferredTools": {
+    "$comment": "forgeAgent.deferTools: the editor server is sent with preload false, so only these tools are in every request; TrueForge's list_tools, get_tool_info and call_tool reach the rest.",
+    "preloadTools": ["plan_task", "read_file", "search_code", "list_files", "propose_edit"]
   }
 }
