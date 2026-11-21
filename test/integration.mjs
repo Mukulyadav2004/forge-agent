@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
-import { agentSpec, classifyModelError, ForgeSession, listModelNames } from '../out/agent/ForgeSession.js';
+import { agentSpec, classifyModelError, ForgeSession, listModelNames, normalizeSkills } from '../out/agent/ForgeSession.js';
 import { readFileSync } from 'node:fs';
 import { evaluateSession } from '../scripts/eval-session.mjs';
 import { buildProjectContext, buildProjectOverview, isArchitectureRequest, OVERVIEW_LIMITS, suggestTestCommands, fileOutline } from '../out/context/projectContext.js';
@@ -171,6 +171,48 @@ test('Code Mode turns on the sandbox only when TrueForge reports a provider, and
     await new ForgeSession({ ...options, codeMode: true }).send([{ type: 'user.message', content: 'no provider' }]);
     assert.equal(createdSpec().config.sandbox.enabled, false, 'A server without a sandbox provider still gets a working session.');
     assert.match(notices.join('\n'), /Code Mode is off for this chat/u);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
+test('skills are sent by name with a sandbox, and left out with a reason when the server cannot mount them', async () => {
+  assert.deepEqual(normalizeSkills(['pdf', { name: 'git/review', preload: true }, 'pdf', ' bad name ', '.tfy-internal', '..', { preload: true }, 7]), [{ name: 'pdf' }, { name: 'git/review', preload: true }]);
+  assert.deepEqual(normalizeSkills('pdf'), []);
+  assert.equal(agentSpec({ model: 'test/model', skills: [{ name: 'pdf' }] }).skills, undefined, 'TrueForge rejects skills without a sandbox.');
+  assert.deepEqual(agentSpec({ model: 'test/model', sandbox: {}, skills: [{ name: 'pdf' }] }).skills, [{ name: 'pdf' }]);
+
+  const requests = [];
+  let capabilities;
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    requests.push({ url: req.url, body: body ? JSON.parse(body) : null });
+    const json = data => res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data }));
+    if (req.url === '/api/v1/capabilities') return json(capabilities);
+    if (req.url === '/api/v1/sessions') return json({ id: 'test-session' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify({ type: 'turn.done', id: 'done', created_at: new Date().toISOString(), thread_id: null, state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] } })}\n\n`);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const notices = [];
+  const options = { baseUrl: `http://127.0.0.1:${address.port}`, model: 'test/model', connector: 'forge-editor', skills: [{ name: 'pdf' }, { name: 'git/review', preload: true }], onEvent: () => undefined, onNotice: text => notices.push(text) };
+  const createdSpec = () => requests.filter(request => request.url === '/api/v1/sessions').at(-1).body.agent.spec;
+  try {
+    capabilities = { sandbox: { enabled: true, environments: { enabled: false } }, skill: { enabled: true } };
+    await new ForgeSession(options).send([{ type: 'user.message', content: 'skills' }]);
+    assert.deepEqual(createdSpec().skills, [{ name: 'pdf' }, { name: 'git/review', preload: true }]);
+    assert.equal(createdSpec().config.sandbox.enabled, true, 'Skills are mounted in a sandbox, so the session gets one without forgeAgent.codeMode.');
+    assert.deepEqual(notices, []);
+    capabilities = { sandbox: { enabled: true, environments: { enabled: false } }, skill: { enabled: false, reason: 'No skill store is configured' } };
+    await new ForgeSession(options).send([{ type: 'user.message', content: 'no skill store' }]);
+    assert.equal(createdSpec().skills, undefined);
+    assert.equal(createdSpec().config.sandbox.enabled, false, 'Without usable skills or Code Mode no sandbox is started.');
+    assert.match(notices.at(-1), /Skills are off for this chat: No skill store is configured\./u);
+    capabilities = { sandbox: { enabled: false, environments: { enabled: false } }, skill: { enabled: false } };
+    await new ForgeSession({ ...options, codeMode: true }).send([{ type: 'user.message', content: 'no sandbox' }]);
+    assert.equal(createdSpec().skills, undefined);
+    assert.match(notices.at(-1), /^Code Mode and skills are off for this chat/u);
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
 });
 

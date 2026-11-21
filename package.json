@@ -142,7 +142,27 @@
         "forgeAgent.sandboxEnvironment": {
           "type": "string",
           "default": "",
-          "description": "Sandbox environment name for Code Mode, when the TrueForge sandbox provider uses named environments (for example Daytona). Leave empty otherwise."
+          "description": "Sandbox environment name for Code Mode and skills, when the TrueForge sandbox provider uses named environments (for example Daytona). Leave empty otherwise."
+        },
+        "forgeAgent.skills": {
+          "type": "array",
+          "default": [],
+          "maxItems": 50,
+          "items": {
+            "anyOf": [
+              { "type": "string", "pattern": "^[A-Za-z0-9._\\-/:]+$" },
+              {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[A-Za-z0-9._\\-/:]+$" },
+                  "preload": { "type": "boolean", "default": false, "description": "Put the skill's SKILL.md in the prompt instead of letting the agent read it when needed." }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "markdownDescription": "TrueForge skills for the agent, by name, as configured in TrueForge (Settings → Skills). Use a name, or `{ \"name\": \"...\", \"preload\": true }` to put its SKILL.md in the prompt. TrueForge mounts skills in a sandbox, so the session gets one (and with it Code Mode's `exec` tool); without a sandbox provider the chat says skills are off. Applies to new chats."
         }
       }
     },

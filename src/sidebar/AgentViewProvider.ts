@@ -1,4 +1,4 @@
-import { classifyModelError, ForgeSession, listModelNames } from "../agent/ForgeSession";
+import { classifyModelError, ForgeSession, listModelNames, normalizeSkills } from "../agent/ForgeSession";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { randomUUID } from "node:crypto";
 import * as vscode from "vscode";
@@ -633,7 +633,7 @@ ${selectedText}`;
         // A new session gets the workspace's AGENTS.md or CLAUDE.md and an <env> block after the prompt (opencode's order).
         const projectInstructions = await this.actions.projectInstructions().catch(() => '');
         const workspaceRoot = vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme === 'file')?.uri.fsPath;
-        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), deferTools: config.get<boolean>('deferTools', false), codeMode: config.get<boolean>('codeMode', false), sandboxEnvironment: config.get<string>('sandboxEnvironment', ''), compactionTokens: config.get<number>('compactionTokens', 0), workspaceRoot, projectInstructions, onEvent: event => this.event(chat, event), onNotice: text => { chat.messages.push({ id: randomUUID(), role: "assistant", text }); this.show(chat); } });
+        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), deferTools: config.get<boolean>('deferTools', false), codeMode: config.get<boolean>('codeMode', false), sandboxEnvironment: config.get<string>('sandboxEnvironment', ''), skills: normalizeSkills(config.get<unknown>('skills', [])), compactionTokens: config.get<number>('compactionTokens', 0), workspaceRoot, projectInstructions, onEvent: event => this.event(chat, event), onNotice: text => { chat.messages.push({ id: randomUUID(), role: "assistant", text }); this.show(chat); } });
       }
       chat.turnError = undefined;
       if (!approvals) chat.lastInput = preparedInput;

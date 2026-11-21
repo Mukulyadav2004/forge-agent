@@ -19,8 +19,25 @@ export function classifyModelError(message: string): { transient: boolean; summa
   return { transient: transient && !stepLimit, summary, stepLimit, ...(hint ? { retryAfterSeconds: Math.ceil(Number(hint[1])) } : {}) };
 }
 
+/** TrueForge's skill name rule and limit (AgentSpec skills). `.tfy-` names are reserved by TrueForge. */
+const SKILL_NAME = /^[A-Za-z0-9._\-/:]+$/u;
+const MAX_SKILLS = 50;
+
+/** forgeAgent.skills: names, or { name, preload }; invalid and repeated entries are dropped. */
+export function normalizeSkills(value: unknown): TrueForgeApi.Skill[] {
+  if (!Array.isArray(value)) return [];
+  const skills = new Map<string, TrueForgeApi.Skill>();
+  for (const item of value) {
+    const entry = typeof item === 'string' ? { name: item } : typeof item === 'object' && item !== null ? item as { name?: unknown; preload?: unknown } : {};
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    if (!SKILL_NAME.test(name) || name === '.' || name === '..' || name.startsWith('.tfy-') || skills.has(name)) continue;
+    skills.set(name, { name, ...('preload' in entry && entry.preload === true ? { preload: true } : {}) });
+  }
+  return [...skills.values()].slice(0, MAX_SKILLS);
+}
+
 /** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
-export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; sandbox?: { environmentName?: string }; projectInstructions?: string; environment?: string; compactionTokens?: number }): TrueForgeApi.AgentSpec {
+export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; sandbox?: { environmentName?: string }; skills?: TrueForgeApi.Skill[]; projectInstructions?: string; environment?: string; compactionTokens?: number }): TrueForgeApi.AgentSpec {
   // forgeAgent.saveOnApprove (default on): TrueForge pauses on every propose_edit and write_file so the user reviews the diff before it is saved.
   // Off: propose_edit only stages a diff, and the user applies it later in Review changes.
   const editorServer = {
@@ -44,6 +61,8 @@ export function agentSpec(options: { model: string; connector?: string; reasonin
       ...(options.sandbox ? { sandbox: { enabled: true, ...(options.sandbox.environmentName ? { environmentName: options.sandbox.environmentName } : {}) } } : {}),
     } as TrueForgeApi.RuntimeConfig,
     mcpServers: options.connector ? [{ name: options.connector, ...editorServer }] : [],
+    // TrueForge mounts skills in the sandbox and rejects a spec that names skills without one.
+    ...(options.sandbox && options.skills?.length ? { skills: options.skills } : {}),
   };
 }
 
@@ -68,8 +87,9 @@ export class ForgeSession {
   private paused = false;
   private cancelled = false;
   private sandbox: { environmentName?: string } | undefined;
+  private skills: TrueForgeApi.Skill[] = [];
   private capabilitiesChecked = false;
-  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; codeMode?: boolean; sandboxEnvironment?: string; onNotice?: (text: string) => void; compactionTokens?: number; workspaceRoot?: string; projectInstructions?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
+  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; codeMode?: boolean; sandboxEnvironment?: string; skills?: TrueForgeApi.Skill[]; onNotice?: (text: string) => void; compactionTokens?: number; workspaceRoot?: string; projectInstructions?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
     this.trace = new SessionTrace({ model: options.model, sink: event => ForgeSession.observe(event) });
     this.client = createClient(options.baseUrl);
     if (!/^[^/\s]+\/\S+$/u.test(options.model)) {
@@ -130,7 +150,7 @@ export class ForgeSession {
     this.options.model = model;
   }
   private spec(model: string): TrueForgeApi.AgentSpec {
-    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits, deferTools: this.options.deferTools, sandbox: this.sandbox, compactionTokens: this.options.compactionTokens, projectInstructions: this.options.projectInstructions, environment: this.environment() });
+    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits, deferTools: this.options.deferTools, sandbox: this.sandbox, skills: this.skills, compactionTokens: this.options.compactionTokens, projectInstructions: this.options.projectInstructions, environment: this.environment() });
   }
   /** Date, working directory, git and platform, computed whenever the spec is sent (a new session or a model switch). */
   private environment(): string {
@@ -139,14 +159,25 @@ export class ForgeSession {
     try { gitRoot = root ? findGitRoot(root, existsSync) : undefined; } catch { gitRoot = undefined; }
     return environmentInstructions({ date: new Date(), workspaceRoot: root, gitRoot, platform: process.platform });
   }
-  /** Code Mode needs a sandbox provider on the TrueForge server. Without one the session starts without a sandbox and the chat says why. */
+  /**
+   * Code Mode and skills need a sandbox provider on the TrueForge server; skills also need the server's skill support.
+   * What the server lacks is left out of the spec, so the session still starts, and the chat says why.
+   */
   private async resolveSandbox(): Promise<void> {
-    if (this.capabilitiesChecked || !this.options.codeMode) return;
+    const skills = this.options.skills ?? [];
+    if (this.capabilitiesChecked || (!this.options.codeMode && !skills.length)) return;
     this.capabilitiesChecked = true;
-    let available = false;
-    try { available = (await this.client.server.getCapabilities({ timeoutInSeconds: 15 })).data.sandbox.enabled; } catch { available = false; }
-    if (available) this.sandbox = this.options.sandboxEnvironment?.trim() ? { environmentName: this.options.sandboxEnvironment.trim() } : {};
-    else this.options.onNotice?.('Code Mode is off for this chat: the TrueForge server reports no sandbox provider. Configure one in TrueForge (its local sandbox runs on macOS and Linux only), then start a new chat.');
+    let capabilities: TrueForgeApi.CapabilitiesData | undefined;
+    try { capabilities = (await this.client.server.getCapabilities({ timeoutInSeconds: 15 })).data; } catch { capabilities = undefined; }
+    if (!capabilities?.sandbox.enabled) {
+      const wanted = this.options.codeMode && skills.length ? 'Code Mode and skills are' : this.options.codeMode ? 'Code Mode is' : 'Skills are';
+      this.options.onNotice?.(`${wanted} off for this chat: the TrueForge server reports no sandbox provider. Configure one in TrueForge (its local sandbox runs on macOS and Linux only), then start a new chat.`);
+      return;
+    }
+    const useSkills = skills.length > 0 && capabilities.skill.enabled;
+    if (skills.length && !useSkills) this.options.onNotice?.(`Skills are off for this chat: ${capabilities.skill.reason?.trim() || 'the TrueForge server does not support skills'}.`);
+    if (this.options.codeMode || useSkills) this.sandbox = this.options.sandboxEnvironment?.trim() ? { environmentName: this.options.sandboxEnvironment.trim() } : {};
+    if (useSkills) this.skills = skills;
   }
   private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], previousTurnId?: string): Promise<void> {
     this.cancelled = false;
