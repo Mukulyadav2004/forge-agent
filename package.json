@@ -133,6 +133,16 @@
           "type": "boolean",
           "default": false,
           "description": "Use TrueForge deferred tool loading for the editor tools. plan_task, read_file, search_code, list_files and propose_edit are sent with every request; the agent looks up the rest (write_file, run_command) with list_tools and get_tool_info and calls them through call_tool. Approvals work the same. Applies to new chats."
+        },
+        "forgeAgent.codeMode": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use TrueForge Code Mode: the session gets a sandbox and its exec tool, and code run there can call the read-only editor tools (read_file, search_code, list_files) to batch many reads or searches. The sandbox does not contain your workspace; edits and commands still need your approval. Needs a sandbox provider in TrueForge (its local sandbox runs on macOS and Linux only); without one the chat says Code Mode is off. Applies to new chats."
+        },
+        "forgeAgent.sandboxEnvironment": {
+          "type": "string",
+          "default": "",
+          "description": "Sandbox environment name for Code Mode, when the TrueForge sandbox provider uses named environments (for example Daytona). Leave empty otherwise."
         }
       }
     },

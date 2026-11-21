@@ -633,7 +633,7 @@ ${selectedText}`;
         // A new session gets the workspace's AGENTS.md or CLAUDE.md and an <env> block after the prompt (opencode's order).
         const projectInstructions = await this.actions.projectInstructions().catch(() => '');
         const workspaceRoot = vscode.workspace.workspaceFolders?.find(folder => folder.uri.scheme === 'file')?.uri.fsPath;
-        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), deferTools: config.get<boolean>('deferTools', false), compactionTokens: config.get<number>('compactionTokens', 0), workspaceRoot, projectInstructions, onEvent: event => this.event(chat, event) });
+        chat.session = new ForgeSession({ baseUrl: config.get<string>("baseUrl", "http://127.0.0.1:8790"), model, connector, editorManifest, reasoningEffort: config.get<string>('reasoningEffort', ''), approveEdits: config.get<boolean>('saveOnApprove', true), deferTools: config.get<boolean>('deferTools', false), codeMode: config.get<boolean>('codeMode', false), sandboxEnvironment: config.get<string>('sandboxEnvironment', ''), compactionTokens: config.get<number>('compactionTokens', 0), workspaceRoot, projectInstructions, onEvent: event => this.event(chat, event), onNotice: text => { chat.messages.push({ id: randomUUID(), role: "assistant", text }); this.show(chat); } });
       }
       chat.turnError = undefined;
       if (!approvals) chat.lastInput = preparedInput;
@@ -673,6 +673,13 @@ ${selectedText}`;
     if (event.type === 'thread.context_compaction_finished' && compaction?.kind === 'compaction' && !compaction.done) { compaction.done = true; compaction.durationMs = Math.round(event.durationMs); }
     if (event.type === 'model.message.delta' && event.usage && compaction?.kind === 'compaction' && compaction.done && compaction.afterTokens === undefined) compaction.afterTokens = event.usage.inputTokens;
     if (event.type === "model.message" && event.toolCalls) chat.toolCalls.remember(event.id, event.toolCalls);
+    // Code Mode runs in TrueForge's sandbox, not through the editor tools, so its commands are recorded from the model's calls.
+    if (event.type === "model.message" && event.toolCalls) for (const call of event.toolCalls) {
+      if (call.function.name !== 'exec' && call.toolInfo.name !== 'exec') continue;
+      let args: { command?: unknown; intent?: unknown } = {};
+      try { args = JSON.parse(call.function.arguments || '{}') as typeof args; } catch { /* recorded without details */ }
+      if (typeof args.command === 'string' && args.command) this.recordActivity({ kind: 'sandbox', command: args.command.slice(0, 2000), ...(typeof args.intent === 'string' && args.intent ? { intent: args.intent.slice(0, 300) } : {}) });
+    }
     // The request row also shows the input tokens TrueForge reports for the latest model call (the real, provider-counted size).
     const usage = event.type === 'model.message' || event.type === 'model.message.delta' ? event.usage : undefined;
     const request = usage ? [...chat.activity].reverse().find(entry => entry.kind === 'request') : undefined;

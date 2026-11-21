@@ -55,6 +55,8 @@ export type ActivityEntry = { at?: number } & (
   | { kind: 'refused'; tool: string; message: string }
   /** TrueForge summarised the conversation: size that triggered it, the threshold, and the size of the next model call afterwards. */
   | { kind: 'compaction'; contextTokens: number; thresholdTokens: number; done: boolean; durationMs?: number; afterTokens?: number }
+  /** Code Mode: a command the agent ran in TrueForge's sandbox (exec), with its stated intent. It runs outside the workspace. */
+  | { kind: 'sandbox'; command: string; intent?: string }
   /** The agent's plan (plan_task) when made, and the checklist when the turn ends: each requirement, its file and status. */
   | { kind: 'plan'; stage: 'start' | 'end'; items: PlanRow[]; lastCommand?: string });
 
@@ -82,6 +84,7 @@ function isActivityEntry(value: unknown): value is ActivityEntry {
     case 'context': return text('path') && count('startLine') && count('endLine');
     case 'refused': return text('tool') && text('message');
     case 'plan': return (value.stage === 'start' || value.stage === 'end') && Array.isArray(value.items) && value.items.length <= 12 && value.items.every(isPlanRow) && (value.lastCommand === undefined || (text('lastCommand') && String(value.lastCommand).length <= 300));
+    case 'sandbox': return text('command') && (value.intent === undefined || text('intent'));
     case 'compaction': return count('contextTokens') && count('thresholdTokens') && typeof value.done === 'boolean' && (value.durationMs === undefined || count('durationMs')) && (value.afterTokens === undefined || count('afterTokens'));
     default: return false;
   }

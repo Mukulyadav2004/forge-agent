@@ -1,6 +1,6 @@
 import { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { TrueForgeApi } from '@truefoundry/trueforge-sdk';
-import { agentInstructions } from './instructions';
+import { agentInstructions, codeModeInstructions } from './instructions';
 import definition from './forge-agent.json';
 import { existsSync } from 'node:fs';
 import { environmentInstructions, findGitRoot, modelIdentity } from '../context/environment';
@@ -20,7 +20,7 @@ export function classifyModelError(message: string): { transient: boolean; summa
 }
 
 /** The full spec TrueForge receives: src/agent/forge-agent.json plus the model, the window's editor MCP server and the instructions. */
-export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; projectInstructions?: string; environment?: string; compactionTokens?: number }): TrueForgeApi.AgentSpec {
+export function agentSpec(options: { model: string; connector?: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; sandbox?: { environmentName?: string }; projectInstructions?: string; environment?: string; compactionTokens?: number }): TrueForgeApi.AgentSpec {
   // forgeAgent.saveOnApprove (default on): TrueForge pauses on every propose_edit and write_file so the user reviews the diff before it is saved.
   // Off: propose_edit only stages a diff, and the user applies it later in Review changes.
   const editorServer = {
@@ -33,13 +33,16 @@ export function agentSpec(options: { model: string; connector?: string; reasonin
     // parallelToolCalls: the model may request several independent reads and searches in one response (one round trip).
     model: { name: options.model, params: { parallelToolCalls: true, ...(options.reasoningEffort ? { reasoningEffort: options.reasoningEffort } : {}) } },
     // Our prompt, then the model's identity, the workspace's AGENTS.md or CLAUDE.md, and the <env> block (opencode's order).
-    instructions: [agentInstructions, modelIdentity(options.model), options.projectInstructions?.trim(), options.environment?.trim()].filter(Boolean).join('\n\n'),
+    instructions: [agentInstructions, options.sandbox ? codeModeInstructions : undefined, modelIdentity(options.model), options.projectInstructions?.trim(), options.environment?.trim()].filter(Boolean).join('\n\n'),
     // JSON imports widen literals such as "input_tokens" to string; TrueForge validates the spec when the session is created.
-    // Compaction: with no trigger TrueForge compacts at 80% of the configured model's context window (50k tokens if
-    // unknown); it accepts no ratio, only that default or a fixed count. forgeAgent.compactionTokens sets a fixed count.
-    config: (options.compactionTokens && options.compactionTokens > 0
-      ? { ...definition.config, contextManagement: { compaction: { enabled: true, trigger: { type: 'input_tokens', value: Math.round(options.compactionTokens) } } } }
-      : definition.config) as TrueForgeApi.RuntimeConfig,
+    config: {
+      ...definition.config,
+      // Compaction: with no trigger TrueForge compacts at 80% of the configured model's context window (50k tokens if
+      // unknown); it accepts no ratio, only that default or a fixed count. forgeAgent.compactionTokens sets a fixed count.
+      ...(options.compactionTokens && options.compactionTokens > 0 ? { contextManagement: { compaction: { enabled: true, trigger: { type: 'input_tokens', value: Math.round(options.compactionTokens) } } } } : {}),
+      // Code Mode: a session with a sandbox gets TrueForge's exec tool, and code run there can call the attached MCP tools.
+      ...(options.sandbox ? { sandbox: { enabled: true, ...(options.sandbox.environmentName ? { environmentName: options.sandbox.environmentName } : {}) } } : {}),
+    } as TrueForgeApi.RuntimeConfig,
     mcpServers: options.connector ? [{ name: options.connector, ...editorServer }] : [],
   };
 }
@@ -64,7 +67,9 @@ export class ForgeSession {
   private lastEventId: string | undefined;
   private paused = false;
   private cancelled = false;
-  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; compactionTokens?: number; workspaceRoot?: string; projectInstructions?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
+  private sandbox: { environmentName?: string } | undefined;
+  private capabilitiesChecked = false;
+  constructor(private readonly options: { baseUrl: string; model: string; connector: string; reasoningEffort?: string; approveEdits?: boolean; deferTools?: boolean; codeMode?: boolean; sandboxEnvironment?: string; onNotice?: (text: string) => void; compactionTokens?: number; workspaceRoot?: string; projectInstructions?: string; editorManifest?: TrueForgeApi.RemoteMcpServerManifest; onEvent: (event: TrueForgeApi.TurnStreamingEvent) => void }) {
     this.trace = new SessionTrace({ model: options.model, sink: event => ForgeSession.observe(event) });
     this.client = createClient(options.baseUrl);
     if (!/^[^/\s]+\/\S+$/u.test(options.model)) {
@@ -125,7 +130,7 @@ export class ForgeSession {
     this.options.model = model;
   }
   private spec(model: string): TrueForgeApi.AgentSpec {
-    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits, deferTools: this.options.deferTools, compactionTokens: this.options.compactionTokens, projectInstructions: this.options.projectInstructions, environment: this.environment() });
+    return agentSpec({ model, connector: this.options.editorManifest?.name ?? this.options.connector, reasoningEffort: this.options.reasoningEffort, approveEdits: this.options.approveEdits, deferTools: this.options.deferTools, sandbox: this.sandbox, compactionTokens: this.options.compactionTokens, projectInstructions: this.options.projectInstructions, environment: this.environment() });
   }
   /** Date, working directory, git and platform, computed whenever the spec is sent (a new session or a model switch). */
   private environment(): string {
@@ -134,12 +139,22 @@ export class ForgeSession {
     try { gitRoot = root ? findGitRoot(root, existsSync) : undefined; } catch { gitRoot = undefined; }
     return environmentInstructions({ date: new Date(), workspaceRoot: root, gitRoot, platform: process.platform });
   }
+  /** Code Mode needs a sandbox provider on the TrueForge server. Without one the session starts without a sandbox and the chat says why. */
+  private async resolveSandbox(): Promise<void> {
+    if (this.capabilitiesChecked || !this.options.codeMode) return;
+    this.capabilitiesChecked = true;
+    let available = false;
+    try { available = (await this.client.server.getCapabilities({ timeoutInSeconds: 15 })).data.sandbox.enabled; } catch { available = false; }
+    if (available) this.sandbox = this.options.sandboxEnvironment?.trim() ? { environmentName: this.options.sandboxEnvironment.trim() } : {};
+    else this.options.onNotice?.('Code Mode is off for this chat: the TrueForge server reports no sandbox provider. Configure one in TrueForge (its local sandbox runs on macOS and Linux only), then start a new chat.');
+  }
   private async sendTurn(input: TrueForgeApi.CreateTurnSessionsStreamRequest['input'], previousTurnId?: string): Promise<void> {
     this.cancelled = false;
     if (!this.sessionId) {
       if (this.options.editorManifest) {
         await this.client.settings.mcpServers.createOrUpdate({ manifest: this.options.editorManifest }, { timeoutInSeconds: 15 });
       }
+      await this.resolveSandbox();
       if (this.cancelled) { this.trace.abandoned(); return; }
       const response = await this.client.sessions.create({ agent: { spec: this.spec(this.options.model) } });
       this.sessionId = response.data.id;

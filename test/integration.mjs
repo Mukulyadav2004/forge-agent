@@ -131,6 +131,49 @@ test('the agent definition file is what TrueForge receives', () => {
   assert.deepEqual(agentSpec({ model: 'test/model' }).mcpServers, []);
 });
 
+test('Code Mode turns on the sandbox only when TrueForge reports a provider, and says so when it cannot', async () => {
+  const definition = JSON.parse(readFileSync(new URL('../src/agent/forge-agent.json', import.meta.url), 'utf8'));
+  const plain = agentSpec({ model: 'test/model' });
+  assert.deepEqual(plain.config.sandbox, { enabled: false });
+  assert.doesNotMatch(plain.instructions, /Code Mode/u);
+  const coded = agentSpec({ model: 'test/model', sandbox: { environmentName: 'python' } });
+  assert.deepEqual(coded.config.sandbox, { enabled: true, environmentName: 'python' });
+  assert.match(coded.instructions, /Code Mode: [\s\S]*does not contain the user's workspace/u);
+  assert.deepEqual({ ...coded.config, sandbox: definition.config.sandbox }, definition.config, 'Only the sandbox changes.');
+
+  const requests = [];
+  let sandbox = true;
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    requests.push({ url: req.url, body: body ? JSON.parse(body) : null });
+    const json = data => res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ data }));
+    if (req.url === '/api/v1/capabilities') return json({ sandbox: { enabled: sandbox, environments: { enabled: false } }, skill: { enabled: sandbox } });
+    if (req.url === '/api/v1/sessions') return json({ id: 'test-session' });
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify({ type: 'turn.done', id: 'done', created_at: new Date().toISOString(), thread_id: null, state: { status: 'done', completed_at: new Date().toISOString(), output: null, required_actions: [] } })}\n\n`);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  const notices = [];
+  const options = { baseUrl: `http://127.0.0.1:${address.port}`, model: 'test/model', connector: 'forge-editor', onEvent: () => undefined, onNotice: text => notices.push(text) };
+  const createdSpec = () => requests.filter(request => request.url === '/api/v1/sessions').at(-1).body.agent.spec;
+  try {
+    await new ForgeSession(options).send([{ type: 'user.message', content: 'no code mode' }]);
+    assert.equal(requests.filter(request => request.url === '/api/v1/capabilities').length, 0, 'Without Code Mode the server is not asked.');
+    assert.equal(createdSpec().config.sandbox.enabled, false);
+    await new ForgeSession({ ...options, codeMode: true, sandboxEnvironment: ' python ' }).send([{ type: 'user.message', content: 'code mode' }]);
+    assert.deepEqual(createdSpec().config.sandbox, { enabled: true, environment_name: 'python' });
+    assert.match(createdSpec().instructions, /Code Mode:/u);
+    assert.deepEqual(notices, []);
+    sandbox = false;
+    await new ForgeSession({ ...options, codeMode: true }).send([{ type: 'user.message', content: 'no provider' }]);
+    assert.equal(createdSpec().config.sandbox.enabled, false, 'A server without a sandbox provider still gets a working session.');
+    assert.match(notices.join('\n'), /Code Mode is off for this chat/u);
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
+
 test('model errors are classified for retry and summarised without the provider prefix', () => {
   // Message shape captured from TrueForge 0.185.1 when the provider quota is zero.
   const quota = classifyModelError('[Model Error] Request failed (429): You exceeded your current quota.\n* Quota exceeded for metric: x');

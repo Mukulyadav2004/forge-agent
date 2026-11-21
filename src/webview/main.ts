@@ -284,6 +284,16 @@ function activityRow(entry: Exclude<ActivityEntry, { kind: 'request' }>, added: 
       if (entry.cancelled || entry.timedOut || entry.exitCode !== 0) row.classList.add('activity-failed');
       break;
     }
+    case 'sandbox': {
+      kind.textContent = 'Sandbox';
+      const code = document.createElement('code');
+      code.textContent = entry.command.length > 200 ? `${entry.command.slice(0, 200)}…` : entry.command;
+      code.title = entry.command;
+      main = [code];
+      if (entry.intent) notes.push(entry.intent);
+      notes.push('ran in the TrueForge sandbox, not in your workspace');
+      break;
+    }
     case 'refused':
       kind.textContent = 'Refused';
       main = [`${entry.tool}: ${entry.message}`];
