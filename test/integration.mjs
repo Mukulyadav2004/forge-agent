@@ -630,6 +630,36 @@ test('per-change rules of AGENTS.md that name a file become end-of-turn obligati
   assert.deepEqual(changeObligations(''), []);
 });
 
+test('commands that write files directly are refused, whatever the shell or language; tests, pipes and quoted ">" are not', async () => {
+  const { commandText, fileWriteCommand, fileWriteRefusal } = await import('../out/tools/runCommand.js');
+  const writes = {
+    // The live case: notes appended with node -e, skipping review and Undo.
+    "node -e \"const fs = require('fs'); fs.appendFileSync('docs/STEP-NOTES.md', 'x');\"": 'a Node.js file write',
+    "node -e \"require('fs').writeFileSync('a.txt', '')\"": 'a Node.js file write',
+    "python -c \"open('notes.md', 'a').write('x')\"": 'a Python open() for writing',
+    "python3 -c \"from pathlib import Path; Path('a').write_text('x')\"": 'a Python file write',
+    'echo hello > notes.md': 'a > or >> redirect into a file',
+    'echo hello >> docs/STEP-NOTES.md': 'a > or >> redirect into a file',
+    'pnpm test 2> errors.log': 'a > or >> redirect into a file',
+    'cat <<EOF >out.txt': 'a > or >> redirect into a file',
+    'pnpm test | tee out.log': 'tee',
+    "sed -i 's/a/b/' src/main.ts": 'sed -i',
+    "sed -i.bak -e 's/a/b/' f": 'sed -i',
+    "perl -pi -e 's/a/b/' f": 'perl -i',
+    "Set-Content -Path a.txt -Value 'x'": 'a PowerShell file cmdlet',
+    "'x' | Out-File notes.md": 'a PowerShell file cmdlet',
+    'add-content notes.md "x"': 'a PowerShell file cmdlet',
+  };
+  for (const [command, kind] of Object.entries(writes)) assert.equal(fileWriteCommand(command), kind, command);
+  const fine = ['pnpm run compile', 'pnpm test 2>&1', 'pnpm test > /dev/null 2>&1', 'pnpm test 2>nul', 'pnpm test | tail -n 40', 'grep -n "a > b" src/main.ts',
+    'node -e "console.log([1,2].map(x => x > 1))"', "python -c \"print(open('a.txt').read())\"", "python -c \"open('a.txt', encoding='utf-8')\"", 'git log --oneline -5', 'sed -n 1,5p f', 'Get-Content a.txt', 'node --test test/integration.mjs'];
+  for (const command of fine) assert.equal(fileWriteCommand(command), undefined, command);
+  assert.match(fileWriteRefusal('echo x > a.md'), /^This command writes a file directly \(a > or >> redirect into a file\).*propose_edit.*write_file/u);
+  assert.equal(fileWriteRefusal('pnpm test'), undefined);
+  assert.equal(commandText(JSON.stringify({ command: 'echo x > a', reason: 'r' })), 'echo x > a');
+  assert.equal(commandText('{"command": tru'), '', 'Arguments still streaming or broken parse to no command.');
+});
+
 test('placeholder comments for left-out code are found in any comment style, but not real code or lines already in the file', async () => {
   const { placeholderLine, checkPlanCoverage } = await import('../out/context/plan.js');
   assert.deepEqual(placeholderLine('import json\n# ... (rest of imports)\n', 'import os\n'), { line: 2, text: '# ... (rest of imports)' });

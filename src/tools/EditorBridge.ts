@@ -22,7 +22,7 @@ import type { PlanItem } from '../context/plan';
 import type { Problem } from '../edits/diagnostics';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
 import type { ToolLog, ToolName } from '../observability/events';
-import { COMMAND_LIMITS, runCommand } from './runCommand';
+import { COMMAND_LIMITS, fileWriteRefusal, runCommand } from './runCommand';
 
 /** Characters of workspace text one user request may bring into the model's context: reads, searches, listings and supplied context. */
 /** Characters one request may read, about 90k tokens; TrueForge compacts the conversation at 100k tokens (forge-agent.json). */
@@ -90,6 +90,9 @@ export class EditorBridge implements vscode.Disposable {
   private commandsRun = 0;
   /** Line ranges the agent has read of each file at its current content; a whole-file replacement needs every line read. */
   private readonly readCoverage = new Map<string, [number, number][]>();
+  /** read_file ranges returned in this request, by file content; a repeat inside one gets a note once, then the text. */
+  private readonly requestReads = new Map<string, [number, number][]>();
+  private readonly rereadNoted = new Set<string>();
   private coverageKey(path: string, text: string): string { return `${normalize(path).replace(/^\.\//u, '')}\0${createHash('sha256').update(text).digest('hex')}`; }
   private unreadLines(path: string, text: string): number {
     const total = fileLines(text).length;
@@ -120,7 +123,7 @@ export class EditorBridge implements vscode.Disposable {
   /** Called once per user request (not for approvals or retries of it). */
   beginRequest(scope?: string, requestText = ''): void {
     this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest();
-    this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.presentPaths.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
+    this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.presentPaths.clear(); this.requestReads.clear(); this.rereadNoted.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
     this.textAtStart.clear(); this.textSaved.clear(); this.problemsAtStart.clear(); this.commandResults.clear(); this.seenPaths.clear();
     this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET });
   }
@@ -669,12 +672,23 @@ export class EditorBridge implements vscode.Disposable {
       }
       if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
       const actualEnd = start_line + output.length - 1;
+      // The same lines at the same content are already in this request's conversation. Asking again right after the note
+      // returns them, so a model whose context lost the earlier result (compaction) is never stuck.
+      const readKey = this.coverageKey(path, file.text);
+      const repeat = `${readKey}\0${start_line}-${actualEnd}`;
+      if ((this.requestReads.get(readKey) ?? []).some(([from, to]) => from <= start_line && actualEnd <= to) && !this.rereadNoted.has(repeat)) {
+        this.rereadNoted.add(repeat);
+        const message = `${path} lines ${start_line}-${actualEnd} are unchanged since you read them earlier in this request, so they were not sent again; use that earlier result (base_revision ${revision}). If it is no longer in your context, call read_file with the same range again and it will be returned.`;
+        this.activityEvents.fire({ kind: 'refused', tool: 'read_file', message: message.slice(0, 300) });
+        return { content: [{ type: 'text', text: message }], structuredContent: { base_revision: revision, path, start_line, end_line: actualEnd, total_lines: lines.length, unchanged: true, message } };
+      }
       const text = output.join('\n');
       // A default-window read of a longer file also gets the file's outline, so the next read can target one block.
       const outline = end_line === undefined && (start_line > 1 || actualEnd < lines.length) ? fileOutline(path, file.text, Math.min(READ_LIMITS.outline_characters, Math.max(0, this.remaining() - text.length))) : '';
       this.budgetUsed += text.length + outline.length;
       const key = this.coverageKey(path, file.text);
       this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), [start_line, actualEnd]]);
+      this.requestReads.set(key, [...(this.requestReads.get(key) ?? []), [start_line, actualEnd]]);
       this.markSeen(path);
       this.activityEvents.fire({ kind: 'open', used: this.budgetUsed, path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       // TrueForge prefers structured MCP results, so the source must be present there too.
@@ -683,6 +697,8 @@ export class EditorBridge implements vscode.Disposable {
     });
     register('run_command', { description: 'Run one non-interactive shell command in the workspace, such as a test, lint or type check, after the user approves its exact text. Prefer the narrowest command that checks your change (for example one test file). Returns the exit code, duration and combined output; long output keeps the start and the end. There is no input, so prompts, servers and watch modes run until the timeout. Commands can change files and Forge cannot undo that, so stage source edits with propose_edit rather than editing through commands.', inputSchema: { command: z.string().min(1).max(COMMAND_LIMITS.command_characters), cwd: z.string().max(500).default('.').describe('Workspace-relative folder to run in; defaults to the workspace root.'), timeout_seconds: z.number().int().min(1).max(COMMAND_LIMITS.timeout_seconds_max).default(COMMAND_LIMITS.timeout_seconds_default), reason: z.string().min(1).max(300).describe('One short sentence telling the user why this command is needed; shown in the approval and the activity feed.') }, annotations: { readOnlyHint: false } }, async ({ command, cwd, timeout_seconds, reason }, extra) => {
       if (this.editScope !== undefined) throw new Error(`This is an inline edit of ${this.editScope}; commands are not part of it. Stage the edit, then tell the user which check to run.`);
+      const writes = fileWriteRefusal(command);
+      if (writes) throw new Error(writes);
       if (this.commandsRun >= COMMAND_LIMITS.per_request) throw new Error(`This request already ran ${COMMAND_LIMITS.per_request} commands, the limit per request. Stop running commands; tell the user what to run or what is missing, and they can ask you to continue.`);
       const root = vscode.workspace.workspaceFolders?.[0];
       if (!root || root.uri.scheme !== 'file' || !vscode.workspace.isTrusted) throw new Error('Open a trusted local workspace first.');

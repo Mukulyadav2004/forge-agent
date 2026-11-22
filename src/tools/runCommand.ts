@@ -4,6 +4,39 @@ import { spawn } from 'node:child_process';
 /** per_request: 15 fits setup, a test run, small probes to understand a failure, and a few fix-and-rerun rounds; each command is still approved one at a time. */
 export const COMMAND_LIMITS = { per_request: 15, command_characters: 2000, timeout_seconds_default: 60, timeout_seconds_max: 300, output_characters: 16000 };
 
+/**
+ * What makes a command write a file directly, or undefined. Such writes skip the user's diff review and Undo, so they go
+ * through propose_edit or write_file instead. Redirects count only outside quoted text (so "a > b" in code or a pattern
+ * is fine), and redirects to the null device or to another stream (2>&1) are not writes. Builds, formatters and tests
+ * that write files as a side effect are not detected; checkSavedFiles reports those after the command.
+ */
+export function fileWriteCommand(command: string): string | undefined {
+  const unquoted = command.replace(/"(?:\\.|[^"\\])*"|'[^']*'/gu, '""');
+  const writes: Array<[RegExp, string, string]> = [
+    [/(?:^|[^<>&\d=-])\d?>>?\s*(?!&|\/dev\/(?:null|stdout|stderr)\b|nul\b|\$null\b)[^\s|&;<>()]+/iu, unquoted, 'a > or >> redirect into a file'],
+    [/(?:^|[|;&(]\s*)tee\b/u, unquoted, 'tee'],
+    [/\bsed\b[^|;&]*\s-[A-Za-z]*i/u, unquoted, 'sed -i'],
+    [/\bperl\b[^|;&]*\s-[A-Za-z]*i/u, unquoted, 'perl -i'],
+    [/\b(?:Set-Content|Add-Content|Out-File|Clear-Content|Tee-Object)\b/iu, unquoted, 'a PowerShell file cmdlet'],
+    [/\b(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream)\s*\(/u, command, 'a Node.js file write'],
+    [/\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?(?:"[^"]*[wax+][^"]*"|'[^']*[wax+][^']*')/u, command, 'a Python open() for writing'],
+    [/\.(?:write_text|write_bytes)\s*\(/u, command, 'a Python file write'],
+  ];
+  return writes.find(([pattern, text]) => pattern.test(text))?.[2];
+}
+
+/** The command text of run_command arguments as the model sent them (JSON), or '' when they do not parse. */
+export function commandText(argumentsJson: string): string {
+  try { const parsed: unknown = JSON.parse(argumentsJson); return typeof parsed === 'object' && parsed !== null && typeof (parsed as { command?: unknown }).command === 'string' ? (parsed as { command: string }).command : ''; }
+  catch { return ''; }
+}
+
+/** The refusal for a command that fileWriteCommand flags. */
+export function fileWriteRefusal(command: string): string | undefined {
+  const found = fileWriteCommand(command);
+  return found ? `This command writes a file directly (${found}), which would skip the user's review and Undo, so Forge refused it without asking. Change existing files with propose_edit (insert_line adds lines without matching text) and create new ones with write_file. Command output is returned to you, so it never needs redirecting into a file.` : undefined;
+}
+
 export interface CommandResult {
   exit_code: number | null;
   signal: string | null;

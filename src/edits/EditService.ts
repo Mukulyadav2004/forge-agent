@@ -210,7 +210,7 @@ export class EditService {
       const matched = replaceMatched({ source: base, oldText: options.oldText, newText: text });
       if (!matched.ok) {
         throw new Error(matched.count ? `No change staged: old_text matches ${matched.count} places in ${options.path}. Include more surrounding lines so it matches exactly once.`
-          : `No change staged: old_text was not found in ${options.path}${pending ? ' including your pending changes' : ''}. Copy the exact current text, including indentation.${matched.hint ? `\n${matched.hint}` : ''}`);
+          : `No change staged: old_text was not found in ${options.path}${pending ? ' including your pending changes' : ''}. Copy the exact current text, including indentation.${matched.hint ? `\n${matched.hint}` : ''}\nTo add lines without changing existing ones, use insert_line instead of old_text: it needs no matching, and insert_line ${readLines + 1} appends after the last line.`);
       }
       text = matched.text;
     }

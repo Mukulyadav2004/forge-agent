@@ -9,6 +9,7 @@ import { isArchitectureRequest } from '../context/projectContext';
 import type { EditService } from '../edits/EditService';
 import type { ReviewCommand } from '../edits/review';
 import { ReviewFeedback } from './ReviewFeedback';
+import { commandText, fileWriteRefusal } from '../tools/runCommand';
 import { describeApproval, StreamedToolCalls } from '../agent/approvalText';
 import type { PendingToolCall } from '../agent/approvalText';
 
@@ -447,6 +448,9 @@ ${selectedText}`;
     let commandsLeft = this.actions.commandsLeft();
     for (const item of chat.approvals) {
       if (this.approvalCalls.get(item.toolCallId)?.name !== 'run_command' || this.presetDecisions.has(item.toolCallId)) continue;
+      const argumentsJson = this.approvalCalls.get(item.toolCallId)?.arguments ?? '';
+      const writes = fileWriteRefusal(commandText(argumentsJson));
+      if (writes) { this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: this.actions.guardDeny('run_command', argumentsJson, writes) }); continue; }
       if (commandsLeft > 0) { commandsLeft--; continue; }
       const capReason = 'This request already used its command limit, so Forge did not ask the user. Do not request more commands; write your summary, saying which checks did not run or still fail.';
       this.presetDecisions.set(item.toolCallId, { status: 'deny', reason: this.actions.guardDeny('run_command', this.approvalCalls.get(item.toolCallId)?.arguments ?? '', capReason) });
