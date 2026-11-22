@@ -120,7 +120,7 @@ export class EditorBridge implements vscode.Disposable {
   /** Called once per user request (not for approvals or retries of it). */
   beginRequest(scope?: string, requestText = ''): void {
     this.budgetUsed = 0; this.editScope = scope; this.commandsRun = 0; this.awaitingReview.clear(); this.reviewed.clear(); this.options.edits.beginRequest();
-    this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
+    this.requestText = requestText; this.plan = undefined; this.changedPaths.clear(); this.presentPaths.clear(); this.guard.reset(); this.refusals.clear(); this.lastCommand = undefined;
     this.textAtStart.clear(); this.textSaved.clear(); this.problemsAtStart.clear(); this.commandResults.clear(); this.seenPaths.clear();
     this.activityEvents.fire({ kind: 'request', limit: CONTEXT_BUDGET });
   }
@@ -164,6 +164,10 @@ export class EditorBridge implements vscode.Disposable {
   private requestText = '';
   private plan: PlanItem[] | undefined;
   private readonly changedPaths = new Set<string>();
+  /** Files whose proposed change was refused because the file already holds it. */
+  private readonly presentPaths = new Set<string>();
+  /** Files that satisfy a plan requirement: changed in this request, or already holding the change. */
+  private doneFiles(): Set<string> { return new Set([...this.changedPaths, ...this.presentPaths]); }
   /** Loops, error streaks and stalls in this request (see RunGuard). */
   private readonly guard = new RunGuard();
   /** Asks the sidebar to stop the running turn; shown in the activity as a Forge refusal. */
@@ -202,7 +206,7 @@ export class EditorBridge implements vscode.Disposable {
   failingCommands(): Array<{ command: string; exitCode: number | null }> { return unresolvedFailures(this.commandResults, this.lastCommand?.command); }
   /** The checklist line; for a saved or staged file the plan does not name, a note so a wrong file is noticed early. */
   private checklistNote(path?: string): string {
-    const line = checklistLine(this.plan, this.changedPaths);
+    const line = checklistLine(this.plan, this.doneFiles());
     const clean = path?.trim().replace(/\\/gu, '/').replace(/^\.\//u, '');
     const unplanned = clean && this.plan?.length && !this.plan.some(item => item.file === clean)
       ? `\n${clean} is not a file in your plan. If it replaces a planned file, call plan_task again with this file; otherwise check that it belongs to this task.` : '';
@@ -211,7 +215,7 @@ export class EditorBridge implements vscode.Disposable {
   /** Commands this request may still run; approvals beyond it are denied without asking the user. */
   commandsLeft(): number { return Math.max(0, COMMAND_LIMITS.per_request - this.commandsRun); }
   /** Requirements of this request's plan that have no change and no stated reason. */
-  openRequirements(): PlanItem[] { return (this.plan ?? []).filter(item => itemStatus(item, this.changedPaths) === 'open'); }
+  openRequirements(): PlanItem[] { const done = this.doneFiles(); return (this.plan ?? []).filter(item => itemStatus(item, done) === 'open'); }
   private obligations: Array<{ path: string; rule: string }> = [];
   /** Per-change rules of the project instructions whose file has no change, once this request changed a file (not for Edit Selection, which stays on its selection). */
   openObligations(): Array<{ path: string; rule: string }> {
@@ -223,7 +227,7 @@ export class EditorBridge implements vscode.Disposable {
   /** When the turn ends: show the checklist and return requirements that have no change and no stated reason. */
   finishChecklist(): PlanItem[] {
     if (!this.plan?.length) return [];
-    const rows = this.plan.map(item => ({ quote: item.quote.slice(0, 300), change: item.change.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: itemStatus(item, this.changedPaths), ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) }));
+    const rows = this.plan.map(item => ({ quote: item.quote.slice(0, 300), change: item.change.slice(0, 300), file: item.file.slice(0, 400), ...(item.sibling ? { sibling: item.sibling.slice(0, 150) } : {}), status: itemStatus(item, this.doneFiles()), ...(item.skip_reason ? { note: item.skip_reason.slice(0, 300) } : {}) }));
     const last = this.lastCommand ? `last command: ${this.lastCommand.command.slice(0, 160)} → exit ${this.lastCommand.exitCode ?? 'signal'}` : undefined;
     this.activityEvents.fire({ kind: 'plan', stage: 'end', items: rows, ...(last ? { lastCommand: last } : {}) });
     return this.openRequirements();
@@ -364,7 +368,14 @@ export class EditorBridge implements vscode.Disposable {
       revision ??= current.revision;
     } else if (old_text === undefined && revision === undefined && this.unreadLines(path, current.file.text) === 0) revision = current.revision;
     const warning = this.untouchedCodeCheck(path, current.file.text, input);
-    const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined });
+    const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined }).catch((error: unknown) => {
+      // The file already holds this change (an earlier request or the user made it): its plan requirement is done, not open.
+      if (error instanceof Error && /identical to the current file|new_text is already in the file/u.test(error.message)) {
+        this.presentPaths.add(normalize(path).replace(/^\.\//u, ''));
+        throw new Error(`${error.message} The plan counts ${path} as done; do not propose it again.`, { cause: error });
+      }
+      throw error;
+    });
     const detail = old_text !== undefined ? 'replace matched text' : range ? `lines ${range.startLine}–${range.endLine}` : insert_line !== undefined ? `insert at line ${insert_line}` : 'whole file';
     return { id, combined, replaced, detail, ignored, ...(warning ? { warning } : {}) };
   }
@@ -700,7 +711,7 @@ export class EditorBridge implements vscode.Disposable {
       // From the third identical failure on, once per command: the facts and three ways on, for the model to choose.
       const stalled = failedInARow >= GUARD_LIMITS.same_failure_report && this.guard.firstReport(`fail:${command}`) ? this.progress({ command, count: failedInARow, error: signature }) : '';
       const same = stalled ? stalled : repeated ? `Same failure as the previous run of this command, so the last change did not reach the cause. Before editing the test again, compare your code with how ${siblings.length ? siblings.join(', ') : 'the existing similar code'} is defined, registered and tested, or run a small probe to see the actual state.` : '';
-      const hint = [changedByCommand, this.lingeringProblems(), missing, same].filter(Boolean).join('\n') + (this.plan ? checklistLine(this.plan, this.changedPaths) ? `\n${checklistLine(this.plan, this.changedPaths)}` : '' : '');
+      const hint = [changedByCommand, this.lingeringProblems(), missing, same].filter(Boolean).join('\n') + (this.plan ? checklistLine(this.plan, this.doneFiles()) ? `\n${checklistLine(this.plan, this.doneFiles())}` : '' : '');
       const structured = { command, cwd: where, ...result, ...(hint ? { hint } : {}), context_budget: this.budget };
       return { content: [{ type: 'text', text: `$ ${command}\n(cwd ${where}) ${ended} after ${(result.duration_ms / 1000).toFixed(1)} s${result.output_truncated ? `; output shortened from ${result.total_output_characters} characters` : ''}\n${result.output}\n${hint ? `${hint}\n` : ''}${this.budgetNote()}` }], structuredContent: structured };
     });
