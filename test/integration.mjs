@@ -649,12 +649,29 @@ test('commands that write files directly are refused, whatever the shell or lang
     "Set-Content -Path a.txt -Value 'x'": 'a PowerShell file cmdlet',
     "'x' | Out-File notes.md": 'a PowerShell file cmdlet',
     'add-content notes.md "x"': 'a PowerShell file cmdlet',
+    "node --eval \"require('fs').createWriteStream('a.log')\"": 'a Node.js file write',
+    "node -e \"require('fs').rmSync('src/a.ts')\"": 'a Node.js file write',
+    "node -e \"const fs = require('fs'); fs.promises.rm('out', { recursive: true })\"": 'a Node.js file write',
+    "python -c \"open('a.txt', mode='w')\"": 'a Python open() for writing',
+    'echo x > src\\notes.md': 'a > or >> redirect into a file',
+    "Add-Content -Path docs\\STEP-NOTES.md -Value 'x'": 'a PowerShell file cmdlet',
+    'cp src/a.ts src/b.ts': 'a file copy, move or delete',
+    'mv src/a.ts src/b.ts': 'a file copy, move or delete',
+    'rm -f src/a.ts': 'a file copy, move or delete',
+    'pnpm test && rm -rf out': 'a file copy, move or delete',
+    'copy src\\a.ts src\\b.ts': 'a file copy, move or delete',
+    'move src\\a.ts src\\b.ts': 'a file copy, move or delete',
+    'del src\\a.ts': 'a file copy, move or delete',
+    'Remove-Item src\\a.ts': 'a file copy, move or delete',
+    'Copy-Item a.txt b.txt; Get-Content b.txt': 'a file copy, move or delete',
+    'Move-Item a.txt b.txt': 'a file copy, move or delete',
   };
   for (const [command, kind] of Object.entries(writes)) assert.equal(fileWriteCommand(command), kind, command);
-  const fine = ['pnpm run compile', 'pnpm test 2>&1', 'pnpm test > /dev/null 2>&1', 'pnpm test 2>nul', 'pnpm test | tail -n 40', 'grep -n "a > b" src/main.ts',
-    'node -e "console.log([1,2].map(x => x > 1))"', "python -c \"print(open('a.txt').read())\"", "python -c \"open('a.txt', encoding='utf-8')\"", 'git log --oneline -5', 'sed -n 1,5p f', 'Get-Content a.txt', 'node --test test/integration.mjs'];
+  const fine = ['pnpm run compile', 'pnpm test 2>&1', 'pnpm test > /dev/null 2>&1', 'pnpm test 2>nul', 'pnpm test > NUL', 'pnpm test | Out-Null', 'pnpm test > $null', 'pnpm test | tail -n 40', 'grep -n "a > b" src/main.ts',
+    'node -e "console.log([1,2].map(x => x > 1))"', "node --eval \"console.log(require('fs').readFileSync('a.txt', 'utf8'))\"", "python -c \"print(open('a.txt').read())\"", "python -c \"open('a.txt', encoding='utf-8')\"", 'git log --oneline -5', 'sed -n 1,5p f', 'Get-Content a.txt', 'node --test test/integration.mjs',
+    'pnpm run test:edits', 'npm test', 'cargo build', 'python -m pytest -q', 'go test ./...', 'grep -rn "rm -rf" scripts', 'echo "cp a b"', 'ls -la src', 'dir src', 'git diff --stat', 'npx tsc --noEmit', 'pnpm run format:check', 'cat package.json | grep "\\"move\\""'];
   for (const command of fine) assert.equal(fileWriteCommand(command), undefined, command);
-  assert.match(fileWriteRefusal('echo x > a.md'), /^This command writes a file directly \(a > or >> redirect into a file\).*propose_edit.*write_file/u);
+  assert.equal(fileWriteRefusal('echo x > a.md'), 'This command would change files without review. Use propose_edit or write_file so the user can review the diff. (Found: a > or >> redirect into a file.)');
   assert.equal(fileWriteRefusal('pnpm test'), undefined);
   assert.equal(commandText(JSON.stringify({ command: 'echo x > a', reason: 'r' })), 'echo x > a');
   assert.equal(commandText('{"command": tru'), '', 'Arguments still streaming or broken parse to no command.');
