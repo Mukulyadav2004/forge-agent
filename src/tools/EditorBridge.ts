@@ -672,9 +672,10 @@ export class EditorBridge implements vscode.Disposable {
       }
       if (!output.length) throw new Error('This line exceeds the read budget. Inspect another range or file.');
       const actualEnd = start_line + output.length - 1;
-      // The same lines at the same content are already in this request's conversation. Asking again right after the note
-      // returns them, so a model whose context lost the earlier result (compaction) is never stuck.
-      const readKey = this.coverageKey(path, file.text);
+      // The same lines, with the file untouched since (same text and editor version: an apply then an undo restores the
+      // text but not the version), are already in this request's conversation. Asking again right after the note returns
+      // them, so a model whose context lost the earlier result (compaction) is never stuck.
+      const readKey = `${this.coverageKey(path, file.text)}\0${file.version}`;
       const repeat = `${readKey}\0${start_line}-${actualEnd}`;
       if ((this.requestReads.get(readKey) ?? []).some(([from, to]) => from <= start_line && actualEnd <= to) && !this.rereadNoted.has(repeat)) {
         this.rereadNoted.add(repeat);
@@ -688,7 +689,7 @@ export class EditorBridge implements vscode.Disposable {
       this.budgetUsed += text.length + outline.length;
       const key = this.coverageKey(path, file.text);
       this.readCoverage.set(key, [...(this.readCoverage.get(key) ?? []), [start_line, actualEnd]]);
-      this.requestReads.set(key, [...(this.requestReads.get(key) ?? []), [start_line, actualEnd]]);
+      this.requestReads.set(readKey, [...(this.requestReads.get(readKey) ?? []), [start_line, actualEnd]]);
       this.markSeen(path);
       this.activityEvents.fire({ kind: 'open', used: this.budgetUsed, path, startLine: start_line, endLine: actualEnd, ...(reason ? { reason } : {}) });
       // TrueForge prefers structured MCP results, so the source must be present there too.

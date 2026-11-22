@@ -209,8 +209,9 @@ export class EditService {
       // line ignoring trailing whitespace; it must still match exactly once. Applied to the in-memory proposal, never to disk.
       const matched = replaceMatched({ source: base, oldText: options.oldText, newText: text });
       if (!matched.ok) {
-        throw new Error(matched.count ? `No change staged: old_text matches ${matched.count} places in ${options.path}. Include more surrounding lines so it matches exactly once.`
-          : `No change staged: old_text was not found in ${options.path}${pending ? ' including your pending changes' : ''}. Copy the exact current text, including indentation.${matched.hint ? `\n${matched.hint}` : ''}\nTo add lines without changing existing ones, use insert_line instead of old_text: it needs no matching, and insert_line ${readLines + 1} appends after the last line.`);
+        const modes = `To add lines, use insert_line (line count + 1, here ${readLines + 1}, appends) instead of matching text; to replace a range you have read, use the line range mode (start_line and end_line).`;
+        throw new Error(matched.count ? `No change staged: old_text matches ${matched.count} places in ${options.path}. Include more surrounding lines so it matches exactly once.\n${modes}`
+          : `No change staged: old_text was not found in ${options.path}${pending ? ' including your pending changes' : ''}. Copy the exact current text, including indentation.${matched.hint ? `\n${matched.hint}` : ''}\n${modes}`);
       }
       text = matched.text;
     }

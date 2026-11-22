@@ -75,6 +75,10 @@ export async function checkEditorTransactions(options: { client: Client; frame: 
   assert.deepEqual(afterRead.activity.filter(entry => entry.reason === 'Find the separator line').map(entry => [entry.kind, entry.query, entry.files]), [['search', 'separator', ['example.txt']]]);
   assert.ok(afterRead.activity.some(entry => entry.kind === 'open' && entry.path === 'example.txt' && entry.startLine === 2 && entry.endLine === 3 && entry.foundBy === 'separator'));
   assert.equal(afterRead.inspectedFiles.some(file => file.path === 'example.txt' && file.startLine === 3 && file.endLine === 3), false, 'Search hits must not be listed as opened files.');
+  const repeated = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt', start_line: 2, end_line: 3 } });
+  assert.equal((repeated.structuredContent as { unchanged?: boolean }).unchanged, true, `Lines just read at the same content get a note, not the text again: ${JSON.stringify(repeated.content)}`);
+  const askedAgain = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt', start_line: 2, end_line: 3 } });
+  assert.equal((askedAgain.structuredContent as { text?: string }).text, '2:     one\n3: separator', 'Asking again after the note returns the lines.');
   const combinedRead = await client.callTool({ name: 'read_file', arguments: { path: 'example.txt' } });
   const base_revision = (combinedRead.structuredContent as { base_revision: string }).base_revision;
   const propose = async (extra: Record<string, unknown>) => (await client.callTool({ name: 'propose_edit', arguments: { path: 'example.txt', base_revision, explanation: 'MCP combine check', ...extra } })).structuredContent as { proposal_id: string; combined: boolean };

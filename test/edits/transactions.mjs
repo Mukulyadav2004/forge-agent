@@ -428,8 +428,9 @@ test('a staged old_text edit tolerates trailing spaces, keeps CRLF, and a miss r
   await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: 'def beta():\n    return "$2"', text: 'def beta():\n    return 3', explanation: 'Wrong old text' }),
     /old_text was not found in w\.py\. Copy the exact current text, including indentation\.\nThe closest lines in the file:\n4: def beta\(\):/u);
   await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: 'def gone():\n    pass', text: 'def alpha():\n    return 2\n', explanation: 'Already applied' }), /may already be applied/u);
-  await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: 'a line copied wrongly', text: 'a line copied wrongly\nnew line', explanation: 'Append' }),
-    /use insert_line instead of old_text: it needs no matching, and insert_line 6 appends after the last line\./u, 'A miss points at insert_line for adding lines, with the line that appends.');
+  const modes = /To add lines, use insert_line \(line count \+ 1, here 6, appends\) instead of matching text; to replace a range you have read, use the line range mode \(start_line and end_line\)\./u;
+  await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: 'a line copied wrongly', text: 'a replacement', explanation: 'Replace' }), modes, 'A miss names insert_line and the line range mode.');
+  await assert.rejects(service.stageEdit({ path: 'w.py', revision: again.revision, oldText: '    return', text: '    return 0', explanation: 'Ambiguous' }), modes, 'An ambiguous match names them too.');
 });
 
 // File creation (ported with the team's tests from the opencode-aligned branch).
