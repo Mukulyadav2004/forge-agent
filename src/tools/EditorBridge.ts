@@ -371,7 +371,7 @@ export class EditorBridge implements vscode.Disposable {
     const { id, combined, replaced } = await this.options.edits.stageEdit({ path, revision, text: new_text, explanation, range, oldText: old_text, insertLine: old_text === undefined ? insert_line : undefined }).catch((error: unknown) => {
       // The file already holds this change (an earlier request or the user made it): its plan requirement is done, not open.
       if (error instanceof Error && /identical to the current file|new_text is already in the file/u.test(error.message)) {
-        this.presentPaths.add(normalize(path).replace(/^\.\//u, ''));
+        this.presentPaths.add(path.trim().replace(/\\/gu, '/').replace(/^\.\//u, ''));
         throw new Error(`${error.message} The plan counts ${path} as done; do not propose it again.`, { cause: error });
       }
       throw error;
