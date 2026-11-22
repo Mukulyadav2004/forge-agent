@@ -47,6 +47,7 @@ export function activate(context: vscode.ExtensionContext): void {
     beginRequest: (scope, requestText) => bridge.beginRequest(scope, requestText),
     finishChecklist: () => bridge.finishChecklist(),
     openRequirements: () => bridge.openRequirements(),
+    openObligations: () => bridge.openObligations(),
     lastCommandResult: () => bridge.lastCommandResult(),
     failingCommands: () => bridge.failingCommands(),
     commandsLeft: () => bridge.commandsLeft(),

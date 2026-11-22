@@ -9,7 +9,10 @@ export const PLAN_LIMITS = { max_items: 12, quote_characters: 300, max_quote_sha
 /** Common words that carry no requirement; a requirement word is a longer word not in this list. */
 const STOPWORDS = new Set(['that', 'this', 'with', 'from', 'into', 'must', 'should', 'would', 'could', 'have', 'also', 'which', 'their', 'them',
   'then', 'than', 'each', 'when', 'will', 'your', 'what', 'where', 'there', 'these', 'those', 'make', 'sure', 'please', 'other', 'like', 'some',
-  'only', 'very', 'such', 'more', 'most', 'just', 'does', 'been', 'being', 'were', 'they', 'well', 'onto', 'over', 'under', 'about']);
+  'only', 'very', 'such', 'more', 'most', 'just', 'does', 'been', 'being', 'were', 'they', 'well', 'onto', 'over', 'under', 'about',
+  // Words that say a change is wanted, not what it is ("change ... to implement this feature").
+  'want', 'wants', 'need', 'needs', 'able', 'change', 'changes', 'changed', 'changing', 'implement', 'implements', 'implemented',
+  'implementing', 'implementation', 'feature', 'features', 'thing', 'things', 'something', 'currently', 'actually', 'really', 'maybe', 'instead']);
 
 /** The user's words as shown back in a message: line breaks in the request become spaces, so a quote copied from it matches. */
 const oneLine = (text: string) => text.replace(/\s+/gu, ' ').trim();
@@ -23,9 +26,10 @@ const wordKey = (text: string) => ` ${(normalize(text).match(/[\p{L}\p{N}_]+/gu)
 /**
  * The plan must cover the user's own words: each quote is part of the request (word for word, punctuation aside), no
  * quote takes over most of it, and every requirement word of the request appears in some quote. What is missing is
- * named as words, with the sentence they are in, so the model can add a requirement for that part.
+ * named as words, with the sentence they are in, so the model can add a requirement for that part. Words in `ignored`
+ * (the workspace folder names, which a request uses to say where, not what) need no quote.
  */
-export function checkPlanCoverage(request: string, items: PlanItem[]): { ok: true } | { ok: false; message: string } {
+export function checkPlanCoverage(request: string, items: PlanItem[], ignored: Iterable<string> = []): { ok: true } | { ok: false; message: string } {
   const text = normalize(request);
   if (!text) return { ok: true };
   const requestKey = wordKey(request);
@@ -37,14 +41,14 @@ export function checkPlanCoverage(request: string, items: PlanItem[]): { ok: tru
       return { ok: false, message: 'Split the request into one requirement per thing it asks for (for example the feature, its test and its documentation), each quoting the user\'s words for that part.' };
     }
   }
-  const covered = new Set(items.flatMap(item => words(item.quote)));
+  const covered = new Set([...items.flatMap(item => words(item.quote)), ...[...ignored].flatMap(name => [...words(name), ...words(name.replace(/[-_.]+/gu, ' '))])]);
   const missing = new Set(words(request).filter(word => !covered.has(word)));
   if (!missing.size) return { ok: true };
   const parts = clauses(request).flatMap(part => {
     const named = [...new Set((oneLine(part).match(/[\p{L}\p{N}_-]{4,}/gu) ?? []).filter(word => missing.has(word.toLowerCase())))];
     return named.length ? [`${named.join(', ')} (in: "${oneLine(part).slice(0, 200)}")`] : [];
   });
-  return { ok: false, message: `Your plan does not yet cover these words of the request: ${parts.join('; ')}. Add a requirement for that part, quoting the user's words, with the file you will change (or a skip_reason if nothing needs to change).` };
+  return { ok: false, message: `Your plan does not yet cover these words of the request: ${parts.join('; ')}. Add those words to the quote of the requirement that does that part, or add a requirement quoting them with the file you will change (or a skip_reason if nothing needs to change). This check reads only your plan: call plan_task again without searching or reading more.` };
 }
 
 const cleanPath = (path: string) => path.trim().replace(/\\/gu, '/').replace(/^\.\//u, '');
@@ -52,6 +56,21 @@ const cleanPath = (path: string) => path.trim().replace(/\\/gu, '/').replace(/^\
 export function itemStatus(item: PlanItem, changed: ReadonlySet<string>): PlanStatus {
   if (item.skip_reason?.trim()) return 'skipped';
   return changed.has(cleanPath(item.file)) ? 'changed' : 'open';
+}
+
+/**
+ * Rules in AGENTS.md or CLAUDE.md that every change must follow and that name a file to update, such as "After each step,
+ * add two lines to docs/STEP-NOTES.md". A rule is a list item or paragraph; its wrapped lines are joined. Only rules
+ * that say they apply to each change are taken, so a file merely mentioned is not an obligation.
+ */
+export function changeObligations(instructions: string): Array<{ path: string; rule: string }> {
+  const rules = instructions.split(/\n(?=\s*(?:[-*+]|\d+[.)])\s)|\n\s*\n/u).map(part => oneLine(part.replace(/^\s*(?:[-*+]|\d+[.)])\s+/u, '')));
+  const perChange = /\b(?:after|for|with|in)\s+(?:each|every)\s+(?:step|change|task|edit|commit|feature|fix|pr|pull request)\b|\bevery\s+(?:change|step|edit|commit)\b|\balways\s+(?:update|add|record|append)\b/iu;
+  const seen = new Set<string>();
+  return rules.filter(rule => perChange.test(rule)).flatMap(rule => (rule.match(/(?<![\w/.-])[\w./-]*[\w-]\.(?:md|mdx|txt|rst|adoc)\b/giu) ?? [])
+    .map(path => cleanPath(path))
+    .filter(path => !/^(?:.*\/)?(?:AGENTS|CLAUDE)\.md$/iu.test(path) && !seen.has(path) && Boolean(seen.add(path)))
+    .map(path => ({ path, rule: rule.slice(0, 200) })));
 }
 
 /** One line for tool results while the agent works; empty when there is no plan. */

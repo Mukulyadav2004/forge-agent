@@ -557,6 +557,14 @@ test('plan_task covers the user\'s words, the checklist tracks changed files, an
   assert.match(checkPlanCoverage(request, [{ ...docs, quote: 'write docs in docs/cli.rst' }, feature, help, test]).message, /not in the user's request/u, 'Quotes must be the user\'s words.');
   assert.match(checkPlanCoverage(request, [{ ...feature, quote: request }]).message, /^Split the request/u, 'One requirement for the whole request is refused.');
   assert.deepEqual(checkPlanCoverage('', [docs]), { ok: true }, 'Without request text there is nothing to compare.');
+  // The live refusal: "change the settings in forge-cline to implement this feature" made the model cover a folder name and filler.
+  const enter = 'I have to do cmd + enter to send the message, this should be only enter; change the settings in forge-cline to implement this feature';
+  const keys = { quote: 'I have to do cmd + enter to send the message, this should be only enter', change: 'Send on Enter', file: 'src/webview/main.ts' };
+  const vague = checkPlanCoverage(enter, [keys], ['forge-cline']);
+  assert.ok(!vague.ok && /request: settings \(in:/u.test(vague.message), 'Only "settings" is still a requirement word: the workspace folder name says where, and change, implement and feature are filler.');
+  assert.match(vague.message, /without searching or reading more/u, 'A refusal says the plan, not more exploration, is what is missing.');
+  assert.match(checkPlanCoverage(enter, [keys]).message, /request: settings, forge-cline \(in:/u, 'Without the folder names, the folder is a requirement word.');
+  assert.deepEqual(checkPlanCoverage(enter, [keys, { quote: 'change the settings', change: 'Keybinding is the setting', file: 'src/webview/main.ts' }], ['forge-cline']), { ok: true });
   const plan = [feature, help, test, docs, { quote: 'covered by a test', change: 'none', file: 'tests/x.py', skip_reason: 'test_cli.py already covers it' }];
   const changed = new Set(['src/flask/cli.py', 'tests/test_cli.py']);
   assert.equal(itemStatus(docs, changed), 'open');
@@ -601,6 +609,25 @@ test('the run guard follows Cline: a note at 3 identical calls, a stop at 5, a s
   assert.deepEqual([guard.firstReport('fail:pytest'), guard.firstReport('fail:pytest')], [true, false], 'Each stall is reported once.');
   const report = progressReport({ failing: { command: 'pytest tests/test_cli.py', count: 3, error: 'E   AssertionError: assert 1 == 0' }, edits: guard.topEdits(), open: [{ quote: 'be documented alongside the other built-in commands', change: '', file: 'docs/cli.rst' }], commandsLeft: 6, siblings: ['run_command'] });
   assert.match(report, /^Progress check:\n- pytest tests\/test_cli\.py has failed 3 times in a row with the same error: E {3}AssertionError: assert 1 == 0\n- Edits since the plan: src\/cli_config\.py ×6\n- Still open: "be documented alongside the other built-in commands"\n- Commands left in this request: 6\nChoose one and say which: \(a\) step back and change approach, comparing with how run_command is defined, registered and tested; \(b\) ask the user with ask_user_question/u);
+});
+
+test('per-change rules of AGENTS.md that name a file become end-of-turn obligations; files only mentioned do not', async () => {
+  const { changeObligations } = await import('../out/context/plan.js');
+  const agents = [
+    '# Forge Agent',
+    'See README.md for setup and docs/ARCHITECTURE.md for the design.',
+    '',
+    '9. Keep the diff small.',
+    '10. After each step, add two lines to docs/STEP-NOTES.md: what changed',
+    '    and why.',
+    '- Always update CHANGELOG.md with user-visible changes.',
+    '- Every change to AGENTS.md needs review.',
+  ].join('\n');
+  assert.deepEqual(changeObligations(agents), [
+    { path: 'docs/STEP-NOTES.md', rule: 'After each step, add two lines to docs/STEP-NOTES.md: what changed and why.' },
+    { path: 'CHANGELOG.md', rule: 'Always update CHANGELOG.md with user-visible changes.' },
+  ], 'A wrapped rule is joined; the instruction file itself and files merely mentioned are not obligations.');
+  assert.deepEqual(changeObligations(''), []);
 });
 
 test('placeholder comments for left-out code are found in any comment style, but not real code or lines already in the file', async () => {

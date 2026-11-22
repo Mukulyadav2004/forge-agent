@@ -17,7 +17,7 @@ import type { EditService } from '../edits/EditService';
 import { MAX_EDIT_CHARACTERS, replaceMatched } from '../edits/EditService';
 import { savedExcerpt } from '../edits/lineChanges';
 import { describeProblems, newProblems } from '../edits/diagnostics';
-import { checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, placeholderLine, PLAN_LIMITS, progressReport, RunGuard, unresolvedFailures } from '../context/plan';
+import { changeObligations, checkPlanCoverage, checklistLine, failureSignature, GUARD_LIMITS, itemStatus, placeholderLine, PLAN_LIMITS, progressReport, RunGuard, unresolvedFailures } from '../context/plan';
 import type { PlanItem } from '../context/plan';
 import type { Problem } from '../edits/diagnostics';
 import type { WorkspaceFiles } from '../workspace/WorkspaceFiles';
@@ -212,6 +212,12 @@ export class EditorBridge implements vscode.Disposable {
   commandsLeft(): number { return Math.max(0, COMMAND_LIMITS.per_request - this.commandsRun); }
   /** Requirements of this request's plan that have no change and no stated reason. */
   openRequirements(): PlanItem[] { return (this.plan ?? []).filter(item => itemStatus(item, this.changedPaths) === 'open'); }
+  private obligations: Array<{ path: string; rule: string }> = [];
+  /** Per-change rules of the project instructions whose file has no change, once this request changed a file (not for Edit Selection, which stays on its selection). */
+  openObligations(): Array<{ path: string; rule: string }> {
+    if (this.editScope !== undefined || !this.changedPaths.size) return [];
+    return this.obligations.filter(item => !this.changedPaths.has(item.path));
+  }
   /** The last command and its exit code, for the end-of-turn check. */
   lastCommandResult(): { command: string; exitCode: number | null; savedAfter?: string } | undefined { return this.lastCommand; }
   /** When the turn ends: show the checklist and return requirements that have no change and no stated reason. */
@@ -523,6 +529,7 @@ export class EditorBridge implements vscode.Disposable {
     if (!vscode.workspace.isTrusted) return '';
     const loaded = await loadWorkspaceInstructions(async path => (await this.options.files.open(path)).getText());
     if (!loaded.text || !loaded.file) return '';
+    this.obligations = changeObligations(loaded.text);
     this.budgetUsed += loaded.text.length;
     this.activityEvents.fire({ kind: 'context', used: this.budgetUsed, path: loaded.file.path, startLine: 1, endLine: loaded.file.lines });
     return loaded.text;
@@ -722,7 +729,7 @@ export class EditorBridge implements vscode.Disposable {
         const message = `This is an inline edit of the selected code in ${this.editScope}; no plan is needed. Propose the change to the selection now with propose_edit.`;
         return { content: [{ type: 'text', text: message }], structuredContent: { status: 'not_needed', message } };
       }
-      const coverage = checkPlanCoverage(this.requestText, requirements);
+      const coverage = checkPlanCoverage(this.requestText, requirements, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.name));
       if (!coverage.ok) throw new Error(coverage.message);
       const items = requirements.map(item => ({ ...item, file: item.file.trim().replace(/\\/gu, '/').replace(/^\.\//u, '') }));
       // A plan comes from evidence: each existing file it names must have been read, found by a search or mentioned in this

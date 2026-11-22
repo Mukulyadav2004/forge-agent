@@ -90,6 +90,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
       beginRequest: (scope?: string, requestText?: string) => void;
       finishChecklist: () => Array<{ quote: string; file: string }>;
       openRequirements: () => Array<{ quote: string; file: string }>;
+      openObligations: () => Array<{ path: string; rule: string }>;
       lastCommandResult: () => { command: string; exitCode: number | null; savedAfter?: string } | undefined;
       failingCommands: () => Array<{ command: string; exitCode: number | null }>;
       commandsLeft: () => number;
@@ -515,13 +516,15 @@ ${selectedText}`;
       this.kick();
     }
   }
-  /** Why the end-of-turn check is needed: open requirements of the plan, or a last command that failed. */
+  /** Why the end-of-turn check is needed: open requirements of the plan, per-change rules of the project instructions not yet followed, or a last command that failed. */
   private checkReasons(): string[] {
     const open = this.actions.openRequirements();
+    const obligations = this.actions.openObligations();
     const last = this.actions.lastCommandResult();
     const failing = this.actions.failingCommands();
     return [
       open.length ? `These requirements from your plan have no change yet: ${open.map(item => `"${item.quote}" (planned: ${item.file})`).join('; ')}. Do them now, or call plan_task again with a skip_reason that says plainly why not.` : '',
+      obligations.length ? `The project instructions ask this for every change, and this request has not changed ${obligations.map(item => item.path).join(', ')}: ${obligations.slice(0, 3).map(item => `"${item.rule}"`).join('; ')}. Do it now, or say in your summary why it does not apply.` : '',
       failing.length ? `${failing.length === 1 ? 'This command' : 'These commands'} failed and ${failing.length === 1 ? 'was' : 'were'} not run again successfully: ${failing.slice(0, 5).map(item => `${item.command.slice(0, 160)} (exit ${item.exitCode ?? 'signal'})`).join('; ')}. A different or narrower command passing does not show ${failing.length === 1 ? 'it passes' : 'they pass'}. Fix the cause and run ${failing.length === 1 ? 'it' : 'them'} again, or say plainly in your summary which still fail.` : '',
       last?.exitCode === 0 && last.savedAfter ? `${last.savedAfter} was saved after the last passing command (${last.command.slice(0, 160)}), so that run did not test it. Run the tests again before you summarize.` : '',
     ].filter(Boolean);
