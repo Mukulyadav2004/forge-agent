@@ -206,3 +206,5 @@
 2026-11-20 - Why: a live Task A run planned a test file the inline edit may not change, was refused, then was sent back by the end-of-turn check for that step; a one-function edit needs no plan.
 - README: clearer clean-clone setup (corepack, code command, opening a folder), the three fixed tasks step by step, and troubleshooting.
 - Why: judges will run the project themselves; the old quick start stopped at an empty window and never covered Tasks B and C.
+- README trimmed by about 40%: tasks and troubleshooting fold into collapsible sections, feature list cut to five lines, agent-definition notes merged into How it works.
+- Why: the long version buried the quick start; a judge should see setup at a glance and expand the task steps only when needed.
