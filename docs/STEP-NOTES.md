@@ -204,3 +204,5 @@
 2026-11-20 - Why: Edit Selection sends the instruction, one line break, then the selected code; the check treated the code as part of the request and refused the Task A plan four times, asking for steps like "def get_debug_flag".
 2026-11-20 - Changed: in Edit Selection, plan_task records no plan and tells the agent to edit the selection directly, so no checklist or end-of-turn plan check runs for an inline edit (EditorBridge.ts).
 2026-11-20 - Why: a live Task A run planned a test file the inline edit may not change, was refused, then was sent back by the end-of-turn check for that step; a one-function edit needs no plan.
+- README: clearer clean-clone setup (corepack, code command, opening a folder), the three fixed tasks step by step, and troubleshooting.
+- Why: judges will run the project themselves; the old quick start stopped at an empty window and never covered Tasks B and C.

@@ -32,20 +32,90 @@ TrueForge runs the agent loop and is the only thing that talks to the model. The
 
 ## Quick start
 
-You need Node.js 22+, pnpm, VS Code with the `code` command, and a model key. A free Google Gemini key works.
+Tested on macOS. You need:
+
+- **Node.js 22+** and **pnpm**: run `corepack enable` once to get the pinned pnpm version.
+- **VS Code** with the `code` command on your PATH. To add it, open the Command Palette in VS Code and run *Shell Command: Install 'code' command in PATH*.
+- **Python 3**, only for the fixed tasks below.
+- **A model key.** A free Google Gemini key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey) works.
 
 ```sh
 git clone https://github.com/Mukulyadav2004/forge-agent.git && cd forge-agent
 pnpm install --frozen-lockfile
 
-pnpm run trueforge:local                  # terminal 1: TrueForge 0.185.1 on http://127.0.0.1:8790
+# Terminal 1: start TrueForge 0.185.1 on http://127.0.0.1:8790 and leave it running
+pnpm run trueforge:local
 
-export GEMINI_API_KEY=...                 # terminal 2: your key stays in your shell and in TrueForge
+# Terminal 2, in the forge-agent folder:
+export GEMINI_API_KEY=your-key            # stays in this shell and in TrueForge, never in the repo
 pnpm run trueforge:add-provider examples/model-provider.gemini.json
-pnpm run dev                              # opens VS Code with the extension loaded
+pnpm run dev                              # opens a VS Code window with the extension loaded
 ```
 
-In the new window, open the Forge Agent icon in the activity bar, click **Select model**, and ask something.
+`trueforge:add-provider` prints the models it added, for example `google-gemini/gemini-3-1-flash-lite`. On Windows PowerShell, set the key with `$env:GEMINI_API_KEY="your-key"`.
+
+`pnpm run dev` opens an **empty** VS Code window titled *Extension Development Host*. In that window:
+
+1. Use **File → Open Folder** to open a project, and click **Trust** when asked. The fixed tasks below use a prepared Flask checkout.
+2. Click the Forge Agent icon in the activity bar, then **Select model**, and choose `google-gemini/gemini-3-1-flash-lite`.
+3. Ask something in the chat box, or select code and press **⌘⌥F** (Ctrl+Alt+F on Windows/Linux).
+
+To use another Gemini model, add it to the `models` list in `examples/model-provider.gemini.json` and run `add-provider` again. For any OpenAI-compatible endpoint, copy that file with `"type": "custom"` and the endpoint's `base_url`; the model must support tool calling.
+
+## Try the three fixed tasks
+
+The tasks use Flask 3.1.3 (commit `22d92470`), cloned into the ignored folder `out-test/task-a/flask`. Run these in terminal 2, from the `forge-agent` folder:
+
+```sh
+pnpm run task:a:prepare                   # clone Flask 3.1.3 and check the untouched behaviour
+cd out-test/task-a/flask
+python3 -m venv .venv && .venv/bin/pip install -e . pytest python-dotenv asgiref
+cd ../../..
+pnpm run task:a:open                      # opens Flask in the Extension Development Host
+```
+
+The `.venv` inside Flask lets the agent run `.venv/bin/pytest` when it tests its own change. In the new window, open a terminal, run `source .venv/bin/activate`, then click **Select model**.
+
+**A. Inline edit.**
+1. In `src/flask/helpers.py`, select the whole `get_debug_flag` function.
+2. Press **⌘⌥F**. Don't type into the chat box: that runs agent mode.
+3. Enter: `Treat the values 'off' and 'n' as false as well, case-insensitively, and update the docstring to list every value that is treated as false.`
+4. Accept or reject each hunk, then check:
+
+```sh
+FLASK_DEBUG=off python -c "from flask.helpers import get_debug_flag; print(get_debug_flag())"   # False
+```
+
+**B. Agent mode.** Click **New Task** and send this in the chat box, with no files named:
+
+```text
+Add a new built-in CLI command flask config that prints the loaded application's configuration as JSON, masking the values of any key containing SECRET, PASSWORD, TOKEN or KEY as "***". It must appear in flask --help, be covered by a test, and be documented alongside the other built-in commands.
+```
+
+Review each edit and Approve, and approve the agent's test command. Then check:
+
+```sh
+python -m pytest tests/test_cli.py -q
+git diff --stat                           # at least 3 files
+mkdir -p /tmp/flask-demo && printf 'from flask import Flask\napp = Flask(__name__)\napp.config["SECRET_KEY"] = "s3cret"\napp.config["GREETING"] = "hello"\n' > /tmp/flask-demo/hello.py
+cd /tmp/flask-demo && flask --app hello --help && flask --app hello config   # SECRET_KEY shows "***"
+```
+
+**C. Resilience.** First click **Undo this request** in Review changes, or run `git checkout -- .` in the Flask folder. Then:
+
+```sh
+pnpm run trueforge:add-provider examples/model-provider.task-c-invalid-key.json   # a deliberately fake key
+```
+
+In VS Code Settings, set **Forge Agent: Model** to `taskc-invalid-key/gemini-3-1-flash-lite` and **Forge Agent: Fallback Model** to `google-gemini/gemini-flash-lite-latest`. Click **New Task** and repeat Task A. The chat shows the failure, then continues on the fallback model. Run `git status` before you approve: no files have changed. Afterwards, clear **Fallback Model** and select your normal model again.
+
+## Troubleshooting
+
+- **`Port 8790 is already in use`:** an older TrueForge is still running. Find its process ID with `lsof -nP -iTCP:8790 -sTCP:LISTEN`, then run `kill <PID>`, or stop it with Ctrl+C in its terminal.
+- **No models in Select model:** TrueForge was restarted or the key wasn't set. Run `export GEMINI_API_KEY=...` and `add-provider` again.
+- **`Could not launch VS Code`:** the `code` command isn't on your PATH (see above).
+- **Forge commands are missing, or an old behaviour persists:** close the Extension Development Host and run `pnpm run dev` again. A normal VS Code window doesn't load the development extension.
+- **`git status` in Flask shows `.venv/`:** that's the test environment you created; it isn't a change by the agent.
 
 ## Agent definition and models
 
