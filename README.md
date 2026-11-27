@@ -34,7 +34,7 @@ Tested on macOS. You need Node.js 22+, Python 3 (for the tasks), VS Code with th
 
 ```sh
 git clone https://github.com/Mukulyadav2004/forge-agent.git && cd forge-agent
-corepack enable && pnpm install --frozen-lockfile
+pnpm install --frozen-lockfile
 
 pnpm run trueforge:local       # terminal 1: TrueForge on http://127.0.0.1:8790, leave it running
 
